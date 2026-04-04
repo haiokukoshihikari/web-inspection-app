@@ -7,8 +7,11 @@ export default function CameraPage() {
   const router = useRouter();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
   const [error, setError] = useState("");
   const [isCameraReady, setIsCameraReady] = useState(false);
+  const [isPickingImage, setIsPickingImage] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -125,11 +128,76 @@ export default function CameraPage() {
     router.push("/review");
   };
 
+  const handlePickImageClick = () => {
+    if (isPickingImage) return;
+    setError("");
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsPickingImage(true);
+
+    try {
+      const reader = new FileReader();
+
+      reader.onload = () => {
+        const result = reader.result;
+        if (typeof result !== "string" || !result.startsWith("data:image/")) {
+          setError("画像の読み込みに失敗しました。");
+          setIsPickingImage(false);
+          return;
+        }
+
+        try {
+          sessionStorage.setItem("capturedImage", result);
+        } catch (err) {
+          console.error("sessionStorage save error:", err);
+          setError("画像の保存に失敗しました。");
+          setIsPickingImage(false);
+          return;
+        }
+
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach((track) => track.stop());
+          streamRef.current = null;
+        }
+
+        router.push("/review");
+      };
+
+      reader.onerror = () => {
+        setError("画像の読み込みに失敗しました。");
+        setIsPickingImage(false);
+      };
+
+      reader.readAsDataURL(file);
+    } catch (err) {
+      console.error(err);
+      setError("画像の選択に失敗しました。");
+      setIsPickingImage(false);
+    } finally {
+      e.target.value = "";
+    }
+  };
+
   return (
     <main className="min-h-screen bg-black text-white flex flex-col">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        onChange={handleFileChange}
+        className="hidden"
+      />
+
       <div className="relative flex-1 bg-black overflow-hidden flex items-center justify-center">
         {error && (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 text-xs bg-red-500/20 text-red-200 px-3 py-2 rounded-full border border-red-300/20">
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 text-xs bg-red-500/20 text-red-200 px-3 py-2 rounded-full border border-red-300/20 max-w-[90%] text-center">
             {error}
           </div>
         )}
@@ -152,13 +220,27 @@ export default function CameraPage() {
       <div className="bg-black px-5 pt-3 pb-6">
         <div className="flex items-center justify-between">
           <button
-            onClick={() => router.push("/settings")}
-            className="w-11 h-11 rounded-full border border-white/15 bg-white/5 flex flex-col items-center justify-center gap-1"
-            aria-label="設定"
+            onClick={handlePickImageClick}
+            disabled={isPickingImage}
+            className={`w-11 h-11 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center ${
+              isPickingImage ? "opacity-60" : ""
+            }`}
+            aria-label="写真を選ぶ"
+            title="写真を選ぶ"
           >
-            <span className="block w-4 h-0.5 bg-white rounded" />
-            <span className="block w-4 h-0.5 bg-white rounded" />
-            <span className="block w-4 h-0.5 bg-white rounded" />
+            <svg
+              viewBox="0 0 24 24"
+              className="w-6 h-6 text-white"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <rect x="3" y="5" width="18" height="14" rx="2" />
+              <circle cx="8.5" cy="10" r="1.5" />
+              <path d="M21 15l-5-5L5 21" />
+            </svg>
           </button>
 
           <button
@@ -174,7 +256,29 @@ export default function CameraPage() {
             <span className="w-16 h-16 rounded-full border-[5px] border-black/80 block" />
           </button>
 
-          <div className="w-11 h-11" />
+          <button
+            onClick={() => router.push("/settings")}
+            className="w-11 h-11 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center"
+            aria-label="設定"
+            title="設定"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              className="w-6 h-6 text-white"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01A1.65 1.65 0 0 0 10.09 3H10a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="mt-3 text-center text-xs text-zinc-400">
+          左: 写真を選ぶ / 中央: 撮影 / 右: 設定
         </div>
       </div>
     </main>
