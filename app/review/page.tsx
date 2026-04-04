@@ -42,20 +42,6 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
-function drawContainRect(
-  containerW: number,
-  containerH: number,
-  imageW: number,
-  imageH: number
-) {
-  const scale = Math.min(containerW / imageW, containerH / imageH);
-  const width = imageW * scale;
-  const height = imageH * scale;
-  const left = (containerW - width) / 2;
-  const top = (containerH - height) / 2;
-  return { left, top, width, height };
-}
-
 function imageToGray(
   img: HTMLImageElement,
   targetW: number,
@@ -93,28 +79,41 @@ function canvasToGray(
   return { gray: out, width, height };
 }
 
-function sampleWindowScore(
-  scene: Float32Array,
-  sceneW: number,
-  sceneH: number,
-  sx: number,
-  sy: number,
-  tpl: Float32Array,
-  tplW: number,
-  tplH: number
-) {
-  let sum = 0;
-  let idxTpl = 0;
+function makeEdgeMap(gray: Float32Array, w: number, h: number) {
+  const out = new Float32Array(w * h);
 
-  for (let y = 0; y < tplH; y++) {
-    const row = (sy + y) * sceneW + sx;
-    for (let x = 0; x < tplW; x++) {
-      sum += Math.abs(scene[row + x] - tpl[idxTpl]);
-      idxTpl++;
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+
+      const gx =
+        -gray[(y - 1) * w + (x - 1)] +
+        gray[(y - 1) * w + (x + 1)] +
+        -2 * gray[y * w + (x - 1)] +
+        2 * gray[y * w + (x + 1)] +
+        -gray[(y + 1) * w + (x - 1)] +
+        gray[(y + 1) * w + (x + 1)];
+
+      const gy =
+        -gray[(y - 1) * w + (x - 1)] +
+        -2 * gray[(y - 1) * w + x] +
+        -gray[(y - 1) * w + (x + 1)] +
+        gray[(y + 1) * w + (x - 1)] +
+        2 * gray[(y + 1) * w + x] +
+        gray[(y + 1) * w + (x + 1)];
+
+      out[i] = Math.min(1, Math.sqrt(gx * gx + gy * gy));
     }
   }
 
-  return sum / (tplW * tplH);
+  return out;
+}
+
+function meanOfArray(arr: Float32Array) {
+  if (arr.length === 0) return 0;
+  let sum = 0;
+  for (let i = 0; i < arr.length; i++) sum += arr[i];
+  return sum / arr.length;
 }
 
 function sampleWindowStd(
@@ -127,7 +126,7 @@ function sampleWindowStd(
 ) {
   let sum = 0;
   let sumSq = 0;
-  let count = tplW * tplH;
+  const count = tplW * tplH;
 
   for (let y = 0; y < tplH; y++) {
     const row = (sy + y) * sceneW + sx;
@@ -141,6 +140,59 @@ function sampleWindowStd(
   const mean = sum / count;
   const variance = Math.max(0, sumSq / count - mean * mean);
   return Math.sqrt(variance);
+}
+
+function sampleWindowMean(
+  scene: Float32Array,
+  sceneW: number,
+  sx: number,
+  sy: number,
+  tplW: number,
+  tplH: number
+) {
+  let sum = 0;
+  const count = tplW * tplH;
+
+  for (let y = 0; y < tplH; y++) {
+    const row = (sy + y) * sceneW + sx;
+    for (let x = 0; x < tplW; x++) {
+      sum += scene[row + x];
+    }
+  }
+
+  return sum / count;
+}
+
+function sampleWindowScoreDual(
+  sceneGray: Float32Array,
+  sceneEdge: Float32Array,
+  sceneW: number,
+  sx: number,
+  sy: number,
+  tplGray: Float32Array,
+  tplEdge: Float32Array,
+  tplW: number,
+  tplH: number
+) {
+  let diffGray = 0;
+  let diffEdge = 0;
+  let idxTpl = 0;
+
+  for (let y = 0; y < tplH; y++) {
+    const row = (sy + y) * sceneW + sx;
+    for (let x = 0; x < tplW; x++) {
+      const sceneIdx = row + x;
+      diffGray += Math.abs(sceneGray[sceneIdx] - tplGray[idxTpl]);
+      diffEdge += Math.abs(sceneEdge[sceneIdx] - tplEdge[idxTpl]);
+      idxTpl++;
+    }
+  }
+
+  const count = tplW * tplH;
+  const grayScore = diffGray / count;
+  const edgeScore = diffEdge / count;
+
+  return grayScore * 0.35 + edgeScore * 0.65;
 }
 
 function iou(a: DetectionBox, b: DetectionBox) {
@@ -165,6 +217,30 @@ function iou(a: DetectionBox, b: DetectionBox) {
   const union = a.w * a.h + b.w * b.h - inter;
 
   return union > 0 ? inter / union : 0;
+}
+
+function centerDistance(a: DetectionBox, b: DetectionBox) {
+  const ax = a.x + a.w / 2;
+  const ay = a.y + a.h / 2;
+  const bx = b.x + b.w / 2;
+  const by = b.y + b.h / 2;
+  return Math.hypot(ax - bx, ay - by);
+}
+
+function mergeGlobalDetections(detections: DetectionBox[]) {
+  const sorted = [...detections].sort((a, b) => a.score - b.score);
+  const merged: DetectionBox[] = [];
+
+  for (const d of sorted) {
+    const overlaps = merged.some((m) => {
+      const near = centerDistance(m, d) < Math.max(m.w, d.w) * 0.45;
+      return iou(m, d) > 0.1 || near;
+    });
+
+    if (!overlaps) merged.push(d);
+  }
+
+  return merged;
 }
 
 export default function ReviewPage() {
@@ -306,7 +382,6 @@ export default function ReviewPage() {
         const sceneImg = await loadImage(capturedImage);
         if (cancelled) return;
 
-        // 速度優先で少し縮小
         const maxSceneW = 720;
         const scale = Math.min(1, maxSceneW / sceneImg.naturalWidth);
         const sceneW = Math.max(1, Math.round(sceneImg.naturalWidth * scale));
@@ -319,14 +394,15 @@ export default function ReviewPage() {
         if (!sceneCtx) return;
 
         sceneCtx.drawImage(sceneImg, 0, 0, sceneW, sceneH);
+
         const { gray: sceneGray } = canvasToGray(sceneCanvas);
+        const sceneEdge = makeEdgeMap(sceneGray, sceneW, sceneH);
 
         const allDetections: DetectionBox[] = [];
 
-        // 感度が高いほど拾いやすくする
         const threshold =
-          0.14 - (Math.max(0, Math.min(100, sensitivity)) / 100) * 0.04;
-        const stride = sensitivity >= 70 ? 7 : sensitivity >= 40 ? 9 : 11;
+          0.11 - (Math.max(0, Math.min(100, sensitivity)) / 100) * 0.03;
+        const stride = sensitivity >= 70 ? 8 : sensitivity >= 40 ? 10 : 12;
 
         for (const sample of visibleSamples) {
           if (!sample.thumbUrl) continue;
@@ -334,49 +410,50 @@ export default function ReviewPage() {
           const sampleImg = await loadImage(sample.thumbUrl);
           if (cancelled) return;
 
-          const baseTplH = 46;
-            const ratio =
+          const ratio =
             sample.aspectRatio && sample.aspectRatio > 0
-                ? sample.aspectRatio
-                : sampleImg.naturalWidth / sampleImg.naturalHeight || 1;
-            const baseTplW = Math.max(20, Math.round(baseTplH * ratio));
+              ? sample.aspectRatio
+              : sampleImg.naturalWidth / sampleImg.naturalHeight || 1;
 
-            const scaleList = [0.95, 1.05];
+          const baseTplH = 54;
+          const baseTplW = Math.max(24, Math.round(baseTplH * ratio));
+          const scaleList = [0.95, 1.05];
+
           const candidates: DetectionBox[] = [];
 
           for (const s of scaleList) {
-            const tplW = Math.max(10, Math.round(baseTplW * s));
-            const tplH = Math.max(10, Math.round(baseTplH * s));
+            const tplW = Math.max(14, Math.round(baseTplW * s));
+            const tplH = Math.max(14, Math.round(baseTplH * s));
 
             if (tplW >= sceneW || tplH >= sceneH) continue;
 
             const tplGray = imageToGray(sampleImg, tplW, tplH);
+            const tplEdge = makeEdgeMap(tplGray, tplW, tplH);
+
+            const tplEdgeMean = meanOfArray(tplEdge);
 
             for (let y = 0; y <= sceneH - tplH; y += stride) {
               for (let x = 0; x <= sceneW - tplW; x += stride) {
-                const score = sampleWindowScore(
-                    sceneGray,
-                    sceneW,
-                    sceneH,
-                    x,
-                    y,
-                    tplGray,
-                    tplW,
-                    tplH
-                    );
+                const std = sampleWindowStd(sceneGray, sceneW, x, y, tplW, tplH);
+                if (std < 0.10) continue;
 
-                    // 木目や平坦部の誤検知を少し減らす
-                    const std = sampleWindowStd(
-                    sceneGray,
-                    sceneW,
-                    x,
-                    y,
-                    tplW,
-                    tplH
-                    );
+                const edgeMean = sampleWindowMean(sceneEdge, sceneW, x, y, tplW, tplH);
+                if (edgeMean < tplEdgeMean * 0.55) continue;
 
-                    if (score <= threshold && std >= 0.09) {
-                    candidates.push({
+                const score = sampleWindowScoreDual(
+                  sceneGray,
+                  sceneEdge,
+                  sceneW,
+                  x,
+                  y,
+                  tplGray,
+                  tplEdge,
+                  tplW,
+                  tplH
+                );
+
+                if (score <= threshold) {
+                  candidates.push({
                     x: x / sceneW,
                     y: y / sceneH,
                     w: tplW / sceneW,
@@ -400,18 +477,26 @@ export default function ReviewPage() {
             }
           }
 
-          // スコア順 + NMS
           candidates.sort((a, b) => a.score - b.score);
           const picked: DetectionBox[] = [];
 
           for (const c of candidates) {
-            const overlaps = picked.some((p) => iou(p, c) > 0.12);
+            const overlaps = picked.some((p) => {
+              const near = centerDistance(p, c) < Math.max(p.w, c.w) * 0.45;
+              return iou(p, c) > 0.1 || near;
+            });
+
             if (!overlaps) picked.push(c);
             if (picked.length >= 2) break;
-            }
+          }
+
+          allDetections.push(...picked);
+        }
+
+        const merged = mergeGlobalDetections(allDetections);
 
         if (!cancelled) {
-          setDetections(allDetections);
+          setDetections(merged);
         }
       } catch (e) {
         console.error("detection error:", e);
