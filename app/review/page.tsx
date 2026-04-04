@@ -24,6 +24,7 @@ type DetectionBox = {
   color: string;
   sampleId: string;
   score: number;
+  support: number;
 };
 
 const DEFAULT_SAMPLES: SampleItem[] = [
@@ -228,20 +229,52 @@ function centerDistance(a: DetectionBox, b: DetectionBox) {
   return Math.hypot(ax - bx, ay - by);
 }
 
+function overlapOrNear(a: DetectionBox, b: DetectionBox) {
+  const near = centerDistance(a, b) < Math.max(a.w, b.w) * 0.5;
+  return iou(a, b) > 0.08 || near;
+}
+
+function addSupportToCandidates(candidates: DetectionBox[]) {
+  return candidates.map((c, idx) => {
+    let support = 0;
+
+    for (let i = 0; i < candidates.length; i++) {
+      if (i === idx) continue;
+      if (overlapOrNear(c, candidates[i])) support++;
+    }
+
+    return {
+      ...c,
+      support,
+    };
+  });
+}
+
 function mergeGlobalDetections(detections: DetectionBox[]) {
-  const sorted = [...detections].sort((a, b) => a.score - b.score);
+  // support が高いもの、次に score が良いものを優先
+  const sorted = [...detections].sort((a, b) => {
+    if (b.support !== a.support) return b.support - a.support;
+    return a.score - b.score;
+  });
+
   const merged: DetectionBox[] = [];
 
   for (const d of sorted) {
-    const overlaps = merged.some((m) => {
-      const near = centerDistance(m, d) < Math.max(m.w, d.w) * 0.45;
-      return iou(m, d) > 0.1 || near;
-    });
-
+    const overlaps = merged.some((m) => overlapOrNear(m, d));
     if (!overlaps) merged.push(d);
   }
 
-  return merged;
+  // 孤立誤検知をさらに抑える
+  if (merged.length <= 1) return merged;
+
+  const bestSupport = Math.max(...merged.map((m) => m.support));
+  const bestScore = Math.min(...merged.map((m) => m.score));
+
+  return merged.filter((m) => {
+    const nearBestSupport = m.support >= Math.max(0, bestSupport - 1);
+    const nearBestScore = m.score <= bestScore + 0.03;
+    return nearBestSupport || nearBestScore;
+  });
 }
 
 export default function ReviewPage() {
@@ -473,38 +506,41 @@ export default function ReviewPage() {
                     w: tplW / sceneW,
                     h: tplH / sceneH,
                     color: sample.color.includes("sky")
-                      ? "#38bdf8"
-                      : sample.color.includes("emerald")
+                        ? "#38bdf8"
+                        : sample.color.includes("emerald")
                         ? "#34d399"
                         : sample.color.includes("amber")
-                          ? "#f59e0b"
-                          : sample.color.includes("fuchsia")
+                            ? "#f59e0b"
+                            : sample.color.includes("fuchsia")
                             ? "#d946ef"
                             : sample.color.includes("cyan")
-                              ? "#06b6d4"
-                              : "#f43f5e",
+                                ? "#06b6d4"
+                                : "#f43f5e",
                     sampleId: sample.id,
                     score,
-                  });
+                    support: 0,
+                    });
                 }
               }
             }
           }
 
-          candidates.sort((a, b) => a.score - b.score);
-          const picked: DetectionBox[] = [];
-
-          for (const c of candidates) {
-            const overlaps = picked.some((p) => {
-              const near = centerDistance(p, c) < Math.max(p.w, c.w) * 0.45;
-              return iou(p, c) > 0.1 || near;
+          const supportedCandidates = addSupportToCandidates(candidates)
+            .filter((c) => c.support >= 1) // 周囲に似た候補が最低1個あるものだけ残す
+            .sort((a, b) => {
+                if (b.support !== a.support) return b.support - a.support;
+                return a.score - b.score;
             });
 
-            if (!overlaps) picked.push(c);
-            if (picked.length >= 3) break;
-          }
+            const picked: DetectionBox[] = [];
 
-          allDetections.push(...picked);
+            for (const c of supportedCandidates) {
+            const overlaps = picked.some((p) => overlapOrNear(p, c));
+            if (!overlaps) picked.push(c);
+            if (picked.length >= 2) break;
+            }
+
+allDetections.push(...picked);
         }
 
         const merged = mergeGlobalDetections(allDetections);
