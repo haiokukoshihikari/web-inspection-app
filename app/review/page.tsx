@@ -182,7 +182,6 @@ function buildWindowFeatures(
 
   const features: number[] = [];
 
-  // 4x4 dark grid
   for (let gy = 0; gy < 4; gy++) {
     for (let gx = 0; gx < 4; gx++) {
       const cx = x + Math.floor((gx * w) / 4);
@@ -194,7 +193,6 @@ function buildWindowFeatures(
     }
   }
 
-  // 4x4 edge grid
   for (let gy = 0; gy < 4; gy++) {
     for (let gx = 0; gx < 4; gx++) {
       const cx = x + Math.floor((gx * w) / 4);
@@ -206,7 +204,6 @@ function buildWindowFeatures(
     }
   }
 
-  // horizontal dark projection (8)
   for (let gy = 0; gy < 8; gy++) {
     const cy = y + Math.floor((gy * h) / 8);
     const ch = Math.max(1, Math.floor(((gy + 1) * h) / 8) - Math.floor((gy * h) / 8));
@@ -214,7 +211,6 @@ function buildWindowFeatures(
     features.push(mean);
   }
 
-  // vertical dark projection (8)
   for (let gx = 0; gx < 8; gx++) {
     const cx = x + Math.floor((gx * w) / 8);
     const cw = Math.max(1, Math.floor(((gx + 1) * w) / 8) - Math.floor((gx * w) / 8));
@@ -222,7 +218,6 @@ function buildWindowFeatures(
     features.push(mean);
   }
 
-  // horizontal edge projection (6)
   for (let gy = 0; gy < 6; gy++) {
     const cy = y + Math.floor((gy * h) / 6);
     const ch = Math.max(1, Math.floor(((gy + 1) * h) / 6) - Math.floor((gy * h) / 6));
@@ -230,7 +225,6 @@ function buildWindowFeatures(
     features.push(mean);
   }
 
-  // vertical edge projection (6)
   for (let gx = 0; gx < 6; gx++) {
     const cx = x + Math.floor((gx * w) / 6);
     const cw = Math.max(1, Math.floor(((gx + 1) * w) / 6) - Math.floor((gx * w) / 6));
@@ -315,7 +309,8 @@ export default function ReviewPage() {
   const imgRef = useRef<HTMLImageElement | null>(null);
 
   const [capturedImage, setCapturedImage] = useState("");
-  const [sensitivity, setSensitivity] = useState(58);
+  const [draftSensitivity, setDraftSensitivity] = useState(58);
+  const [appliedSensitivity, setAppliedSensitivity] = useState(58);
   const [missingOn, setMissingOn] = useState(true);
   const [showDeleteFor, setShowDeleteFor] = useState<string | null>(null);
   const [samplesLoaded, setSamplesLoaded] = useState(false);
@@ -330,6 +325,7 @@ export default function ReviewPage() {
   const [samples, setSamples] = useState<SampleItem[]>(DEFAULT_SAMPLES);
   const [detections, setDetections] = useState<DetectionBox[]>([]);
   const [detecting, setDetecting] = useState(false);
+  const [isAdjustingSensitivity, setIsAdjustingSensitivity] = useState(false);
 
   useEffect(() => {
     try {
@@ -345,7 +341,10 @@ export default function ReviewPage() {
       const savedSensitivity = localStorage.getItem(SENSITIVITY_KEY);
       if (savedSensitivity !== null) {
         const n = Number(savedSensitivity);
-        if (Number.isFinite(n)) setSensitivity(n);
+        if (Number.isFinite(n)) {
+          setDraftSensitivity(n);
+          setAppliedSensitivity(n);
+        }
       }
 
       const savedMissing = localStorage.getItem(MISSING_KEY);
@@ -386,6 +385,23 @@ export default function ReviewPage() {
     }
   }, [samples, samplesLoaded]);
 
+  useEffect(() => {
+    if (draftSensitivity === appliedSensitivity) {
+      setIsAdjustingSensitivity(false);
+      return;
+    }
+
+    setIsAdjustingSensitivity(true);
+
+    const timer = window.setTimeout(() => {
+      setAppliedSensitivity(draftSensitivity);
+      localStorage.setItem(SENSITIVITY_KEY, String(draftSensitivity));
+      setIsAdjustingSensitivity(false);
+    }, 350);
+
+    return () => window.clearTimeout(timer);
+  }, [draftSensitivity, appliedSensitivity]);
+
   const updateImageRect = () => {
     if (!frameRef.current || !imgRef.current) return;
 
@@ -407,8 +423,7 @@ export default function ReviewPage() {
   }, []);
 
   const handleSensitivityChange = (value: number) => {
-    setSensitivity(value);
-    localStorage.setItem(SENSITIVITY_KEY, String(value));
+    setDraftSensitivity(value);
   };
 
   const handleMissingToggle = () => {
@@ -470,11 +485,9 @@ export default function ReviewPage() {
         const edgeSceneIntegral = makeIntegralMap(sceneEdge, sceneW, sceneH);
 
         const allDetections: DetectionBox[] = [];
-        const sensitivity01 = Math.max(0, Math.min(100, sensitivity)) / 100;
-
-        // 高感度でも暴れすぎないよう、距離しきい値は控えめに増やす
+        const sensitivity01 = Math.max(0, Math.min(100, appliedSensitivity)) / 100;
         const featureThreshold = 0.09 + sensitivity01 * 0.035;
-        const stride = sensitivity >= 80 ? 8 : sensitivity >= 50 ? 10 : 12;
+        const stride = appliedSensitivity >= 80 ? 8 : appliedSensitivity >= 50 ? 10 : 12;
 
         for (const sample of visibleSamples) {
           if (!sample.thumbUrl) continue;
@@ -487,28 +500,36 @@ export default function ReviewPage() {
               ? sample.aspectRatio
               : sampleImg.naturalWidth / sampleImg.naturalHeight || 1;
 
-          const baseTplH = 54;
-          const baseTplW = Math.max(22, Math.round(baseTplH * ratio));
-          const scaleList = [0.92, 1.0, 1.08];
-
-          const sampleGray = imageToGray(sampleImg, 96, Math.max(16, Math.round(96 / ratio)));
-          const sw = 96;
-          const sh = Math.max(16, Math.round(96 / ratio));
+          const sampleFeatureWidth = 96;
+          const sampleFeatureHeight = Math.max(16, Math.round(96 / ratio));
+          const sampleGray = imageToGray(sampleImg, sampleFeatureWidth, sampleFeatureHeight);
           const sampleDark = new Float32Array(sampleGray.length);
           for (let i = 0; i < sampleGray.length; i++) sampleDark[i] = 1 - sampleGray[i];
-          const sampleEdge = makeEdgeMap(sampleGray, sw, sh);
-          const sampleDarkIntegral = makeIntegralMap(sampleDark, sw, sh);
-          const sampleEdgeIntegral = makeIntegralMap(sampleEdge, sw, sh);
+          const sampleEdge = makeEdgeMap(sampleGray, sampleFeatureWidth, sampleFeatureHeight);
+          const sampleDarkIntegral = makeIntegralMap(
+            sampleDark,
+            sampleFeatureWidth,
+            sampleFeatureHeight
+          );
+          const sampleEdgeIntegral = makeIntegralMap(
+            sampleEdge,
+            sampleFeatureWidth,
+            sampleFeatureHeight
+          );
           const sampleFeature = buildWindowFeatures(
             sampleDarkIntegral,
             sampleEdgeIntegral,
-            sw,
-            sh,
+            sampleFeatureWidth,
+            sampleFeatureHeight,
             0,
             0,
-            sw,
-            sh
+            sampleFeatureWidth,
+            sampleFeatureHeight
           );
+
+          const baseTplH = 54;
+          const baseTplW = Math.max(22, Math.round(baseTplH * ratio));
+          const scaleList = [0.92, 1.0, 1.08];
 
           const candidates: DetectionBox[] = [];
 
@@ -525,8 +546,7 @@ export default function ReviewPage() {
                 const edgeMean =
                   rectSum(edgeSceneIntegral, sceneW, x, y, tplW, tplH) / (tplW * tplH);
 
-                // 何も無い面や情報量が少なすぎる面は飛ばす
-                if (darkMean < 0.10) continue;
+                if (darkMean < 0.1) continue;
                 if (edgeMean < 0.018) continue;
 
                 const windowFeature = buildWindowFeatures(
@@ -602,7 +622,9 @@ export default function ReviewPage() {
     return () => {
       cancelled = true;
     };
-  }, [capturedImage, visibleSamples, sensitivity]);
+  }, [capturedImage, visibleSamples, appliedSensitivity]);
+
+  const overlayMuted = isAdjustingSensitivity || detecting;
 
   return (
     <main className="min-h-screen bg-black text-white flex flex-col">
@@ -613,11 +635,11 @@ export default function ReviewPage() {
             type="range"
             min={0}
             max={100}
-            value={sensitivity}
+            value={draftSensitivity}
             onChange={(e) => handleSensitivityChange(Number(e.target.value))}
             className="flex-1"
           />
-          <div className="text-sm w-9 text-right text-zinc-300">{sensitivity}</div>
+          <div className="text-sm w-9 text-right text-zinc-300">{draftSensitivity}</div>
         </div>
 
         <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2">
@@ -655,19 +677,24 @@ export default function ReviewPage() {
               {detections.map((box, index) => (
                 <div
                   key={`${box.sampleId}-${index}`}
-                  className="absolute rounded-md border-[3px]"
+                  className="absolute rounded-md border-[3px] transition-opacity"
                   style={{
                     left: imageRect.left + imageRect.width * box.x,
                     top: imageRect.top + imageRect.height * box.y,
                     width: imageRect.width * box.w,
                     height: imageRect.height * box.h,
                     borderColor: box.color,
+                    opacity: overlayMuted ? 0.35 : 1,
                   }}
                 />
               ))}
 
               <div className="absolute left-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10 max-w-[85%] break-all">
-                {detecting ? "検知中..." : `検知数: ${detections.length}`}
+                {isAdjustingSensitivity
+                  ? "調整中..."
+                  : detecting
+                    ? "検知中..."
+                    : `検知数: ${detections.length}`}
               </div>
             </>
           ) : (
