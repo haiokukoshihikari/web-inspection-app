@@ -117,6 +117,32 @@ function sampleWindowScore(
   return sum / (tplW * tplH);
 }
 
+function sampleWindowStd(
+  scene: Float32Array,
+  sceneW: number,
+  sx: number,
+  sy: number,
+  tplW: number,
+  tplH: number
+) {
+  let sum = 0;
+  let sumSq = 0;
+  let count = tplW * tplH;
+
+  for (let y = 0; y < tplH; y++) {
+    const row = (sy + y) * sceneW + sx;
+    for (let x = 0; x < tplW; x++) {
+      const v = scene[row + x];
+      sum += v;
+      sumSq += v * v;
+    }
+  }
+
+  const mean = sum / count;
+  const variance = Math.max(0, sumSq / count - mean * mean);
+  return Math.sqrt(variance);
+}
+
 function iou(a: DetectionBox, b: DetectionBox) {
   const ax1 = a.x;
   const ay1 = a.y;
@@ -299,8 +325,8 @@ export default function ReviewPage() {
 
         // 感度が高いほど拾いやすくする
         const threshold =
-          0.16 - (Math.max(0, Math.min(100, sensitivity)) / 100) * 0.05;
-        const stride = sensitivity >= 70 ? 6 : sensitivity >= 40 ? 8 : 10;
+          0.14 - (Math.max(0, Math.min(100, sensitivity)) / 100) * 0.04;
+        const stride = sensitivity >= 70 ? 7 : sensitivity >= 40 ? 9 : 11;
 
         for (const sample of visibleSamples) {
           if (!sample.thumbUrl) continue;
@@ -308,14 +334,14 @@ export default function ReviewPage() {
           const sampleImg = await loadImage(sample.thumbUrl);
           if (cancelled) return;
 
-          const baseTplH = 42;
+          const baseTplH = 46;
             const ratio =
             sample.aspectRatio && sample.aspectRatio > 0
                 ? sample.aspectRatio
                 : sampleImg.naturalWidth / sampleImg.naturalHeight || 1;
-            const baseTplW = Math.max(18, Math.round(baseTplH * ratio));
+            const baseTplW = Math.max(20, Math.round(baseTplH * ratio));
 
-            const scaleList = [0.9, 1.0, 1.15];
+            const scaleList = [0.95, 1.05];
           const candidates: DetectionBox[] = [];
 
           for (const s of scaleList) {
@@ -329,18 +355,28 @@ export default function ReviewPage() {
             for (let y = 0; y <= sceneH - tplH; y += stride) {
               for (let x = 0; x <= sceneW - tplW; x += stride) {
                 const score = sampleWindowScore(
-                  sceneGray,
-                  sceneW,
-                  sceneH,
-                  x,
-                  y,
-                  tplGray,
-                  tplW,
-                  tplH
-                );
+                    sceneGray,
+                    sceneW,
+                    sceneH,
+                    x,
+                    y,
+                    tplGray,
+                    tplW,
+                    tplH
+                    );
 
-                if (score <= threshold) {
-                  candidates.push({
+                    // 木目や平坦部の誤検知を少し減らす
+                    const std = sampleWindowStd(
+                    sceneGray,
+                    sceneW,
+                    x,
+                    y,
+                    tplW,
+                    tplH
+                    );
+
+                    if (score <= threshold && std >= 0.09) {
+                    candidates.push({
                     x: x / sceneW,
                     y: y / sceneH,
                     w: tplW / sceneW,
@@ -369,12 +405,10 @@ export default function ReviewPage() {
           const picked: DetectionBox[] = [];
 
           for (const c of candidates) {
-            const overlaps = picked.some((p) => iou(p, c) > 0.2);
+            const overlaps = picked.some((p) => iou(p, c) > 0.12);
             if (!overlaps) picked.push(c);
-            if (picked.length >= 5) break;
-}
-          allDetections.push(...picked);
-        }
+            if (picked.length >= 2) break;
+            }
 
         if (!cancelled) {
           setDetections(allDetections);
