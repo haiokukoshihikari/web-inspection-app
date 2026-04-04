@@ -193,8 +193,7 @@ function sampleWindowScoreDual(
   const grayScore = diffGray / count;
   const edgeScore = diffEdge / count;
 
-  // 感度逆転を避けやすいよう、灰度寄りに戻す
-  return grayScore * 0.6 + edgeScore * 0.4;
+  return grayScore * 0.58 + edgeScore * 0.42;
 }
 
 function iou(a: DetectionBox, b: DetectionBox) {
@@ -251,7 +250,6 @@ function addSupportToCandidates(candidates: DetectionBox[]) {
 }
 
 function mergeGlobalDetections(detections: DetectionBox[]) {
-  // support が高いもの、次に score が良いものを優先
   const sorted = [...detections].sort((a, b) => {
     if (b.support !== a.support) return b.support - a.support;
     return a.score - b.score;
@@ -264,7 +262,6 @@ function mergeGlobalDetections(detections: DetectionBox[]) {
     if (!overlaps) merged.push(d);
   }
 
-  // 孤立誤検知をさらに抑える
   if (merged.length <= 1) return merged;
 
   const bestSupport = Math.max(...merged.map((m) => m.support));
@@ -275,6 +272,34 @@ function mergeGlobalDetections(detections: DetectionBox[]) {
     const nearBestScore = m.score <= bestScore + 0.03;
     return nearBestSupport || nearBestScore;
   });
+}
+
+// 白ラベル・印刷面っぽさをざっくり評価
+function getSurfaceBias(
+  sceneGray: Float32Array,
+  sceneEdge: Float32Array,
+  sceneW: number,
+  sx: number,
+  sy: number,
+  tplW: number,
+  tplH: number,
+  sampleGrayMean: number,
+  sampleEdgeMean: number
+) {
+  const winGrayMean = sampleWindowMean(sceneGray, sceneW, sx, sy, tplW, tplH);
+  const winEdgeMean = sampleWindowMean(sceneEdge, sceneW, sx, sy, tplW, tplH);
+  const winStd = sampleWindowStd(sceneGray, sceneW, sx, sy, tplW, tplH);
+
+  const grayGap = Math.abs(winGrayMean - sampleGrayMean);
+  const edgeGap = Math.abs(winEdgeMean - sampleEdgeMean);
+
+  return {
+    winGrayMean,
+    winEdgeMean,
+    winStd,
+    grayGap,
+    edgeGap,
+  };
 }
 
 export default function ReviewPage() {
@@ -433,14 +458,11 @@ export default function ReviewPage() {
         const sceneEdge = makeEdgeMap(sceneGray, sceneW, sceneH);
 
         const allDetections: DetectionBox[] = [];
-
         const sensitivity01 = Math.max(0, Math.min(100, sensitivity)) / 100;
 
-        // 感度を上げるほど通りやすくする
-        const strictThreshold = 0.12 + sensitivity01 * 0.04;
-        const relaxedThreshold = 0.145 + sensitivity01 * 0.05;
-
-        // 感度を上げるほど細かく探索
+        // 感度上げるほど通りやすく
+        const strictThreshold = 0.115 + sensitivity01 * 0.05;
+        const relaxedThreshold = 0.14 + sensitivity01 * 0.06;
         const stride = sensitivity >= 70 ? 6 : sensitivity >= 40 ? 8 : 10;
 
         for (const sample of visibleSamples) {
@@ -468,15 +490,12 @@ export default function ReviewPage() {
 
             const tplGray = imageToGray(sampleImg, tplW, tplH);
             const tplEdge = makeEdgeMap(tplGray, tplW, tplH);
+
             const tplEdgeMean = meanOfArray(tplEdge);
+            const tplGrayMean = meanOfArray(tplGray);
 
             for (let y = 0; y <= sceneH - tplH; y += stride) {
               for (let x = 0; x <= sceneW - tplW; x += stride) {
-                const std = sampleWindowStd(sceneGray, sceneW, x, y, tplW, tplH);
-                if (std < 0.06) continue;
-
-                const edgeMean = sampleWindowMean(sceneEdge, sceneW, x, y, tplW, tplH);
-
                 const score = sampleWindowScoreDual(
                   sceneGray,
                   sceneEdge,
@@ -489,14 +508,37 @@ export default function ReviewPage() {
                   tplH
                 );
 
+                const surface = getSurfaceBias(
+                  sceneGray,
+                  sceneEdge,
+                  sceneW,
+                  x,
+                  y,
+                  tplW,
+                  tplH,
+                  tplGrayMean,
+                  tplEdgeMean
+                );
+
+                // 面として成立しているか
+                if (surface.winStd < 0.04) continue;
+
+                // 見本の明るさ・エッジ量から離れすぎるものを除外
+                if (surface.grayGap > 0.22) continue;
+                if (surface.edgeGap > 0.13) continue;
+
+                // 印刷・ラベル寄りの救済
+                const printLike =
+                  surface.winGrayMean > 0.45 || surface.winEdgeMean > 0.05;
+
                 let passed =
                   score <= strictThreshold &&
-                  edgeMean >= tplEdgeMean * 0.38;
+                  surface.winEdgeMean >= tplEdgeMean * 0.25;
 
-                if (!passed) {
+                if (!passed && printLike) {
                   passed =
                     score <= relaxedThreshold &&
-                    edgeMean >= tplEdgeMean * 0.22;
+                    surface.winEdgeMean >= tplEdgeMean * 0.16;
                 }
 
                 if (passed) {
@@ -506,41 +548,41 @@ export default function ReviewPage() {
                     w: tplW / sceneW,
                     h: tplH / sceneH,
                     color: sample.color.includes("sky")
-                        ? "#38bdf8"
-                        : sample.color.includes("emerald")
+                      ? "#38bdf8"
+                      : sample.color.includes("emerald")
                         ? "#34d399"
                         : sample.color.includes("amber")
-                            ? "#f59e0b"
-                            : sample.color.includes("fuchsia")
+                          ? "#f59e0b"
+                          : sample.color.includes("fuchsia")
                             ? "#d946ef"
                             : sample.color.includes("cyan")
-                                ? "#06b6d4"
-                                : "#f43f5e",
+                              ? "#06b6d4"
+                              : "#f43f5e",
                     sampleId: sample.id,
                     score,
                     support: 0,
-                    });
+                  });
                 }
               }
             }
           }
 
           const supportedCandidates = addSupportToCandidates(candidates)
-            .filter((c) => c.support >= 1) // 周囲に似た候補が最低1個あるものだけ残す
+            .filter((c) => c.support >= 0)
             .sort((a, b) => {
-                if (b.support !== a.support) return b.support - a.support;
-                return a.score - b.score;
+              if (b.support !== a.support) return b.support - a.support;
+              return a.score - b.score;
             });
 
-            const picked: DetectionBox[] = [];
+          const picked: DetectionBox[] = [];
 
-            for (const c of supportedCandidates) {
+          for (const c of supportedCandidates) {
             const overlaps = picked.some((p) => overlapOrNear(p, c));
             if (!overlaps) picked.push(c);
-            if (picked.length >= 2) break;
-            }
+            if (picked.length >= 3) break;
+          }
 
-allDetections.push(...picked);
+          allDetections.push(...picked);
         }
 
         const merged = mergeGlobalDetections(allDetections);
