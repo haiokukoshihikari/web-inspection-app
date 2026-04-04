@@ -16,20 +16,130 @@ type SampleItem = {
   aspectRatio?: number;
 };
 
-type Box = {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
+type DetectionBox = {
+  x: number; // 画像内 0-1
+  y: number; // 画像内 0-1
+  w: number; // 画像内 0-1
+  h: number; // 画像内 0-1
   color: string;
+  sampleId: string;
+  score: number;
 };
 
 const DEFAULT_SAMPLES: SampleItem[] = [
-  { id: "1", count: 12, color: "border-sky-400 bg-sky-500/20", aspectRatio: 1 },
-  { id: "2", count: 8, color: "border-emerald-400 bg-emerald-500/20", aspectRatio: 1 },
-  { id: "3", count: 5, color: "border-amber-400 bg-amber-500/20", aspectRatio: 1 },
-  { id: "4", count: 3, color: "border-fuchsia-400 bg-fuchsia-500/20", aspectRatio: 1 },
+  { id: "1", count: 0, color: "border-sky-400 bg-sky-500/20", aspectRatio: 1 },
+  { id: "2", count: 0, color: "border-emerald-400 bg-emerald-500/20", aspectRatio: 1 },
+  { id: "3", count: 0, color: "border-amber-400 bg-amber-500/20", aspectRatio: 1 },
+  { id: "4", count: 0, color: "border-fuchsia-400 bg-fuchsia-500/20", aspectRatio: 1 },
 ];
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+function drawContainRect(
+  containerW: number,
+  containerH: number,
+  imageW: number,
+  imageH: number
+) {
+  const scale = Math.min(containerW / imageW, containerH / imageH);
+  const width = imageW * scale;
+  const height = imageH * scale;
+  const left = (containerW - width) / 2;
+  const top = (containerH - height) / 2;
+  return { left, top, width, height };
+}
+
+function imageToGray(
+  img: HTMLImageElement,
+  targetW: number,
+  targetH: number
+): Float32Array {
+  const canvas = document.createElement("canvas");
+  canvas.width = targetW;
+  canvas.height = targetH;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return new Float32Array(targetW * targetH);
+
+  ctx.drawImage(img, 0, 0, targetW, targetH);
+  const data = ctx.getImageData(0, 0, targetW, targetH).data;
+  const out = new Float32Array(targetW * targetH);
+
+  for (let i = 0, j = 0; i < data.length; i += 4, j++) {
+    out[j] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) / 255;
+  }
+  return out;
+}
+
+function canvasToGray(
+  canvas: HTMLCanvasElement
+): { gray: Float32Array; width: number; height: number } {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return { gray: new Float32Array(0), width: 0, height: 0 };
+
+  const { width, height } = canvas;
+  const data = ctx.getImageData(0, 0, width, height).data;
+  const out = new Float32Array(width * height);
+
+  for (let i = 0, j = 0; i < data.length; i += 4, j++) {
+    out[j] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) / 255;
+  }
+  return { gray: out, width, height };
+}
+
+function sampleWindowScore(
+  scene: Float32Array,
+  sceneW: number,
+  sceneH: number,
+  sx: number,
+  sy: number,
+  tpl: Float32Array,
+  tplW: number,
+  tplH: number
+) {
+  let sum = 0;
+  let idxTpl = 0;
+
+  for (let y = 0; y < tplH; y++) {
+    const row = (sy + y) * sceneW + sx;
+    for (let x = 0; x < tplW; x++) {
+      sum += Math.abs(scene[row + x] - tpl[idxTpl]);
+      idxTpl++;
+    }
+  }
+
+  return sum / (tplW * tplH);
+}
+
+function iou(a: DetectionBox, b: DetectionBox) {
+  const ax1 = a.x;
+  const ay1 = a.y;
+  const ax2 = a.x + a.w;
+  const ay2 = a.y + a.h;
+
+  const bx1 = b.x;
+  const by1 = b.y;
+  const bx2 = b.x + b.w;
+  const by2 = b.y + b.h;
+
+  const ix1 = Math.max(ax1, bx1);
+  const iy1 = Math.max(ay1, by1);
+  const ix2 = Math.min(ax2, bx2);
+  const iy2 = Math.min(ay2, by2);
+
+  const iw = Math.max(0, ix2 - ix1);
+  const ih = Math.max(0, iy2 - iy1);
+  const inter = iw * ih;
+  const union = a.w * a.h + b.w * b.h - inter;
+
+  return union > 0 ? inter / union : 0;
+}
 
 export default function ReviewPage() {
   const router = useRouter();
@@ -50,6 +160,8 @@ export default function ReviewPage() {
   });
 
   const [samples, setSamples] = useState<SampleItem[]>(DEFAULT_SAMPLES);
+  const [detections, setDetections] = useState<DetectionBox[]>([]);
+  const [detecting, setDetecting] = useState(false);
 
   useEffect(() => {
     try {
@@ -139,22 +251,149 @@ export default function ReviewPage() {
 
   const canAdd = useMemo(() => samples.length < MAX_SAMPLES, [samples.length]);
 
-  const displayBoxH = 0.12;
-  const displayBoxW =
-    imageRect.width > 0 && imageRect.height > 0
-      ? (imageRect.height / imageRect.width) * displayBoxH
-      : 0.12;
+  const visibleSamples = useMemo(
+    () => samples.filter((s) => !!s.thumbUrl),
+    [samples]
+  );
 
-  const normalBoxes: Box[] = [
-    { x: 0.12, y: 0.18, w: displayBoxW, h: displayBoxH, color: "#38bdf8" },
-    { x: 0.30, y: 0.18, w: displayBoxW, h: displayBoxH, color: "#38bdf8" },
-    { x: 0.12, y: 0.36, w: displayBoxW, h: displayBoxH, color: "#34d399" },
-    { x: 0.30, y: 0.36, w: displayBoxW, h: displayBoxH, color: "#34d399" },
-  ];
+  const detectedCounts = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const s of samples) map[s.id] = 0;
+    for (const d of detections) {
+      map[d.sampleId] = (map[d.sampleId] || 0) + 1;
+    }
+    return map;
+  }, [samples, detections]);
 
-  const missingBoxes: Box[] = missingOn
-    ? [{ x: 0.48, y: 0.18, w: displayBoxW, h: displayBoxH, color: "#f43f5e" }]
-    : [];
+  useEffect(() => {
+    let cancelled = false;
+
+    async function runDetection() {
+      if (!capturedImage || visibleSamples.length === 0) {
+        setDetections([]);
+        return;
+      }
+
+      setDetecting(true);
+
+      try {
+        const sceneImg = await loadImage(capturedImage);
+        if (cancelled) return;
+
+        // 速度優先で少し縮小
+        const maxSceneW = 720;
+        const scale = Math.min(1, maxSceneW / sceneImg.naturalWidth);
+        const sceneW = Math.max(1, Math.round(sceneImg.naturalWidth * scale));
+        const sceneH = Math.max(1, Math.round(sceneImg.naturalHeight * scale));
+
+        const sceneCanvas = document.createElement("canvas");
+        sceneCanvas.width = sceneW;
+        sceneCanvas.height = sceneH;
+        const sceneCtx = sceneCanvas.getContext("2d");
+        if (!sceneCtx) return;
+
+        sceneCtx.drawImage(sceneImg, 0, 0, sceneW, sceneH);
+        const { gray: sceneGray } = canvasToGray(sceneCanvas);
+
+        const allDetections: DetectionBox[] = [];
+
+        // 感度が高いほど拾いやすくする
+        const threshold =
+          0.23 - (Math.max(0, Math.min(100, sensitivity)) / 100) * 0.10;
+        const stride = sensitivity >= 70 ? 5 : sensitivity >= 40 ? 7 : 9;
+
+        for (const sample of visibleSamples) {
+          if (!sample.thumbUrl) continue;
+
+          const sampleImg = await loadImage(sample.thumbUrl);
+          if (cancelled) return;
+
+          const baseTplH = 28;
+          const ratio =
+            sample.aspectRatio && sample.aspectRatio > 0
+              ? sample.aspectRatio
+              : sampleImg.naturalWidth / sampleImg.naturalHeight || 1;
+          const baseTplW = Math.max(12, Math.round(baseTplH * ratio));
+
+          const scaleList = [0.8, 1.0, 1.2, 1.45];
+          const candidates: DetectionBox[] = [];
+
+          for (const s of scaleList) {
+            const tplW = Math.max(10, Math.round(baseTplW * s));
+            const tplH = Math.max(10, Math.round(baseTplH * s));
+
+            if (tplW >= sceneW || tplH >= sceneH) continue;
+
+            const tplGray = imageToGray(sampleImg, tplW, tplH);
+
+            for (let y = 0; y <= sceneH - tplH; y += stride) {
+              for (let x = 0; x <= sceneW - tplW; x += stride) {
+                const score = sampleWindowScore(
+                  sceneGray,
+                  sceneW,
+                  sceneH,
+                  x,
+                  y,
+                  tplGray,
+                  tplW,
+                  tplH
+                );
+
+                if (score <= threshold) {
+                  candidates.push({
+                    x: x / sceneW,
+                    y: y / sceneH,
+                    w: tplW / sceneW,
+                    h: tplH / sceneH,
+                    color: sample.color.includes("sky")
+                      ? "#38bdf8"
+                      : sample.color.includes("emerald")
+                        ? "#34d399"
+                        : sample.color.includes("amber")
+                          ? "#f59e0b"
+                          : sample.color.includes("fuchsia")
+                            ? "#d946ef"
+                            : sample.color.includes("cyan")
+                              ? "#06b6d4"
+                              : "#f43f5e",
+                    sampleId: sample.id,
+                    score,
+                  });
+                }
+              }
+            }
+          }
+
+          // スコア順 + NMS
+          candidates.sort((a, b) => a.score - b.score);
+          const picked: DetectionBox[] = [];
+
+          for (const c of candidates) {
+            const overlaps = picked.some((p) => iou(p, c) > 0.35);
+            if (!overlaps) picked.push(c);
+            if (picked.length >= 30) break;
+          }
+
+          allDetections.push(...picked);
+        }
+
+        if (!cancelled) {
+          setDetections(allDetections);
+        }
+      } catch (e) {
+        console.error("detection error:", e);
+        if (!cancelled) setDetections([]);
+      } finally {
+        if (!cancelled) setDetecting(false);
+      }
+    }
+
+    runDetection();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [capturedImage, visibleSamples, sensitivity]);
 
   return (
     <main className="min-h-screen bg-black text-white flex flex-col">
@@ -206,9 +445,9 @@ export default function ReviewPage() {
                 onLoad={updateImageRect}
               />
 
-              {normalBoxes.map((box, index) => (
+              {detections.map((box, index) => (
                 <div
-                  key={`normal-${index}`}
+                  key={`${box.sampleId}-${index}`}
                   className="absolute rounded-md border-[3px]"
                   style={{
                     left: imageRect.left + imageRect.width * box.x,
@@ -220,19 +459,9 @@ export default function ReviewPage() {
                 />
               ))}
 
-              {missingBoxes.map((box, index) => (
-                <div
-                  key={`missing-${index}`}
-                  className="absolute rounded-md border-[3px]"
-                  style={{
-                    left: imageRect.left + imageRect.width * box.x,
-                    top: imageRect.top + imageRect.height * box.y,
-                    width: imageRect.width * box.w,
-                    height: imageRect.height * box.h,
-                    borderColor: box.color,
-                  }}
-                />
-              ))}
+              <div className="absolute left-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10 max-w-[85%] break-all">
+                {detecting ? "検知中..." : `検知数: ${detections.length}`}
+              </div>
             </>
           ) : (
             <div className="h-full flex items-center justify-center text-zinc-400">
@@ -245,7 +474,10 @@ export default function ReviewPage() {
       <div className="px-4 pb-3">
         <div className="grid grid-cols-3 gap-3">
           {samples.map((sample) => {
-            const ratio = sample.aspectRatio && sample.aspectRatio > 0 ? sample.aspectRatio : 1;
+            const ratio =
+              sample.aspectRatio && sample.aspectRatio > 0
+                ? sample.aspectRatio
+                : 1;
             const thumbW = Math.max(40, Math.min(72, Math.round(40 * ratio)));
 
             return (
@@ -273,7 +505,9 @@ export default function ReviewPage() {
                     />
                   )}
 
-                  <div className="text-lg font-semibold truncate">{sample.count}</div>
+                  <div className="text-lg font-semibold truncate">
+                    {detectedCounts[sample.id] ?? 0}
+                  </div>
                 </button>
 
                 {showDeleteFor === sample.id && (
