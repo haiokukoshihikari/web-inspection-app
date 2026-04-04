@@ -389,8 +389,8 @@ export default function ReviewPage() {
         const sceneH = Math.max(1, Math.round(sceneImg.naturalHeight * scale));
 
         const sceneCanvas = document.createElement("canvas");
-        sceneCanvas.width = sceneW;
-        sceneCanvas.height = sceneH;
+            sceneCanvas.width = sceneW;
+            sceneCanvas.height = sceneH;
         const sceneCtx = sceneCanvas.getContext("2d");
         if (!sceneCtx) return;
 
@@ -401,11 +401,14 @@ export default function ReviewPage() {
 
         const allDetections: DetectionBox[] = [];
 
-        const strictThreshold =
-            0.135 - (Math.max(0, Math.min(100, sensitivity)) / 100) * 0.035;
-        const relaxedThreshold =
-            0.165 - (Math.max(0, Math.min(100, sensitivity)) / 100) * 0.04;
-        const stride = sensitivity >= 70 ? 7 : sensitivity >= 40 ? 9 : 11;
+        const sensitivity01 = Math.max(0, Math.min(100, sensitivity)) / 100;
+
+        // 感度を上げるほど通りやすくする
+        const strictThreshold = 0.12 + sensitivity01 * 0.04;
+        const relaxedThreshold = 0.145 + sensitivity01 * 0.05;
+
+        // 感度を上げるほど細かく探索する
+        const stride = sensitivity >= 70 ? 6 : sensitivity >= 40 ? 8 : 10;
 
         for (const sample of visibleSamples) {
           if (!sample.thumbUrl) continue;
