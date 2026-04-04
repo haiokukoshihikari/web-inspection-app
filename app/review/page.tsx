@@ -401,8 +401,8 @@ export default function ReviewPage() {
         const allDetections: DetectionBox[] = [];
 
         const threshold =
-          0.11 - (Math.max(0, Math.min(100, sensitivity)) / 100) * 0.03;
-        const stride = sensitivity >= 70 ? 8 : sensitivity >= 40 ? 10 : 12;
+          0.135 - (Math.max(0, Math.min(100, sensitivity)) / 100) * 0.035;
+        const stride = sensitivity >= 70 ? 7 : sensitivity >= 40 ? 9 : 11;
 
         for (const sample of visibleSamples) {
           if (!sample.thumbUrl) continue;
@@ -435,10 +435,10 @@ export default function ReviewPage() {
             for (let y = 0; y <= sceneH - tplH; y += stride) {
               for (let x = 0; x <= sceneW - tplW; x += stride) {
                 const std = sampleWindowStd(sceneGray, sceneW, x, y, tplW, tplH);
-                if (std < 0.10) continue;
+                if (std < 0.075) continue;
 
                 const edgeMean = sampleWindowMean(sceneEdge, sceneW, x, y, tplW, tplH);
-                if (edgeMean < tplEdgeMean * 0.55) continue;
+                if (edgeMean < tplEdgeMean * 0.40) continue;
 
                 const score = sampleWindowScoreDual(
                   sceneGray,
