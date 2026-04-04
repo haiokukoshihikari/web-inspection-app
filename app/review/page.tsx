@@ -13,6 +13,7 @@ type SampleItem = {
   count: number;
   color: string;
   thumbUrl?: string;
+  aspectRatio?: number;
 };
 
 type Box = {
@@ -24,10 +25,10 @@ type Box = {
 };
 
 const DEFAULT_SAMPLES: SampleItem[] = [
-  { id: "1", count: 12, color: "border-sky-400 bg-sky-500/20" },
-  { id: "2", count: 8, color: "border-emerald-400 bg-emerald-500/20" },
-  { id: "3", count: 5, color: "border-amber-400 bg-amber-500/20" },
-  { id: "4", count: 3, color: "border-fuchsia-400 bg-fuchsia-500/20" },
+  { id: "1", count: 12, color: "border-sky-400 bg-sky-500/20", aspectRatio: 1 },
+  { id: "2", count: 8, color: "border-emerald-400 bg-emerald-500/20", aspectRatio: 1 },
+  { id: "3", count: 5, color: "border-amber-400 bg-amber-500/20", aspectRatio: 1 },
+  { id: "4", count: 3, color: "border-fuchsia-400 bg-fuchsia-500/20", aspectRatio: 1 },
 ];
 
 export default function ReviewPage() {
@@ -243,48 +244,58 @@ export default function ReviewPage() {
 
       <div className="px-4 pb-3">
         <div className="grid grid-cols-3 gap-3">
-          {samples.map((sample) => (
-            <div key={sample.id} className="relative">
-              <button
-                onClick={() =>
-                  setShowDeleteFor(showDeleteFor === sample.id ? null : sample.id)
-                }
-                className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-2 py-2 flex items-center gap-2 min-w-0"
-              >
-                {sample.thumbUrl ? (
-                  <img
-                    src={sample.thumbUrl}
-                    alt="見本"
-                    className="w-10 h-10 rounded-lg object-cover shrink-0 border border-white/10"
-                  />
-                ) : (
-                  <div
-                    className={`w-10 h-10 rounded-lg border shrink-0 ${sample.color}`}
-                  />
+          {samples.map((sample) => {
+            const ratio = sample.aspectRatio && sample.aspectRatio > 0 ? sample.aspectRatio : 1;
+            const thumbW = Math.max(40, Math.min(72, Math.round(40 * ratio)));
+
+            return (
+              <div key={sample.id} className="relative">
+                <button
+                  onClick={() =>
+                    setShowDeleteFor(showDeleteFor === sample.id ? null : sample.id)
+                  }
+                  className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-2 py-2 flex items-center gap-2 min-w-0"
+                >
+                  {sample.thumbUrl ? (
+                    <div
+                      className="h-10 shrink-0 rounded-lg overflow-hidden border border-white/10 bg-black flex items-center justify-center"
+                      style={{ width: thumbW }}
+                    >
+                      <img
+                        src={sample.thumbUrl}
+                        alt="見本"
+                        className="max-w-full max-h-full object-contain"
+                      />
+                    </div>
+                  ) : (
+                    <div
+                      className={`w-10 h-10 rounded-lg border shrink-0 ${sample.color}`}
+                    />
+                  )}
+
+                  <div className="text-lg font-semibold truncate">{sample.count}</div>
+                </button>
+
+                {showDeleteFor === sample.id && (
+                  <div className="absolute -top-2 -right-2">
+                    <button
+                      onClick={() => {
+                        if (window.confirm("削除しますか？")) {
+                          setSamples((prev) =>
+                            prev.filter((s) => s.id !== sample.id)
+                          );
+                          setShowDeleteFor(null);
+                        }
+                      }}
+                      className="w-8 h-8 rounded-full bg-rose-500 text-white shadow-lg"
+                    >
+                      ×
+                    </button>
+                  </div>
                 )}
-
-                <div className="text-lg font-semibold truncate">{sample.count}</div>
-              </button>
-
-              {showDeleteFor === sample.id && (
-                <div className="absolute -top-2 -right-2">
-                  <button
-                    onClick={() => {
-                      if (window.confirm("削除しますか？")) {
-                        setSamples((prev) =>
-                          prev.filter((s) => s.id !== sample.id)
-                        );
-                        setShowDeleteFor(null);
-                      }
-                    }}
-                    className="w-8 h-8 rounded-full bg-rose-500 text-white shadow-lg"
-                  >
-                    ×
-                  </button>
-                </div>
-              )}
-            </div>
-          ))}
+              </div>
+            );
+          })}
 
           {canAdd && (
             <button

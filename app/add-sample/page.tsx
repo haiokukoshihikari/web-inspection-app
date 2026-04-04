@@ -11,6 +11,7 @@ type SampleItem = {
   count: number;
   color: string;
   thumbUrl?: string;
+  aspectRatio?: number; // width / height
 };
 
 const SAMPLE_COLORS = [
@@ -23,6 +24,7 @@ const SAMPLE_COLORS = [
 ];
 
 type PointerMap = Record<number, { x: number; y: number }>;
+type AspectMode = "square" | "wide" | "tall";
 
 export default function AddSamplePage() {
   const router = useRouter();
@@ -59,6 +61,7 @@ export default function AddSamplePage() {
   });
 
   const [boxSize, setBoxSize] = useState(0.22);
+  const [aspectMode, setAspectMode] = useState<AspectMode>("square");
 
   const [imageScale, setImageScale] = useState(1);
   const [imagePanX, setImagePanX] = useState(0);
@@ -95,6 +98,12 @@ export default function AddSamplePage() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
+  const aspectRatio = useMemo(() => {
+    if (aspectMode === "wide") return 1.5;
+    if (aspectMode === "tall") return 1 / 1.5;
+    return 1;
+  }, [aspectMode]);
+
   const transformedRect = useMemo(() => {
     const scaledWidth = baseRect.width * imageScale;
     const scaledHeight = baseRect.height * imageScale;
@@ -113,8 +122,13 @@ export default function AddSamplePage() {
   }, [baseRect, imageScale, imagePanX, imagePanY]);
 
   const displayBox = useMemo(() => {
-    const width = baseRect.width * boxSize;
-    const height = baseRect.height * boxSize;
+    let width = baseRect.width * boxSize;
+    let height = width / aspectRatio;
+
+    if (height > baseRect.height * boxSize) {
+      height = baseRect.height * boxSize;
+      width = height * aspectRatio;
+    }
 
     return {
       left: baseRect.left + (baseRect.width - width) / 2,
@@ -122,59 +136,39 @@ export default function AddSamplePage() {
       width,
       height,
     };
-  }, [baseRect, boxSize]);
+  }, [baseRect, boxSize, aspectRatio]);
 
   const getDistance = (a: { x: number; y: number }, b: { x: number; y: number }) =>
     Math.hypot(a.x - b.x, a.y - b.y);
 
- const clampPan = (nextPanX: number, nextPanY: number, nextScale = imageScale) => {
-  const scaledWidth = baseRect.width * nextScale;
-  const scaledHeight = baseRect.height * nextScale;
+  const clampPan = (nextPanX: number, nextPanY: number, nextScale = imageScale) => {
+    const scaledWidth = baseRect.width * nextScale;
+    const scaledHeight = baseRect.height * nextScale;
 
-  // 拡大後画像の左上位置
-  const imageLeft = baseRect.left + nextPanX - (scaledWidth - baseRect.width) / 2;
-  const imageTop = baseRect.top + nextPanY - (scaledHeight - baseRect.height) / 2;
+    const imageLeft = baseRect.left + nextPanX - (scaledWidth - baseRect.width) / 2;
+    const imageTop = baseRect.top + nextPanY - (scaledHeight - baseRect.height) / 2;
 
-  const imageRight = imageLeft + scaledWidth;
-  const imageBottom = imageTop + scaledHeight;
+    const imageRight = imageLeft + scaledWidth;
+    const imageBottom = imageTop + scaledHeight;
 
-  // 中央固定枠が画像からはみ出さない範囲に制限したい
-  let correctedPanX = nextPanX;
-  let correctedPanY = nextPanY;
+    let correctedPanX = nextPanX;
+    let correctedPanY = nextPanY;
 
-  const nextDisplayBox = {
-    left: baseRect.left + (baseRect.width - baseRect.width * boxSize) / 2,
-    top: baseRect.top + (baseRect.height - baseRect.height * boxSize) / 2,
-    width: baseRect.width * boxSize,
-    height: baseRect.height * boxSize,
+    const boxLeft = displayBox.left;
+    const boxTop = displayBox.top;
+    const boxRight = displayBox.left + displayBox.width;
+    const boxBottom = displayBox.top + displayBox.height;
+
+    if (imageLeft > boxLeft) correctedPanX -= imageLeft - boxLeft;
+    if (imageRight < boxRight) correctedPanX += boxRight - imageRight;
+    if (imageTop > boxTop) correctedPanY -= imageTop - boxTop;
+    if (imageBottom < boxBottom) correctedPanY += boxBottom - imageBottom;
+
+    return {
+      x: correctedPanX,
+      y: correctedPanY,
+    };
   };
-
-  const boxLeft = nextDisplayBox.left;
-  const boxTop = nextDisplayBox.top;
-  const boxRight = nextDisplayBox.left + nextDisplayBox.width;
-  const boxBottom = nextDisplayBox.top + nextDisplayBox.height;
-
-  // 左右
-  if (imageLeft > boxLeft) {
-    correctedPanX -= imageLeft - boxLeft;
-  }
-  if (imageRight < boxRight) {
-    correctedPanX += boxRight - imageRight;
-  }
-
-  // 上下
-  if (imageTop > boxTop) {
-    correctedPanY -= imageTop - boxTop;
-  }
-  if (imageBottom < boxBottom) {
-    correctedPanY += boxBottom - imageBottom;
-  }
-
-  return {
-    x: correctedPanX,
-    y: correctedPanY,
-  };
-};
 
   const handleSmaller = () => {
     setBoxSize((v) => Math.max(0.12, v - 0.03));
@@ -212,6 +206,8 @@ export default function AddSamplePage() {
         startClientY: e.clientY,
         startPanX: imagePanX,
         startPanY: imagePanY,
+        startScale: imageScale,
+        startDistance: 0,
       };
       e.currentTarget.setPointerCapture(e.pointerId);
     }
@@ -280,60 +276,75 @@ export default function AddSamplePage() {
   };
 
   const handleSave = () => {
-    if (!capturedImage || !imgRef.current) return;
+    if (!capturedImage || !imgRef.current || !frameRef.current) return;
 
     const imgEl = imgRef.current;
     const naturalWidth = imgEl.naturalWidth;
     const naturalHeight = imgEl.naturalHeight;
 
-    if (
-      !naturalWidth ||
-      !naturalHeight ||
-      !transformedRect.width ||
-      !transformedRect.height
-    ) {
+    if (!naturalWidth || !naturalHeight || !baseRect.width || !baseRect.height) {
       return;
     }
 
-    const scaleX = naturalWidth / transformedRect.width;
-    const scaleY = naturalHeight / transformedRect.height;
-
-    let cropX = (displayBox.left - transformedRect.left) * scaleX;
-    let cropY = (displayBox.top - transformedRect.top) * scaleY;
-    let cropW = displayBox.width * scaleX;
-    let cropH = displayBox.height * scaleY;
-
-    cropX = Math.max(0, Math.min(cropX, naturalWidth));
-    cropY = Math.max(0, Math.min(cropY, naturalHeight));
-    cropW = Math.max(1, Math.min(cropW, naturalWidth - cropX));
-    cropH = Math.max(1, Math.min(cropH, naturalHeight - cropY));
-
     const sourceImg = new Image();
     sourceImg.onload = () => {
-      const canvas = document.createElement("canvas");
-      const thumbSize = 120;
-      canvas.width = thumbSize;
-      canvas.height = thumbSize;
+      const frameW = frameRef.current!.clientWidth;
+      const frameH = frameRef.current!.clientHeight;
 
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
+      const previewCanvas = document.createElement("canvas");
+      previewCanvas.width = frameW;
+      previewCanvas.height = frameH;
 
-      ctx.fillStyle = "#111";
-      ctx.fillRect(0, 0, thumbSize, thumbSize);
+      const previewCtx = previewCanvas.getContext("2d");
+      if (!previewCtx) return;
 
-      ctx.drawImage(
+      previewCtx.clearRect(0, 0, frameW, frameH);
+      previewCtx.fillStyle = "#111";
+      previewCtx.fillRect(0, 0, frameW, frameH);
+
+      previewCtx.save();
+
+      const cx = baseRect.left + baseRect.width / 2 + imagePanX;
+      const cy = baseRect.top + baseRect.height / 2 + imagePanY;
+
+      previewCtx.translate(cx, cy);
+      previewCtx.scale(imageScale, imageScale);
+
+      previewCtx.drawImage(
         sourceImg,
-        cropX,
-        cropY,
-        cropW,
-        cropH,
-        0,
-        0,
-        thumbSize,
-        thumbSize
+        -baseRect.width / 2,
+        -baseRect.height / 2,
+        baseRect.width,
+        baseRect.height
       );
 
-      const thumbUrl = canvas.toDataURL("image/jpeg", 0.9);
+      previewCtx.restore();
+
+      const cropCanvas = document.createElement("canvas");
+      const thumbH = 120;
+      const thumbW = Math.max(1, Math.round(thumbH * aspectRatio));
+      cropCanvas.width = thumbW;
+      cropCanvas.height = thumbH;
+
+      const cropCtx = cropCanvas.getContext("2d");
+      if (!cropCtx) return;
+
+      cropCtx.fillStyle = "#111";
+      cropCtx.fillRect(0, 0, thumbW, thumbH);
+
+      cropCtx.drawImage(
+        previewCanvas,
+        displayBox.left,
+        displayBox.top,
+        displayBox.width,
+        displayBox.height,
+        0,
+        0,
+        thumbW,
+        thumbH
+      );
+
+      const thumbUrl = cropCanvas.toDataURL("image/jpeg", 0.9);
 
       let existing: SampleItem[] = [];
       try {
@@ -358,6 +369,7 @@ export default function AddSamplePage() {
         count: 0,
         color: nextColor,
         thumbUrl,
+        aspectRatio,
       };
 
       const nextSamples = [...existing, nextItem];
@@ -423,6 +435,27 @@ export default function AddSamplePage() {
       </div>
 
       <div className="px-4 pb-4 space-y-3">
+        <div className="flex items-center justify-center gap-2 flex-wrap">
+          <button
+            onClick={() => setAspectMode("square")}
+            className={`px-3 py-2 rounded-2xl border ${aspectMode === "square" ? "border-white bg-white text-black" : "border-zinc-700 bg-zinc-900 text-white"}`}
+          >
+            正方形
+          </button>
+          <button
+            onClick={() => setAspectMode("wide")}
+            className={`px-3 py-2 rounded-2xl border ${aspectMode === "wide" ? "border-white bg-white text-black" : "border-zinc-700 bg-zinc-900 text-white"}`}
+          >
+            横長
+          </button>
+          <button
+            onClick={() => setAspectMode("tall")}
+            className={`px-3 py-2 rounded-2xl border ${aspectMode === "tall" ? "border-white bg-white text-black" : "border-zinc-700 bg-zinc-900 text-white"}`}
+          >
+            縦長
+          </button>
+        </div>
+
         <div className="flex items-center justify-center gap-3">
           <button
             onClick={handleSmaller}
