@@ -31,51 +31,35 @@ export default function AddSamplePage() {
 
   const pointersRef = useRef<PointerMap>({});
   const dragRef = useRef<{
-    mode: "none" | "box-drag" | "pan" | "pinch";
+    mode: "none" | "pan" | "pinch";
     pointerId: number | null;
     startClientX: number;
     startClientY: number;
-    startCenterX: number;
-    startCenterY: number;
     startPanX: number;
     startPanY: number;
     startScale: number;
     startDistance: number;
-    startImageCenterX: number;
-    startImageCenterY: number;
   }>({
     mode: "none",
     pointerId: null,
     startClientX: 0,
     startClientY: 0,
-    startCenterX: 0,
-    startCenterY: 0,
     startPanX: 0,
     startPanY: 0,
     startScale: 1,
     startDistance: 0,
-    startImageCenterX: 0,
-    startImageCenterY: 0,
   });
 
   const [capturedImage, setCapturedImage] = useState("");
-  const [imageRect, setImageRect] = useState({
+  const [baseRect, setBaseRect] = useState({
     left: 0,
     top: 0,
     width: 0,
     height: 0,
   });
 
-  const [naturalSize, setNaturalSize] = useState({
-    width: 0,
-    height: 0,
-  });
-
   const [boxSize, setBoxSize] = useState(0.22);
-  const [centerX, setCenterX] = useState(0.5);
-  const [centerY, setCenterY] = useState(0.5);
 
-  // 画像表示操作
   const [imageScale, setImageScale] = useState(1);
   const [imagePanX, setImagePanX] = useState(0);
   const [imagePanY, setImagePanY] = useState(0);
@@ -91,13 +75,13 @@ export default function AddSamplePage() {
     }
   }, []);
 
-  const updateImageRect = () => {
+  const updateBaseRect = () => {
     if (!frameRef.current || !imgRef.current) return;
 
     const frame = frameRef.current.getBoundingClientRect();
     const img = imgRef.current.getBoundingClientRect();
 
-    setImageRect({
+    setBaseRect({
       left: img.left - frame.left,
       top: img.top - frame.top,
       width: img.width,
@@ -106,138 +90,79 @@ export default function AddSamplePage() {
   };
 
   useEffect(() => {
-    const onResize = () => updateImageRect();
+    const onResize = () => updateBaseRect();
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  const clampCenter = (
-    nextCenterX: number,
-    nextCenterY: number,
-    nextBoxSize: number = boxSize
-  ) => {
-    const half = nextBoxSize / 2;
-    return {
-      x: Math.max(half, Math.min(nextCenterX, 1 - half)),
-      y: Math.max(half, Math.min(nextCenterY, 1 - half)),
-    };
-  };
+  const transformedRect = useMemo(() => {
+    const scaledWidth = baseRect.width * imageScale;
+    const scaledHeight = baseRect.height * imageScale;
 
-  const displayBox = useMemo(() => {
-    const width = imageRect.width * boxSize;
-    const height = imageRect.height * boxSize;
-
-    const rawLeft = imageRect.left + imageRect.width * centerX - width / 2;
-    const rawTop = imageRect.top + imageRect.height * centerY - height / 2;
-
-    const minLeft = imageRect.left;
-    const maxLeft = imageRect.left + imageRect.width - width;
-    const minTop = imageRect.top;
-    const maxTop = imageRect.top + imageRect.height - height;
-
-    const left = Math.max(minLeft, Math.min(rawLeft, maxLeft));
-    const top = Math.max(minTop, Math.min(rawTop, maxTop));
+    const left =
+      baseRect.left + imagePanX - (scaledWidth - baseRect.width) / 2;
+    const top =
+      baseRect.top + imagePanY - (scaledHeight - baseRect.height) / 2;
 
     return {
       left,
       top,
+      width: scaledWidth,
+      height: scaledHeight,
+    };
+  }, [baseRect, imageScale, imagePanX, imagePanY]);
+
+  const displayBox = useMemo(() => {
+    const width = baseRect.width * boxSize;
+    const height = baseRect.height * boxSize;
+
+    return {
+      left: baseRect.left + (baseRect.width - width) / 2,
+      top: baseRect.top + (baseRect.height - height) / 2,
       width,
       height,
     };
-  }, [imageRect, boxSize, centerX, centerY]);
+  }, [baseRect, boxSize]);
 
   const getDistance = (a: { x: number; y: number }, b: { x: number; y: number }) =>
     Math.hypot(a.x - b.x, a.y - b.y);
 
-  const getMidpoint = (a: { x: number; y: number }, b: { x: number; y: number }) => ({
-    x: (a.x + b.x) / 2,
-    y: (a.y + b.y) / 2,
-  });
+  const clampPan = (nextPanX: number, nextPanY: number, nextScale = imageScale) => {
+    const scaledWidth = baseRect.width * nextScale;
+    const scaledHeight = baseRect.height * nextScale;
+
+    const overflowX = Math.max(0, (scaledWidth - baseRect.width) / 2);
+    const overflowY = Math.max(0, (scaledHeight - baseRect.height) / 2);
+
+    return {
+      x: Math.max(-overflowX, Math.min(nextPanX, overflowX)),
+      y: Math.max(-overflowY, Math.min(nextPanY, overflowY)),
+    };
+  };
 
   const handleSmaller = () => {
-    const nextSize = Math.max(0.12, boxSize - 0.03);
-    setBoxSize(nextSize);
-    const next = clampCenter(centerX, centerY, nextSize);
-    setCenterX(next.x);
-    setCenterY(next.y);
+    setBoxSize((v) => Math.max(0.12, v - 0.03));
   };
 
   const handleLarger = () => {
-    const nextSize = Math.min(0.5, boxSize + 0.03);
-    setBoxSize(nextSize);
-    const next = clampCenter(centerX, centerY, nextSize);
-    setCenterX(next.x);
-    setCenterY(next.y);
-  };
-
-  const onBoxPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!imageRect.width || !imageRect.height) return;
-
-    pointersRef.current[e.pointerId] = { x: e.clientX, y: e.clientY };
-
-    dragRef.current = {
-      ...dragRef.current,
-      mode: "box-drag",
-      pointerId: e.pointerId,
-      startClientX: e.clientX,
-      startClientY: e.clientY,
-      startCenterX: centerX,
-      startCenterY: centerY,
-    };
-
-    e.currentTarget.setPointerCapture(e.pointerId);
-  };
-
-  const onBoxPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    pointersRef.current[e.pointerId] = { x: e.clientX, y: e.clientY };
-
-    if (dragRef.current.mode !== "box-drag") return;
-    if (dragRef.current.pointerId !== e.pointerId) return;
-    if (!imageRect.width || !imageRect.height) return;
-
-    const dx = e.clientX - dragRef.current.startClientX;
-    const dy = e.clientY - dragRef.current.startClientY;
-
-    const nextCenterX = dragRef.current.startCenterX + dx / imageRect.width;
-    const nextCenterY = dragRef.current.startCenterY + dy / imageRect.height;
-
-    const next = clampCenter(nextCenterX, nextCenterY);
-    setCenterX(next.x);
-    setCenterY(next.y);
-  };
-
-  const onBoxPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
-    delete pointersRef.current[e.pointerId];
-    if (dragRef.current.pointerId === e.pointerId) {
-      try {
-        e.currentTarget.releasePointerCapture(e.pointerId);
-      } catch {}
-      dragRef.current.mode = "none";
-      dragRef.current.pointerId = null;
-    }
+    setBoxSize((v) => Math.min(0.5, v + 0.03));
   };
 
   const onFramePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     pointersRef.current[e.pointerId] = { x: e.clientX, y: e.clientY };
-
     const keys = Object.keys(pointersRef.current).map(Number);
 
     if (keys.length === 2) {
       const p1 = pointersRef.current[keys[0]];
       const p2 = pointersRef.current[keys[1]];
-      const dist = getDistance(p1, p2);
-      const mid = getMidpoint(p1, p2);
-
       dragRef.current = {
         ...dragRef.current,
         mode: "pinch",
         pointerId: null,
-        startDistance: dist,
+        startDistance: getDistance(p1, p2),
         startScale: imageScale,
         startPanX: imagePanX,
         startPanY: imagePanY,
-        startImageCenterX: mid.x,
-        startImageCenterY: mid.y,
       };
       return;
     }
@@ -262,8 +187,12 @@ export default function AddSamplePage() {
     if (dragRef.current.mode === "pan" && dragRef.current.pointerId === e.pointerId) {
       const dx = e.clientX - dragRef.current.startClientX;
       const dy = e.clientY - dragRef.current.startClientY;
-      setImagePanX(dragRef.current.startPanX + dx);
-      setImagePanY(dragRef.current.startPanY + dy);
+      const next = clampPan(
+        dragRef.current.startPanX + dx,
+        dragRef.current.startPanY + dy
+      );
+      setImagePanX(next.x);
+      setImagePanY(next.y);
       return;
     }
 
@@ -274,14 +203,16 @@ export default function AddSamplePage() {
       const p1 = pointersRef.current[keys[0]];
       const p2 = pointersRef.current[keys[1]];
       const dist = getDistance(p1, p2);
-
       if (dragRef.current.startDistance <= 0) return;
 
-      const nextScale = Math.max(
-        1,
-        Math.min(4, dragRef.current.startScale * (dist / dragRef.current.startDistance))
-      );
+      const rawScale =
+        dragRef.current.startScale * (dist / dragRef.current.startDistance);
+      const nextScale = Math.max(1, Math.min(4, rawScale));
       setImageScale(nextScale);
+
+      const next = clampPan(imagePanX, imagePanY, nextScale);
+      setImagePanX(next.x);
+      setImagePanY(next.y);
     }
   };
 
@@ -319,17 +250,27 @@ export default function AddSamplePage() {
     const naturalWidth = imgEl.naturalWidth;
     const naturalHeight = imgEl.naturalHeight;
 
-    if (!naturalWidth || !naturalHeight || !imageRect.width || !imageRect.height) {
+    if (
+      !naturalWidth ||
+      !naturalHeight ||
+      !transformedRect.width ||
+      !transformedRect.height
+    ) {
       return;
     }
 
-    const scaleX = naturalWidth / imageRect.width;
-    const scaleY = naturalHeight / imageRect.height;
+    const scaleX = naturalWidth / transformedRect.width;
+    const scaleY = naturalHeight / transformedRect.height;
 
-    const cropX = (displayBox.left - imageRect.left) * scaleX;
-    const cropY = (displayBox.top - imageRect.top) * scaleY;
-    const cropW = displayBox.width * scaleX;
-    const cropH = displayBox.height * scaleY;
+    let cropX = (displayBox.left - transformedRect.left) * scaleX;
+    let cropY = (displayBox.top - transformedRect.top) * scaleY;
+    let cropW = displayBox.width * scaleX;
+    let cropH = displayBox.height * scaleY;
+
+    cropX = Math.max(0, Math.min(cropX, naturalWidth));
+    cropY = Math.max(0, Math.min(cropY, naturalHeight));
+    cropW = Math.max(1, Math.min(cropW, naturalWidth - cropX));
+    cropH = Math.max(1, Math.min(cropH, naturalHeight - cropY));
 
     const sourceImg = new Image();
     sourceImg.onload = () => {
@@ -425,31 +366,18 @@ export default function AddSamplePage() {
                   transform: `translate(${imagePanX}px, ${imagePanY}px) scale(${imageScale})`,
                   transformOrigin: "center center",
                 }}
-                onLoad={() => {
-                  if (imgRef.current) {
-                    setNaturalSize({
-                      width: imgRef.current.naturalWidth,
-                      height: imgRef.current.naturalHeight,
-                    });
-                  }
-                  updateImageRect();
-                }}
+                onLoad={updateBaseRect}
                 draggable={false}
               />
 
               <div
-                className="absolute border-[3px] border-white rounded-md bg-white/5"
+                className="absolute border-[3px] border-white rounded-md bg-white/5 pointer-events-none"
                 style={{
                   left: displayBox.left,
                   top: displayBox.top,
                   width: displayBox.width,
                   height: displayBox.height,
-                  cursor: "grab",
                 }}
-                onPointerDown={onBoxPointerDown}
-                onPointerMove={onBoxPointerMove}
-                onPointerUp={onBoxPointerUp}
-                onPointerCancel={onBoxPointerUp}
               />
             </>
           ) : (
@@ -475,7 +403,7 @@ export default function AddSamplePage() {
         </div>
 
         <div className="text-center text-xs text-zinc-400">
-          1本指で画像移動 / 2本指で拡大縮小 / 枠ドラッグで位置調整
+          1本指で画像移動 / 2本指で拡大縮小 / 枠は中央固定
         </div>
 
         <div className="flex items-center justify-center gap-3">
