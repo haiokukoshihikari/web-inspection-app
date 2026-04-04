@@ -17,10 +17,10 @@ type SampleItem = {
 };
 
 type DetectionBox = {
-  x: number; // 画像内 0-1
-  y: number; // 画像内 0-1
-  w: number; // 画像内 0-1
-  h: number; // 画像内 0-1
+  x: number;
+  y: number;
+  w: number;
+  h: number;
   color: string;
   sampleId: string;
   score: number;
@@ -192,7 +192,7 @@ function sampleWindowScoreDual(
   const grayScore = diffGray / count;
   const edgeScore = diffEdge / count;
 
-  // 前より灰度寄りに戻す
+  // 感度逆転を避けやすいよう、灰度寄りに戻す
   return grayScore * 0.6 + edgeScore * 0.4;
 }
 
@@ -389,8 +389,8 @@ export default function ReviewPage() {
         const sceneH = Math.max(1, Math.round(sceneImg.naturalHeight * scale));
 
         const sceneCanvas = document.createElement("canvas");
-            sceneCanvas.width = sceneW;
-            sceneCanvas.height = sceneH;
+        sceneCanvas.width = sceneW;
+        sceneCanvas.height = sceneH;
         const sceneCtx = sceneCanvas.getContext("2d");
         if (!sceneCtx) return;
 
@@ -407,7 +407,7 @@ export default function ReviewPage() {
         const strictThreshold = 0.12 + sensitivity01 * 0.04;
         const relaxedThreshold = 0.145 + sensitivity01 * 0.05;
 
-        // 感度を上げるほど細かく探索する
+        // 感度を上げるほど細かく探索
         const stride = sensitivity >= 70 ? 6 : sensitivity >= 40 ? 8 : 10;
 
         for (const sample of visibleSamples) {
@@ -435,7 +435,6 @@ export default function ReviewPage() {
 
             const tplGray = imageToGray(sampleImg, tplW, tplH);
             const tplEdge = makeEdgeMap(tplGray, tplW, tplH);
-
             const tplEdgeMean = meanOfArray(tplEdge);
 
             for (let y = 0; y <= sceneH - tplH; y += stride) {
@@ -446,25 +445,23 @@ export default function ReviewPage() {
                 const edgeMean = sampleWindowMean(sceneEdge, sceneW, x, y, tplW, tplH);
 
                 const score = sampleWindowScoreDual(
-                    sceneGray,
-                    sceneEdge,
-                    sceneW,
-                    x,
-                    y,
-                    tplGray,
-                    tplEdge,
-                    tplW,
-                    tplH
+                  sceneGray,
+                  sceneEdge,
+                  sceneW,
+                  x,
+                  y,
+                  tplGray,
+                  tplEdge,
+                  tplW,
+                  tplH
                 );
 
-                // まず厳しめ
                 let passed =
-                    score <= strictThreshold &&
-                    edgeMean >= tplEdgeMean * 0.38;
+                  score <= strictThreshold &&
+                  edgeMean >= tplEdgeMean * 0.38;
 
-                // 0件になりやすいので、少し救済
                 if (!passed) {
-                passed =
+                  passed =
                     score <= relaxedThreshold &&
                     edgeMean >= tplEdgeMean * 0.22;
                 }
