@@ -192,7 +192,8 @@ function sampleWindowScoreDual(
   const grayScore = diffGray / count;
   const edgeScore = diffEdge / count;
 
-  return grayScore * 0.35 + edgeScore * 0.65;
+  // 前より灰度寄りに戻す
+  return grayScore * 0.6 + edgeScore * 0.4;
 }
 
 function iou(a: DetectionBox, b: DetectionBox) {
@@ -400,8 +401,10 @@ export default function ReviewPage() {
 
         const allDetections: DetectionBox[] = [];
 
-        const threshold =
-          0.135 - (Math.max(0, Math.min(100, sensitivity)) / 100) * 0.035;
+        const strictThreshold =
+            0.135 - (Math.max(0, Math.min(100, sensitivity)) / 100) * 0.035;
+        const relaxedThreshold =
+            0.165 - (Math.max(0, Math.min(100, sensitivity)) / 100) * 0.04;
         const stride = sensitivity >= 70 ? 7 : sensitivity >= 40 ? 9 : 11;
 
         for (const sample of visibleSamples) {
@@ -435,24 +438,35 @@ export default function ReviewPage() {
             for (let y = 0; y <= sceneH - tplH; y += stride) {
               for (let x = 0; x <= sceneW - tplW; x += stride) {
                 const std = sampleWindowStd(sceneGray, sceneW, x, y, tplW, tplH);
-                if (std < 0.075) continue;
+                if (std < 0.06) continue;
 
                 const edgeMean = sampleWindowMean(sceneEdge, sceneW, x, y, tplW, tplH);
-                if (edgeMean < tplEdgeMean * 0.40) continue;
 
                 const score = sampleWindowScoreDual(
-                  sceneGray,
-                  sceneEdge,
-                  sceneW,
-                  x,
-                  y,
-                  tplGray,
-                  tplEdge,
-                  tplW,
-                  tplH
+                    sceneGray,
+                    sceneEdge,
+                    sceneW,
+                    x,
+                    y,
+                    tplGray,
+                    tplEdge,
+                    tplW,
+                    tplH
                 );
 
-                if (score <= threshold) {
+                // まず厳しめ
+                let passed =
+                    score <= strictThreshold &&
+                    edgeMean >= tplEdgeMean * 0.38;
+
+                // 0件になりやすいので、少し救済
+                if (!passed) {
+                passed =
+                    score <= relaxedThreshold &&
+                    edgeMean >= tplEdgeMean * 0.22;
+                }
+
+                if (passed) {
                   candidates.push({
                     x: x / sceneW,
                     y: y / sceneH,
@@ -487,7 +501,7 @@ export default function ReviewPage() {
             });
 
             if (!overlaps) picked.push(c);
-            if (picked.length >= 2) break;
+            if (picked.length >= 3) break;
           }
 
           allDetections.push(...picked);
