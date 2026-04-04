@@ -626,6 +626,12 @@ export default function ReviewPage() {
 
   const overlayMuted = isAdjustingSensitivity || detecting;
 
+  const overlayMessage = isAdjustingSensitivity
+  ? "調整中..."
+  : detecting
+    ? "検知中..."
+    : "";
+    
   return (
     <main className="min-h-screen bg-black text-white flex flex-col">
       <div className="px-4 pt-4 pb-3 border-b border-zinc-800 bg-zinc-950 space-y-3">
@@ -689,13 +695,19 @@ export default function ReviewPage() {
                 />
               ))}
 
-              <div className="absolute left-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10 max-w-[85%] break-all">
-                {isAdjustingSensitivity
-                  ? "調整中..."
-                  : detecting
-                    ? "検知中..."
-                    : `検知数: ${detections.length}`}
-              </div>
+              {overlayMessage ? (
+                <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/45">
+                    <div className="px-6 py-4 rounded-2xl border border-white/15 bg-black/55 text-center shadow-xl">
+                    <div className="text-2xl font-semibold tracking-wide">{overlayMessage}</div>
+                    <div className="mt-1 text-sm text-zinc-300">少しお待ちください</div>
+                    </div>
+                </div>
+                ) : null}
+
+                <div className="absolute left-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10 max-w-[85%] break-all">
+                {`検知数: ${detections.length}`}
+                </div>
+
             </>
           ) : (
             <div className="h-full flex items-center justify-center text-zinc-400">
