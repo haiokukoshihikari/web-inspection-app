@@ -127,18 +127,54 @@ export default function AddSamplePage() {
   const getDistance = (a: { x: number; y: number }, b: { x: number; y: number }) =>
     Math.hypot(a.x - b.x, a.y - b.y);
 
-  const clampPan = (nextPanX: number, nextPanY: number, nextScale = imageScale) => {
-    const scaledWidth = baseRect.width * nextScale;
-    const scaledHeight = baseRect.height * nextScale;
+ const clampPan = (nextPanX: number, nextPanY: number, nextScale = imageScale) => {
+  const scaledWidth = baseRect.width * nextScale;
+  const scaledHeight = baseRect.height * nextScale;
 
-    const overflowX = Math.max(0, (scaledWidth - baseRect.width) / 2);
-    const overflowY = Math.max(0, (scaledHeight - baseRect.height) / 2);
+  // 拡大後画像の左上位置
+  const imageLeft = baseRect.left + nextPanX - (scaledWidth - baseRect.width) / 2;
+  const imageTop = baseRect.top + nextPanY - (scaledHeight - baseRect.height) / 2;
 
-    return {
-      x: Math.max(-overflowX, Math.min(nextPanX, overflowX)),
-      y: Math.max(-overflowY, Math.min(nextPanY, overflowY)),
-    };
+  const imageRight = imageLeft + scaledWidth;
+  const imageBottom = imageTop + scaledHeight;
+
+  // 中央固定枠が画像からはみ出さない範囲に制限したい
+  let correctedPanX = nextPanX;
+  let correctedPanY = nextPanY;
+
+  const nextDisplayBox = {
+    left: baseRect.left + (baseRect.width - baseRect.width * boxSize) / 2,
+    top: baseRect.top + (baseRect.height - baseRect.height * boxSize) / 2,
+    width: baseRect.width * boxSize,
+    height: baseRect.height * boxSize,
   };
+
+  const boxLeft = nextDisplayBox.left;
+  const boxTop = nextDisplayBox.top;
+  const boxRight = nextDisplayBox.left + nextDisplayBox.width;
+  const boxBottom = nextDisplayBox.top + nextDisplayBox.height;
+
+  // 左右
+  if (imageLeft > boxLeft) {
+    correctedPanX -= imageLeft - boxLeft;
+  }
+  if (imageRight < boxRight) {
+    correctedPanX += boxRight - imageRight;
+  }
+
+  // 上下
+  if (imageTop > boxTop) {
+    correctedPanY -= imageTop - boxTop;
+  }
+  if (imageBottom < boxBottom) {
+    correctedPanY += boxBottom - imageBottom;
+  }
+
+  return {
+    x: correctedPanX,
+    y: correctedPanY,
+  };
+};
 
   const handleSmaller = () => {
     setBoxSize((v) => Math.max(0.12, v - 0.03));
