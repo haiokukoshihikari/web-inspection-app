@@ -299,8 +299,8 @@ export default function ReviewPage() {
 
         // 感度が高いほど拾いやすくする
         const threshold =
-          0.23 - (Math.max(0, Math.min(100, sensitivity)) / 100) * 0.10;
-        const stride = sensitivity >= 70 ? 5 : sensitivity >= 40 ? 7 : 9;
+          0.16 - (Math.max(0, Math.min(100, sensitivity)) / 100) * 0.05;
+        const stride = sensitivity >= 70 ? 6 : sensitivity >= 40 ? 8 : 10;
 
         for (const sample of visibleSamples) {
           if (!sample.thumbUrl) continue;
@@ -308,14 +308,14 @@ export default function ReviewPage() {
           const sampleImg = await loadImage(sample.thumbUrl);
           if (cancelled) return;
 
-          const baseTplH = 28;
-          const ratio =
+          const baseTplH = 42;
+            const ratio =
             sample.aspectRatio && sample.aspectRatio > 0
-              ? sample.aspectRatio
-              : sampleImg.naturalWidth / sampleImg.naturalHeight || 1;
-          const baseTplW = Math.max(12, Math.round(baseTplH * ratio));
+                ? sample.aspectRatio
+                : sampleImg.naturalWidth / sampleImg.naturalHeight || 1;
+            const baseTplW = Math.max(18, Math.round(baseTplH * ratio));
 
-          const scaleList = [0.8, 1.0, 1.2, 1.45];
+            const scaleList = [0.9, 1.0, 1.15];
           const candidates: DetectionBox[] = [];
 
           for (const s of scaleList) {
@@ -369,11 +369,10 @@ export default function ReviewPage() {
           const picked: DetectionBox[] = [];
 
           for (const c of candidates) {
-            const overlaps = picked.some((p) => iou(p, c) > 0.35);
+            const overlaps = picked.some((p) => iou(p, c) > 0.2);
             if (!overlaps) picked.push(c);
-            if (picked.length >= 30) break;
-          }
-
+            if (picked.length >= 5) break;
+}
           allDetections.push(...picked);
         }
 
