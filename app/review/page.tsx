@@ -7,6 +7,7 @@ const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
 const MISSING_KEY = "inspection:missingOn";
 const SAMPLES_KEY = "inspection:samples";
+const SAMPLE_MODE_OVERRIDE_KEY = "inspection:sampleModeOverride";
 
 type SampleItem = {
   id: string;
@@ -15,6 +16,10 @@ type SampleItem = {
   thumbUrl?: string;
   aspectRatio?: number;
 };
+
+type SampleModeChoice = "AUTO" | "LABEL" | "LOGO";
+
+type MatchMode = "LABEL" | "LOGO";
 
 type DetectionBox = {
   x: number;
@@ -35,7 +40,7 @@ type TemplateFeature = {
   width: number;
   height: number;
   data: Float32Array;
-  mode: MatchMode;
+  autoMode: MatchMode;
 };
 
 const DEFAULT_SAMPLES: SampleItem[] = [
@@ -388,13 +393,13 @@ async function buildTemplateFeature(sample: SampleItem): Promise<TemplateFeature
     fgCoverage < 0.28;
 
   return {
-    aspectRatio: ratio,
-    polarity,
-    width: tw,
-    height: th,
-    data: labelLike ? fg : normalizePatch(gray, polarity),
-    mode: labelLike ? "LABEL" : "LOGO",
-  };
+  aspectRatio: ratio,
+  polarity,
+  width: tw,
+  height: th,
+  data: labelLike ? fg : normalizePatch(gray, polarity),
+  autoMode: labelLike ? "LABEL" : "LOGO",
+};
 }
 
 export default function ReviewPage() {
@@ -423,6 +428,7 @@ export default function ReviewPage() {
   const [isAdjustingSensitivity, setIsAdjustingSensitivity] = useState(false);
   const [isSliderDragging, setIsSliderDragging] = useState(false);
   const [sampleModes, setSampleModes] = useState<Record<string, MatchMode>>({});
+  const [sampleModeOverrides, setSampleModeOverrides] = useState<Record<string, SampleModeChoice>>({});
 
   useEffect(() => {
     try {
@@ -461,6 +467,15 @@ export default function ReviewPage() {
       } else {
         setSamples(DEFAULT_SAMPLES);
       }
+      const savedModeOverride = localStorage.getItem(SAMPLE_MODE_OVERRIDE_KEY);
+        if (savedModeOverride) {
+        try {
+            const parsed = JSON.parse(savedModeOverride);
+            if (parsed && typeof parsed === "object") {
+            setSampleModeOverrides(parsed);
+            }
+        } catch {}
+        }
     } finally {
       setSamplesLoaded(true);
     }
@@ -474,6 +489,18 @@ export default function ReviewPage() {
       console.error("samples save error:", e);
     }
   }, [samples, samplesLoaded]);
+
+    useEffect(() => {
+    if (!samplesLoaded) return;
+    try {
+        localStorage.setItem(
+        SAMPLE_MODE_OVERRIDE_KEY,
+        JSON.stringify(sampleModeOverrides)
+        );
+    } catch (e) {
+        console.error("sample mode override save error:", e);
+    }
+    }, [sampleModeOverrides, samplesLoaded]);
 
   useEffect(() => {
     const stopDragging = () => {
@@ -565,6 +592,15 @@ export default function ReviewPage() {
     localStorage.setItem(MISSING_KEY, String(next));
   };
 
+    const cycleSampleMode = (sampleId: string) => {
+    setSampleModeOverrides((prev) => {
+        const current = prev[sampleId] ?? "AUTO";
+        const next: SampleModeChoice =
+        current === "AUTO" ? "LABEL" : current === "LABEL" ? "LOGO" : "AUTO";
+        return { ...prev, [sampleId]: next };
+    });
+    };
+
   const canAdd = useMemo(() => samples.length < MAX_SAMPLES, [samples.length]);
   const visibleSamples = useMemo(() => samples.filter((s) => !!s.thumbUrl), [samples]);
 
@@ -634,7 +670,9 @@ export default function ReviewPage() {
 
         const nextModes: Record<string, MatchMode> = {};
         for (const entry of templateEntries) {
-          nextModes[entry.sample.id] = entry.tpl.mode;
+          const override = sampleModeOverrides[entry.sample.id] ?? "AUTO";
+            nextModes[entry.sample.id] =
+            override === "AUTO" ? entry.tpl.autoMode : override;
         }
         setSampleModes(nextModes);
 
@@ -649,7 +687,12 @@ export default function ReviewPage() {
 
           const candidates: DetectionBox[] = [];
 
-          if (tpl.mode === "LABEL") {
+          const effectiveMode =
+            (sampleModeOverrides[sample.id] ?? "AUTO") === "AUTO"
+                ? tpl.autoMode
+                : (sampleModeOverrides[sample.id] as MatchMode);
+
+            if (effectiveMode === "LABEL") {
             const sceneFg = makeForegroundMap(sceneGray, sceneW, sceneH, tpl.polarity);
             const sceneIntegral = makeIntegralMap(sceneFg, sceneW, sceneH);
 
@@ -810,7 +853,7 @@ export default function ReviewPage() {
     return () => {
       cancelled = true;
     };
-  }, [capturedImage, visibleSamples, appliedSensitivity]);
+  }, [capturedImage, visibleSamples, appliedSensitivity, sampleModeOverrides]);
 
   const overlayMuted = isAdjustingSensitivity || prepareDetecting || detecting;
   const overlayMessage = isAdjustingSensitivity
@@ -926,6 +969,9 @@ export default function ReviewPage() {
               sample.aspectRatio && sample.aspectRatio > 0 ? sample.aspectRatio : 1;
             const thumbW = Math.max(40, Math.min(72, Math.round(40 * ratio)));
             const mode = sampleModes[sample.id];
+            const overrideMode = sampleModeOverrides[sample.id] ?? "AUTO";
+            const modeLabel =
+            overrideMode === "AUTO" ? `AUTO:${mode ?? "-"}` : overrideMode;
 
             return (
               <div key={sample.id} className="relative overflow-visible isolate">
@@ -949,7 +995,17 @@ export default function ReviewPage() {
                         className="max-w-full max-h-full object-contain"
                       />
                       {mode ? (
-                        <div className="absolute right-1 bottom-1 rounded bg-black/75 px-1 py-[1px] text-[8px] leading-none text-white">
+                        <div<button
+                        type="button"
+                        onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            cycleSampleMode(sample.id);
+                        }}
+                        className="absolute right-1 bottom-1 rounded bg-black/75 px-1 py-[1px] text-[8px] leading-none text-white"
+                        >
+                        {modeLabel}
+                        </button>
                           {mode}
                         </div>
                       ) : null}
@@ -977,6 +1033,11 @@ export default function ReviewPage() {
                         e.stopPropagation();
                         if (window.confirm("削除しますか？")) {
                         setSamples((prev) => prev.filter((s) => s.id !== sample.id));
+                        setSampleModeOverrides((prev) => {
+                        const next = { ...prev };
+                        delete next[sample.id];
+                        return next;
+                        });
                         setShowDeleteFor(null);
                         }
                     }}
