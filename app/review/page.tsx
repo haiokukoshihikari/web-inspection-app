@@ -404,38 +404,50 @@ export default function ReviewPage() {
   }, [draftSensitivity, appliedSensitivity]);
 
   const updateImageRect = () => {
-    if (!frameRef.current || !imgRef.current) return;
+    const frame = frameRef.current;
+    const img = imgRef.current;
+    if (!frame || !img) return;
 
-    const frame = frameRef.current.getBoundingClientRect();
-    const img = imgRef.current.getBoundingClientRect();
+    const frameWidth = frame.clientWidth;
+    const frameHeight = frame.clientHeight;
+    const naturalWidth = img.naturalWidth;
+    const naturalHeight = img.naturalHeight;
+
+    if (!frameWidth || !frameHeight || !naturalWidth || !naturalHeight) return;
+
+    const scale = Math.min(frameWidth / naturalWidth, frameHeight / naturalHeight);
+    const displayWidth = naturalWidth * scale;
+    const displayHeight = naturalHeight * scale;
+    const left = (frameWidth - displayWidth) / 2;
+    const top = (frameHeight - displayHeight) / 2;
 
     setImageRect({
-      left: img.left - frame.left,
-      top: img.top - frame.top,
-      width: img.width,
-      height: img.height,
+      left,
+      top,
+      width: displayWidth,
+      height: displayHeight,
     });
   };
-
-  useEffect(() => {
-  if (!capturedImage) return;
-
-    const t1 = window.setTimeout(() => updateImageRect(), 0);
-    const t2 = window.setTimeout(() => updateImageRect(), 120);
-    const t3 = window.setTimeout(() => updateImageRect(), 300);
-
-    return () => {
-        window.clearTimeout(t1);
-        window.clearTimeout(t2);
-        window.clearTimeout(t3);
-        };
-    }, [capturedImage, detections.length]);
 
   useEffect(() => {
     const onResize = () => updateImageRect();
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
+
+  useEffect(() => {
+    if (!capturedImage) return;
+
+    const t1 = window.setTimeout(() => updateImageRect(), 0);
+    const t2 = window.setTimeout(() => updateImageRect(), 120);
+    const t3 = window.setTimeout(() => updateImageRect(), 300);
+
+    return () => {
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+      window.clearTimeout(t3);
+    };
+  }, [capturedImage, detections.length]);
 
   const handleSensitivityChange = (value: number) => {
     setDraftSensitivity(value);
@@ -472,6 +484,8 @@ export default function ReviewPage() {
         return;
       }
 
+      // 古い結果を残さない
+      setDetections([]);
       setPrepareDetecting(true);
 
       await new Promise((resolve) => setTimeout(resolve, 220));
@@ -733,9 +747,9 @@ export default function ReviewPage() {
                 alt="撮影画像"
                 className="max-w-full max-h-full object-contain block"
                 onLoad={() => {
-            updateImageRect();
-            window.setTimeout(() => updateImageRect(), 120);
-            }}
+                  updateImageRect();
+                  window.setTimeout(() => updateImageRect(), 120);
+                }}
               />
 
               {detections.map((box, index) => (
