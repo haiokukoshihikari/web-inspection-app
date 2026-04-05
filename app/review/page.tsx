@@ -216,6 +216,10 @@ function buildWindowFeatures(
     features.push(mean);
   }
 
+  const overallDark = rectSum(darkIntegral, fullW, x, y, w, h) / (w * h);
+  const overallEdge = rectSum(edgeIntegral, fullW, x, y, w, h) / (w * h);
+  features.push(overallDark, overallEdge);
+
   return normalizeVector(features);
 }
 
@@ -291,8 +295,8 @@ function buildCandidateRects(
   const stepY = 24;
   const stepX = 24;
 
-  for (let h of [28, 36, 44, 56]) {
-    for (let w of [72, 96, 120, 148]) {
+  for (const h of [24, 32, 40, 52, 64]) {
+    for (const w of [56, 72, 96, 120, 148, 180]) {
       if (w >= sceneW || h >= sceneH) continue;
 
       for (let y = 0; y <= sceneH - h; y += stepY) {
@@ -300,12 +304,31 @@ function buildCandidateRects(
           const darkMean = rectSum(darkIntegral, sceneW, x, y, w, h) / (w * h);
           const edgeMean = rectSum(edgeIntegral, sceneW, x, y, w, h) / (w * h);
 
-          if (darkMean < 0.08) continue;
-          if (edgeMean < 0.015) continue;
+          if (darkMean < 0.05) continue;
+          if (edgeMean < 0.01) continue;
+          if (w / h < 1.2) continue;
 
-          const wideEnough = w / h >= 1.6;
-          if (!wideEnough) continue;
+          rects.push({ x, y, w, h });
+          if (rects.length >= 260) return rects;
+        }
+      }
+    }
+  }
 
+  return rects;
+}
+
+function buildFallbackRects(sceneW: number, sceneH: number): CandidateRect[] {
+  const rects: CandidateRect[] = [];
+  const stepY = 28;
+  const stepX = 28;
+
+  for (const h of [28, 36, 44, 56]) {
+    for (const w of [72, 96, 120, 148]) {
+      if (w >= sceneW || h >= sceneH) continue;
+
+      for (let y = 0; y <= sceneH - h; y += stepY) {
+        for (let x = 0; x <= sceneW - w; x += stepX) {
           rects.push({ x, y, w, h });
           if (rects.length >= 220) return rects;
         }
@@ -490,9 +513,9 @@ export default function ReviewPage() {
         if (cancelled) return;
 
         const maxSceneW = 520;
-        const scale = Math.min(1, maxSceneW / sceneImg.naturalWidth);
-        const sceneW = Math.max(1, Math.round(sceneImg.naturalWidth * scale));
-        const sceneH = Math.max(1, Math.round(sceneImg.naturalHeight * scale));
+        const resizeScale = Math.min(1, maxSceneW / sceneImg.naturalWidth);
+        const sceneW = Math.max(1, Math.round(sceneImg.naturalWidth * resizeScale));
+        const sceneH = Math.max(1, Math.round(sceneImg.naturalHeight * resizeScale));
 
         const sceneCanvas = document.createElement("canvas");
         sceneCanvas.width = sceneW;
@@ -510,16 +533,20 @@ export default function ReviewPage() {
         const darkSceneIntegral = makeIntegralMap(darkScene, sceneW, sceneH);
         const edgeSceneIntegral = makeIntegralMap(sceneEdge, sceneW, sceneH);
 
-        const candidateRects = buildCandidateRects(
+        let candidateRects = buildCandidateRects(
           darkSceneIntegral,
           edgeSceneIntegral,
           sceneW,
           sceneH
         );
 
+        if (candidateRects.length < 12) {
+          candidateRects = buildFallbackRects(sceneW, sceneH);
+        }
+
         const allDetections: DetectionBox[] = [];
         const sensitivity01 = Math.max(0, Math.min(100, appliedSensitivity)) / 100;
-        const featureThreshold = 0.095 + sensitivity01 * 0.03;
+        const featureThreshold = 0.11 + sensitivity01 * 0.035;
 
         for (const sample of visibleSamples) {
           await new Promise((resolve) => setTimeout(resolve, 0));
@@ -559,7 +586,7 @@ export default function ReviewPage() {
           for (const rect of candidateRects) {
             const rectRatio = rect.w / rect.h;
             const ratioGap = Math.abs(rectRatio - ratio);
-            if (ratioGap > Math.max(0.9, ratio * 0.6)) continue;
+            if (ratioGap > Math.max(1.2, ratio * 0.9)) continue;
 
             const windowFeature = buildWindowFeatures(
               darkSceneIntegral,
@@ -599,7 +626,7 @@ export default function ReviewPage() {
 
           const trimmedCandidates = candidates
             .sort((a, b) => a.score - b.score)
-            .slice(0, 20);
+            .slice(0, 30);
 
           const supportedCandidates = addSupportToCandidates(trimmedCandidates)
             .sort((a, b) => {
