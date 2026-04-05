@@ -27,10 +27,12 @@ type DetectionBox = {
   support: number;
 };
 
-type SampleFeature = {
-  vector: number[];
+type TemplateFeature = {
   aspectRatio: number;
   polarity: "dark" | "light";
+  width: number;
+  height: number;
+  data: Float32Array;
 };
 
 const DEFAULT_SAMPLES: SampleItem[] = [
@@ -122,77 +124,6 @@ function rectSum(
   );
 }
 
-function normalizeVector(vec: number[]) {
-  const sum = vec.reduce((a, b) => a + Math.abs(b), 0);
-  if (sum <= 1e-6) return vec.map(() => 0);
-  return vec.map((v) => v / sum);
-}
-
-function featureDistance(a: number[], b: number[]) {
-  let sum = 0;
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i++) {
-    sum += Math.abs(a[i] - b[i]);
-  }
-  return sum / Math.max(1, len);
-}
-
-function buildShapeVector(
-  integral: Float32Array,
-  fullW: number,
-  fullH: number,
-  sx: number,
-  sy: number,
-  ww: number,
-  hh: number
-) {
-  const x = Math.max(0, Math.min(sx, fullW - 1));
-  const y = Math.max(0, Math.min(sy, fullH - 1));
-  const w = Math.max(1, Math.min(ww, fullW - x));
-  const h = Math.max(1, Math.min(hh, fullH - y));
-
-  const vec: number[] = [];
-
-  for (let gy = 0; gy < 4; gy++) {
-    for (let gx = 0; gx < 4; gx++) {
-      const cx = x + Math.floor((gx * w) / 4);
-      const cy = y + Math.floor((gy * h) / 4);
-      const cw = Math.max(
-        1,
-        Math.floor(((gx + 1) * w) / 4) - Math.floor((gx * w) / 4)
-      );
-      const ch = Math.max(
-        1,
-        Math.floor(((gy + 1) * h) / 4) - Math.floor((gy * h) / 4)
-      );
-      const mean = rectSum(integral, fullW, cx, cy, cw, ch) / (cw * ch);
-      vec.push(mean);
-    }
-  }
-
-  for (let gy = 0; gy < 8; gy++) {
-    const cy = y + Math.floor((gy * h) / 8);
-    const ch = Math.max(
-      1,
-      Math.floor(((gy + 1) * h) / 8) - Math.floor((gy * h) / 8)
-    );
-    const mean = rectSum(integral, fullW, x, cy, w, ch) / (w * ch);
-    vec.push(mean);
-  }
-
-  for (let gx = 0; gx < 8; gx++) {
-    const cx = x + Math.floor((gx * w) / 8);
-    const cw = Math.max(
-      1,
-      Math.floor(((gx + 1) * w) / 8) - Math.floor((gx * w) / 8)
-    );
-    const mean = rectSum(integral, fullW, cx, y, cw, h) / (cw * h);
-    vec.push(mean);
-  }
-
-  return normalizeVector(vec);
-}
-
 function iou(a: DetectionBox, b: DetectionBox) {
   const ax1 = a.x;
   const ay1 = a.y;
@@ -226,7 +157,7 @@ function centerDistance(a: DetectionBox, b: DetectionBox) {
 }
 
 function overlapOrNear(a: DetectionBox, b: DetectionBox) {
-  const near = centerDistance(a, b) < Math.max(a.w, b.w) * 0.6;
+  const near = centerDistance(a, b) < Math.max(a.w, b.w) * 0.55;
   return iou(a, b) > 0.1 || near;
 }
 
@@ -264,7 +195,48 @@ function colorFromSample(sample: SampleItem) {
   return "#f43f5e";
 }
 
-async function buildSampleFeature(sample: SampleItem): Promise<SampleFeature | null> {
+function normalizePatch(
+  gray: Float32Array,
+  polarity: "dark" | "light"
+): Float32Array {
+  const out = new Float32Array(gray.length);
+
+  for (let i = 0; i < gray.length; i++) {
+    const g = gray[i];
+    out[i] =
+      polarity === "dark"
+        ? Math.max(0, (0.68 - g) / 0.68)
+        : Math.max(0, (g - 0.32) / 0.68);
+  }
+
+  let mean = 0;
+  for (let i = 0; i < out.length; i++) mean += out[i];
+  mean /= Math.max(1, out.length);
+
+  let variance = 0;
+  for (let i = 0; i < out.length; i++) {
+    const d = out[i] - mean;
+    variance += d * d;
+  }
+  const std = Math.sqrt(variance / Math.max(1, out.length)) || 1;
+
+  for (let i = 0; i < out.length; i++) {
+    out[i] = (out[i] - mean) / std;
+  }
+
+  return out;
+}
+
+function templateDistance(a: Float32Array, b: Float32Array) {
+  let sum = 0;
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    sum += Math.abs(a[i] - b[i]);
+  }
+  return sum / Math.max(1, len);
+}
+
+async function buildTemplateFeature(sample: SampleItem): Promise<TemplateFeature | null> {
   if (!sample.thumbUrl) return null;
 
   const img = await loadImage(sample.thumbUrl);
@@ -273,37 +245,55 @@ async function buildSampleFeature(sample: SampleItem): Promise<SampleFeature | n
       ? sample.aspectRatio
       : img.naturalWidth / img.naturalHeight || 1;
 
-  const sw = 96;
-  const sh = Math.max(20, Math.round(96 / ratio));
-  const gray = imageToGray(img, sw, sh);
+  const th = 36;
+  const tw = Math.max(16, Math.round(th * ratio));
+  const gray = imageToGray(img, tw, th);
 
   let darkTotal = 0;
   let lightTotal = 0;
   for (let i = 0; i < gray.length; i++) {
     const g = gray[i];
-    darkTotal += Math.max(0, (0.6 - g) / 0.6);
-    lightTotal += Math.max(0, (g - 0.4) / 0.6);
+    darkTotal += Math.max(0, (0.65 - g) / 0.65);
+    lightTotal += Math.max(0, (g - 0.35) / 0.65);
   }
 
   const polarity: "dark" | "light" = lightTotal > darkTotal ? "light" : "dark";
-
-  const comp = new Float32Array(gray.length);
-  for (let i = 0; i < gray.length; i++) {
-    const g = gray[i];
-    comp[i] =
-      polarity === "dark"
-        ? Math.max(0, (0.62 - g) / 0.62)
-        : Math.max(0, (g - 0.38) / 0.62);
-  }
-
-  const integral = makeIntegralMap(comp, sw, sh);
-  const vector = buildShapeVector(integral, sw, sh, 0, 0, sw, sh);
+  const data = normalizePatch(gray, polarity);
 
   return {
-    vector,
     aspectRatio: ratio,
     polarity,
+    width: tw,
+    height: th,
+    data,
   };
+}
+
+function cropGrayPatch(
+  sceneGray: Float32Array,
+  sceneW: number,
+  sceneH: number,
+  sx: number,
+  sy: number,
+  sw: number,
+  sh: number,
+  outW: number,
+  outH: number
+): Float32Array {
+  const out = new Float32Array(outW * outH);
+
+  for (let oy = 0; oy < outH; oy++) {
+    const srcY = sy + ((oy + 0.5) * sh) / outH;
+    const iy = Math.max(0, Math.min(sceneH - 1, Math.floor(srcY)));
+
+    for (let ox = 0; ox < outW; ox++) {
+      const srcX = sx + ((ox + 0.5) * sw) / outW;
+      const ix = Math.max(0, Math.min(sceneW - 1, Math.floor(srcX)));
+      out[oy * outW + ox] = sceneGray[iy * sceneW + ix];
+    }
+  }
+
+  return out;
 }
 
 export default function ReviewPage() {
@@ -517,58 +507,57 @@ export default function ReviewPage() {
         if (!sceneCtx) return;
 
         sceneCtx.drawImage(sceneImg, 0, 0, sceneW, sceneH);
-
         const { gray: sceneGray } = canvasToGray(sceneCanvas);
 
-        const sampleFeaturesRaw = await Promise.all(
-          visibleSamples.map((s) => buildSampleFeature(s))
+        const templateRaw = await Promise.all(
+          visibleSamples.map((s) => buildTemplateFeature(s))
         );
-        const sampleEntries = visibleSamples
+
+        const templateEntries = visibleSamples
           .map((sample, index) => ({
             sample,
-            feature: sampleFeaturesRaw[index],
+            tpl: templateRaw[index],
           }))
           .filter(
-            (entry): entry is { sample: SampleItem; feature: SampleFeature } =>
-              !!entry.feature
+            (entry): entry is { sample: SampleItem; tpl: TemplateFeature } => !!entry.tpl
           );
 
         if (cancelled) return;
-        if (sampleEntries.length === 0) {
+        if (templateEntries.length === 0) {
           setDetections([]);
           return;
         }
 
         const allDetections: DetectionBox[] = [];
         const sensitivity01 = Math.max(0, Math.min(100, appliedSensitivity)) / 100;
-        const baseThreshold = 0.12 + sensitivity01 * 0.035;
-        const stride = appliedSensitivity >= 70 ? 12 : 14;
+        const threshold = 0.9 - sensitivity01 * 0.22;
+        const stride = appliedSensitivity >= 75 ? 10 : appliedSensitivity >= 45 ? 12 : 14;
 
-        for (const entry of sampleEntries) {
-          const { sample, feature: sampleFeature } = entry;
+        for (const entry of templateEntries) {
+          const { sample, tpl } = entry;
 
           await new Promise((resolve) => setTimeout(resolve, 0));
           if (cancelled) return;
 
-          const comp = new Float32Array(sceneGray.length);
-          for (let i = 0; i < sceneGray.length; i++) {
-            const g = sceneGray[i];
-            comp[i] =
-              sampleFeature.polarity === "dark"
-                ? Math.max(0, (0.62 - g) / 0.62)
-                : Math.max(0, (g - 0.38) / 0.62);
-          }
-
-          const integral = makeIntegralMap(comp, sceneW, sceneH);
           const candidates: DetectionBox[] = [];
-          const baseH = 48;
-          const baseW = Math.max(18, Math.round(baseH * sampleFeature.aspectRatio));
-          const scaleList = [0.9, 1.0, 1.1];
+          const baseH = Math.max(24, tpl.height + 10);
+          const baseW = Math.max(20, Math.round(baseH * tpl.aspectRatio));
+          const scaleList = [0.88, 1.0, 1.12];
 
           for (const scaleMul of scaleList) {
             const ww = Math.max(16, Math.round(baseW * scaleMul));
             const hh = Math.max(16, Math.round(baseH * scaleMul));
             if (ww >= sceneW || hh >= sceneH) continue;
+
+            const integralSrc = new Float32Array(sceneGray.length);
+            for (let i = 0; i < sceneGray.length; i++) {
+              const g = sceneGray[i];
+              integralSrc[i] =
+                tpl.polarity === "dark"
+                  ? Math.max(0, (0.68 - g) / 0.68)
+                  : Math.max(0, (g - 0.32) / 0.68);
+            }
+            const integral = makeIntegralMap(integralSrc, sceneW, sceneH);
 
             for (let y = 0; y <= sceneH - hh; y += stride) {
               if (y % (stride * 8) === 0) {
@@ -578,12 +567,23 @@ export default function ReviewPage() {
 
               for (let x = 0; x <= sceneW - ww; x += stride) {
                 const mass = rectSum(integral, sceneW, x, y, ww, hh) / (ww * hh);
-                if (mass < 0.05) continue;
+                if (mass < 0.035) continue;
 
-                const vec = buildShapeVector(integral, sceneW, sceneH, x, y, ww, hh);
-                const distance = featureDistance(sampleFeature.vector, vec);
+                const patchGray = cropGrayPatch(
+                  sceneGray,
+                  sceneW,
+                  sceneH,
+                  x,
+                  y,
+                  ww,
+                  hh,
+                  tpl.width,
+                  tpl.height
+                );
+                const patchData = normalizePatch(patchGray, tpl.polarity);
+                const dist = templateDistance(tpl.data, patchData);
 
-                if (distance <= baseThreshold) {
+                if (dist <= threshold) {
                   candidates.push({
                     x: x / sceneW,
                     y: y / sceneH,
@@ -591,7 +591,7 @@ export default function ReviewPage() {
                     h: hh / sceneH,
                     color: colorFromSample(sample),
                     sampleId: sample.id,
-                    score: distance,
+                    score: dist,
                     support: 0,
                   });
                 }
@@ -599,7 +599,7 @@ export default function ReviewPage() {
             }
           }
 
-          const trimmed = candidates.sort((a, b) => a.score - b.score).slice(0, 50);
+          const trimmed = candidates.sort((a, b) => a.score - b.score).slice(0, 60);
           const supported = addSupportToCandidates(trimmed).sort((a, b) => {
             if (b.support !== a.support) return b.support - a.support;
             return a.score - b.score;
