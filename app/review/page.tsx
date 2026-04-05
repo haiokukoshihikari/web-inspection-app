@@ -928,12 +928,14 @@ export default function ReviewPage() {
             const mode = sampleModes[sample.id];
 
             return (
-              <div key={sample.id} className="relative overflow-visible">
+              <div key={sample.id} className="relative overflow-visible isolate">
                 <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setShowDeleteFor(showDeleteFor === sample.id ? null : sample.id);
-                  }}
+                    type="button"
+                    onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setShowDeleteFor(showDeleteFor === sample.id ? null : sample.id);
+                    }}
                   className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-2 py-2 flex items-center gap-2 min-w-0"
                 >
                   {sample.thumbUrl ? (
@@ -962,22 +964,28 @@ export default function ReviewPage() {
                 </button>
 
                 {showDeleteFor === sample.id && (
-                  <div className="absolute top-1 right-1 z-20">
+                <div
+                    className="absolute top-1 right-1 z-50"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onTouchStart={(e) => e.stopPropagation()}
+                    onPointerDown={(e) => e.stopPropagation()}
+                >
                     <button
-                      type="button"
-                      onClick={(e) => {
+                    type="button"
+                    onClick={(e) => {
+                        e.preventDefault();
                         e.stopPropagation();
                         if (window.confirm("削除しますか？")) {
-                          setSamples((prev) => prev.filter((s) => s.id !== sample.id));
-                          setShowDeleteFor(null);
+                        setSamples((prev) => prev.filter((s) => s.id !== sample.id));
+                        setShowDeleteFor(null);
                         }
-                      }}
-                      className="w-10 h-10 rounded-full bg-rose-500 text-white shadow-lg flex items-center justify-center"
-                      aria-label="見本を削除"
+                    }}
+                    className="w-10 h-10 rounded-full bg-rose-500 text-white shadow-lg flex items-center justify-center"
+                    aria-label="見本を削除"
                     >
-                      ×
+                    ×
                     </button>
-                  </div>
+                </div>
                 )}
               </div>
             );
