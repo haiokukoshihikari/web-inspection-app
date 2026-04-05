@@ -27,6 +27,13 @@ type DetectionBox = {
   support: number;
 };
 
+type CandidateRect = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
+
 const DEFAULT_SAMPLES: SampleItem[] = [
   { id: "1", count: 0, color: "border-sky-400 bg-sky-500/20", aspectRatio: 1 },
   { id: "2", count: 0, color: "border-emerald-400 bg-emerald-500/20", aspectRatio: 1 },
@@ -188,58 +195,31 @@ function buildWindowFeatures(
       const cy = y + Math.floor((gy * h) / 4);
       const cw = Math.max(1, Math.floor(((gx + 1) * w) / 4) - Math.floor((gx * w) / 4));
       const ch = Math.max(1, Math.floor(((gy + 1) * h) / 4) - Math.floor((gy * h) / 4));
-      const mean = rectSum(darkIntegral, fullW, cx, cy, cw, ch) / (cw * ch);
-      features.push(mean);
+      const darkMean = rectSum(darkIntegral, fullW, cx, cy, cw, ch) / (cw * ch);
+      const edgeMean = rectSum(edgeIntegral, fullW, cx, cy, cw, ch) / (cw * ch);
+      features.push(darkMean);
+      features.push(edgeMean);
     }
-  }
-
-  for (let gy = 0; gy < 4; gy++) {
-    for (let gx = 0; gx < 4; gx++) {
-      const cx = x + Math.floor((gx * w) / 4);
-      const cy = y + Math.floor((gy * h) / 4);
-      const cw = Math.max(1, Math.floor(((gx + 1) * w) / 4) - Math.floor((gx * w) / 4));
-      const ch = Math.max(1, Math.floor(((gy + 1) * h) / 4) - Math.floor((gy * h) / 4));
-      const mean = rectSum(edgeIntegral, fullW, cx, cy, cw, ch) / (cw * ch);
-      features.push(mean);
-    }
-  }
-
-  for (let gy = 0; gy < 8; gy++) {
-    const cy = y + Math.floor((gy * h) / 8);
-    const ch = Math.max(1, Math.floor(((gy + 1) * h) / 8) - Math.floor((gy * h) / 8));
-    const mean = rectSum(darkIntegral, fullW, x, cy, w, ch) / (w * ch);
-    features.push(mean);
-  }
-
-  for (let gx = 0; gx < 8; gx++) {
-    const cx = x + Math.floor((gx * w) / 8);
-    const cw = Math.max(1, Math.floor(((gx + 1) * w) / 8) - Math.floor((gx * w) / 8));
-    const mean = rectSum(darkIntegral, fullW, cx, y, cw, h) / (cw * h);
-    features.push(mean);
   }
 
   for (let gy = 0; gy < 6; gy++) {
     const cy = y + Math.floor((gy * h) / 6);
     const ch = Math.max(1, Math.floor(((gy + 1) * h) / 6) - Math.floor((gy * h) / 6));
-    const mean = rectSum(edgeIntegral, fullW, x, cy, w, ch) / (w * ch);
+    const mean = rectSum(darkIntegral, fullW, x, cy, w, ch) / (w * ch);
     features.push(mean);
   }
 
   for (let gx = 0; gx < 6; gx++) {
     const cx = x + Math.floor((gx * w) / 6);
     const cw = Math.max(1, Math.floor(((gx + 1) * w) / 6) - Math.floor((gx * w) / 6));
-    const mean = rectSum(edgeIntegral, fullW, cx, y, cw, h) / (cw * h);
+    const mean = rectSum(darkIntegral, fullW, cx, y, cw, h) / (cw * h);
     features.push(mean);
   }
-
-  const overallDark = rectSum(darkIntegral, fullW, x, y, w, h) / (w * h);
-  const overallEdge = rectSum(edgeIntegral, fullW, x, y, w, h) / (w * h);
-  features.push(overallDark, overallEdge);
 
   return normalizeVector(features);
 }
 
-function iou(a: DetectionBox, b: DetectionBox) {
+function iou(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }) {
   const ax1 = a.x;
   const ay1 = a.y;
   const ax2 = a.x + a.w;
@@ -263,7 +243,7 @@ function iou(a: DetectionBox, b: DetectionBox) {
   return union > 0 ? inter / union : 0;
 }
 
-function centerDistance(a: DetectionBox, b: DetectionBox) {
+function centerDistance(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }) {
   const ax = a.x + a.w / 2;
   const ay = a.y + a.h / 2;
   const bx = b.x + b.w / 2;
@@ -271,7 +251,7 @@ function centerDistance(a: DetectionBox, b: DetectionBox) {
   return Math.hypot(ax - bx, ay - by);
 }
 
-function overlapOrNear(a: DetectionBox, b: DetectionBox) {
+function overlapOrNear(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }) {
   const near = centerDistance(a, b) < Math.max(a.w, b.w) * 0.55;
   return iou(a, b) > 0.08 || near;
 }
@@ -294,13 +274,46 @@ function mergeGlobalDetections(detections: DetectionBox[]) {
   });
 
   const merged: DetectionBox[] = [];
-
   for (const d of sorted) {
     const overlaps = merged.some((m) => overlapOrNear(m, d));
     if (!overlaps) merged.push(d);
   }
-
   return merged;
+}
+
+function buildCandidateRects(
+  darkIntegral: Float32Array,
+  edgeIntegral: Float32Array,
+  sceneW: number,
+  sceneH: number
+): CandidateRect[] {
+  const rects: CandidateRect[] = [];
+  const stepY = 24;
+  const stepX = 24;
+
+  for (let h of [28, 36, 44, 56]) {
+    for (let w of [72, 96, 120, 148]) {
+      if (w >= sceneW || h >= sceneH) continue;
+
+      for (let y = 0; y <= sceneH - h; y += stepY) {
+        for (let x = 0; x <= sceneW - w; x += stepX) {
+          const darkMean = rectSum(darkIntegral, sceneW, x, y, w, h) / (w * h);
+          const edgeMean = rectSum(edgeIntegral, sceneW, x, y, w, h) / (w * h);
+
+          if (darkMean < 0.08) continue;
+          if (edgeMean < 0.015) continue;
+
+          const wideEnough = w / h >= 1.6;
+          if (!wideEnough) continue;
+
+          rects.push({ x, y, w, h });
+          if (rects.length >= 220) return rects;
+        }
+      }
+    }
+  }
+
+  return rects;
 }
 
 export default function ReviewPage() {
@@ -357,21 +370,14 @@ export default function ReviewPage() {
       if (savedSamples) {
         try {
           const parsed = JSON.parse(savedSamples);
-          if (Array.isArray(parsed)) {
-            setSamples(parsed);
-          } else {
-            setSamples(DEFAULT_SAMPLES);
-          }
-        } catch (e) {
-          console.error("samples parse error:", e);
+          if (Array.isArray(parsed)) setSamples(parsed);
+          else setSamples(DEFAULT_SAMPLES);
+        } catch {
           setSamples(DEFAULT_SAMPLES);
         }
       } else {
         setSamples(DEFAULT_SAMPLES);
       }
-    } catch (e) {
-      console.error("localStorage init error:", e);
-      setSamples(DEFAULT_SAMPLES);
     } finally {
       setSamplesLoaded(true);
     }
@@ -412,7 +418,6 @@ export default function ReviewPage() {
     const frameHeight = frame.clientHeight;
     const naturalWidth = img.naturalWidth;
     const naturalHeight = img.naturalHeight;
-
     if (!frameWidth || !frameHeight || !naturalWidth || !naturalHeight) return;
 
     const scale = Math.min(frameWidth / naturalWidth, frameHeight / naturalHeight);
@@ -421,12 +426,7 @@ export default function ReviewPage() {
     const left = (frameWidth - displayWidth) / 2;
     const top = (frameHeight - displayHeight) / 2;
 
-    setImageRect({
-      left,
-      top,
-      width: displayWidth,
-      height: displayHeight,
-    });
+    setImageRect({ left, top, width: displayWidth, height: displayHeight });
   };
 
   useEffect(() => {
@@ -437,11 +437,9 @@ export default function ReviewPage() {
 
   useEffect(() => {
     if (!capturedImage) return;
-
     const t1 = window.setTimeout(() => updateImageRect(), 0);
     const t2 = window.setTimeout(() => updateImageRect(), 120);
     const t3 = window.setTimeout(() => updateImageRect(), 300);
-
     return () => {
       window.clearTimeout(t1);
       window.clearTimeout(t2);
@@ -460,18 +458,12 @@ export default function ReviewPage() {
   };
 
   const canAdd = useMemo(() => samples.length < MAX_SAMPLES, [samples.length]);
-
-  const visibleSamples = useMemo(
-    () => samples.filter((s) => !!s.thumbUrl),
-    [samples]
-  );
+  const visibleSamples = useMemo(() => samples.filter((s) => !!s.thumbUrl), [samples]);
 
   const detectedCounts = useMemo(() => {
     const map: Record<string, number> = {};
     for (const s of samples) map[s.id] = 0;
-    for (const d of detections) {
-      map[d.sampleId] = (map[d.sampleId] || 0) + 1;
-    }
+    for (const d of detections) map[d.sampleId] = (map[d.sampleId] || 0) + 1;
     return map;
   }, [samples, detections]);
 
@@ -484,7 +476,6 @@ export default function ReviewPage() {
         return;
       }
 
-      // 古い結果を残さない
       setDetections([]);
       setPrepareDetecting(true);
 
@@ -519,15 +510,20 @@ export default function ReviewPage() {
         const darkSceneIntegral = makeIntegralMap(darkScene, sceneW, sceneH);
         const edgeSceneIntegral = makeIntegralMap(sceneEdge, sceneW, sceneH);
 
+        const candidateRects = buildCandidateRects(
+          darkSceneIntegral,
+          edgeSceneIntegral,
+          sceneW,
+          sceneH
+        );
+
         const allDetections: DetectionBox[] = [];
         const sensitivity01 = Math.max(0, Math.min(100, appliedSensitivity)) / 100;
-        const featureThreshold = 0.09 + sensitivity01 * 0.035;
-        const stride = appliedSensitivity >= 80 ? 8 : appliedSensitivity >= 50 ? 10 : 12;
+        const featureThreshold = 0.095 + sensitivity01 * 0.03;
 
         for (const sample of visibleSamples) {
           await new Promise((resolve) => setTimeout(resolve, 0));
           if (cancelled) return;
-
           if (!sample.thumbUrl) continue;
 
           const sampleImg = await loadImage(sample.thumbUrl);
@@ -538,118 +534,80 @@ export default function ReviewPage() {
               ? sample.aspectRatio
               : sampleImg.naturalWidth / sampleImg.naturalHeight || 1;
 
-          const sampleFeatureWidth = 96;
-          const sampleFeatureHeight = Math.max(16, Math.round(96 / ratio));
-          const sampleGray = imageToGray(sampleImg, sampleFeatureWidth, sampleFeatureHeight);
+          const sw = 96;
+          const sh = Math.max(20, Math.round(96 / ratio));
+          const sampleGray = imageToGray(sampleImg, sw, sh);
           const sampleDark = new Float32Array(sampleGray.length);
           for (let i = 0; i < sampleGray.length; i++) sampleDark[i] = 1 - sampleGray[i];
-          const sampleEdge = makeEdgeMap(sampleGray, sampleFeatureWidth, sampleFeatureHeight);
-          const sampleDarkIntegral = makeIntegralMap(
-            sampleDark,
-            sampleFeatureWidth,
-            sampleFeatureHeight
-          );
-          const sampleEdgeIntegral = makeIntegralMap(
-            sampleEdge,
-            sampleFeatureWidth,
-            sampleFeatureHeight
-          );
+          const sampleEdge = makeEdgeMap(sampleGray, sw, sh);
+          const sampleDarkIntegral = makeIntegralMap(sampleDark, sw, sh);
+          const sampleEdgeIntegral = makeIntegralMap(sampleEdge, sw, sh);
+
           const sampleFeature = buildWindowFeatures(
             sampleDarkIntegral,
             sampleEdgeIntegral,
-            sampleFeatureWidth,
-            sampleFeatureHeight,
+            sw,
+            sh,
             0,
             0,
-            sampleFeatureWidth,
-            sampleFeatureHeight
+            sw,
+            sh
           );
 
-          const baseTplH = 54;
-          const baseTplW = Math.max(22, Math.round(baseTplH * ratio));
-          const scaleList = [0.96, 1.04];
-
           const candidates: DetectionBox[] = [];
-          const maxCandidatesPerSample = 120;
 
-          for (const scaleMul of scaleList) {
-            const tplW = Math.max(14, Math.round(baseTplW * scaleMul));
-            const tplH = Math.max(14, Math.round(baseTplH * scaleMul));
+          for (const rect of candidateRects) {
+            const rectRatio = rect.w / rect.h;
+            const ratioGap = Math.abs(rectRatio - ratio);
+            if (ratioGap > Math.max(0.9, ratio * 0.6)) continue;
 
-            if (tplW >= sceneW || tplH >= sceneH) continue;
+            const windowFeature = buildWindowFeatures(
+              darkSceneIntegral,
+              edgeSceneIntegral,
+              sceneW,
+              sceneH,
+              rect.x,
+              rect.y,
+              rect.w,
+              rect.h
+            );
 
-            for (let y = 0; y <= sceneH - tplH; y += stride) {
-              if (y % (stride * 8) === 0) {
-                await new Promise((resolve) => setTimeout(resolve, 0));
-                if (cancelled) return;
-              }
-
-              for (let x = 0; x <= sceneW - tplW; x += stride) {
-                const darkMean =
-                  rectSum(darkSceneIntegral, sceneW, x, y, tplW, tplH) / (tplW * tplH);
-                const edgeMean =
-                  rectSum(edgeSceneIntegral, sceneW, x, y, tplW, tplH) / (tplW * tplH);
-
-                if (darkMean < 0.1) continue;
-                if (edgeMean < 0.018) continue;
-
-                const windowFeature = buildWindowFeatures(
-                  darkSceneIntegral,
-                  edgeSceneIntegral,
-                  sceneW,
-                  sceneH,
-                  x,
-                  y,
-                  tplW,
-                  tplH
-                );
-
-                const distance = featureDistance(sampleFeature, windowFeature);
-
-                if (distance <= featureThreshold) {
-                  candidates.push({
-                    x: x / sceneW,
-                    y: y / sceneH,
-                    w: tplW / sceneW,
-                    h: tplH / sceneH,
-                    color: sample.color.includes("sky")
-                      ? "#38bdf8"
-                      : sample.color.includes("emerald")
-                        ? "#34d399"
-                        : sample.color.includes("amber")
-                          ? "#f59e0b"
-                          : sample.color.includes("fuchsia")
-                            ? "#d946ef"
-                            : sample.color.includes("cyan")
-                              ? "#06b6d4"
-                              : "#f43f5e",
-                    sampleId: sample.id,
-                    score: distance,
-                    support: 0,
-                  });
-                  if (candidates.length >= maxCandidatesPerSample) break;
-                }
-              }
-
-              if (candidates.length >= maxCandidatesPerSample) break;
+            const distance = featureDistance(sampleFeature, windowFeature);
+            if (distance <= featureThreshold) {
+              candidates.push({
+                x: rect.x / sceneW,
+                y: rect.y / sceneH,
+                w: rect.w / sceneW,
+                h: rect.h / sceneH,
+                color: sample.color.includes("sky")
+                  ? "#38bdf8"
+                  : sample.color.includes("emerald")
+                    ? "#34d399"
+                    : sample.color.includes("amber")
+                      ? "#f59e0b"
+                      : sample.color.includes("fuchsia")
+                        ? "#d946ef"
+                        : sample.color.includes("cyan")
+                          ? "#06b6d4"
+                          : "#f43f5e",
+                sampleId: sample.id,
+                score: distance,
+                support: 0,
+              });
             }
-
-            if (candidates.length >= maxCandidatesPerSample) break;
           }
 
           const trimmedCandidates = candidates
             .sort((a, b) => a.score - b.score)
-            .slice(0, 40);
+            .slice(0, 20);
 
           const supportedCandidates = addSupportToCandidates(trimmedCandidates)
-            .filter((c) => c.support >= 0)
             .sort((a, b) => {
               if (b.support !== a.support) return b.support - a.support;
               return a.score - b.score;
             });
 
           const picked: DetectionBox[] = [];
-
           for (const c of supportedCandidates) {
             const overlaps = picked.some((p) => overlapOrNear(p, c));
             if (!overlaps) picked.push(c);
@@ -668,9 +626,6 @@ export default function ReviewPage() {
           if (cancelled) return;
           setDetections(merged);
         }
-
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        if (cancelled) return;
       } catch (e) {
         console.error("detection error:", e);
         if (!cancelled) setDetections([]);
@@ -776,7 +731,7 @@ export default function ReviewPage() {
                 </div>
               ) : null}
 
-              <div className="absolute left-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10 max-w-[85%] break-all">
+              <div className="absolute left-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10">
                 {`検知数: ${detections.length}`}
               </div>
             </>
