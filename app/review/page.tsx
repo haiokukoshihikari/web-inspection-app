@@ -7,10 +7,6 @@ const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
 const MISSING_KEY = "inspection:missingOn";
 const SAMPLES_KEY = "inspection:samples";
-const SAMPLE_MODE_OVERRIDE_KEY = "inspection:sampleModeOverride";
-
-type SampleModeChoice = "AUTO" | "LABEL" | "LOGO";
-type MatchMode = "LABEL" | "LOGO";
 
 type SampleItem = {
   id: string;
@@ -37,7 +33,6 @@ type TemplateFeature = {
   width: number;
   height: number;
   data: Float32Array;
-  autoMode: MatchMode;
 };
 
 const DEFAULT_SAMPLES: SampleItem[] = [
@@ -200,80 +195,6 @@ function colorFromSample(sample: SampleItem) {
   return "#f43f5e";
 }
 
-function robustNormalize(data: Float32Array): Float32Array {
-  let min = Infinity;
-  let max = -Infinity;
-  for (let i = 0; i < data.length; i++) {
-    if (data[i] < min) min = data[i];
-    if (data[i] > max) max = data[i];
-  }
-  const range = Math.max(1e-6, max - min);
-  const out = new Float32Array(data.length);
-  for (let i = 0; i < data.length; i++) {
-    out[i] = (data[i] - min) / range;
-  }
-  return out;
-}
-
-function blur3x3(src: Float32Array, w: number, h: number): Float32Array {
-  const out = new Float32Array(w * h);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      let sum = 0;
-      let cnt = 0;
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const xx = x + dx;
-          const yy = y + dy;
-          if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
-          sum += src[yy * w + xx];
-          cnt++;
-        }
-      }
-      out[y * w + x] = sum / cnt;
-    }
-  }
-  return out;
-}
-
-function makeForegroundMap(
-  gray: Float32Array,
-  w: number,
-  h: number,
-  polarity: "dark" | "light"
-): Float32Array {
-  const smooth = blur3x3(gray, w, h);
-  const out = new Float32Array(w * h);
-
-  for (let i = 0; i < gray.length; i++) {
-    const diff =
-      polarity === "dark"
-        ? Math.max(0, smooth[i] - gray[i])
-        : Math.max(0, gray[i] - smooth[i]);
-    out[i] = diff;
-  }
-
-  const norm = robustNormalize(out);
-
-  let mean = 0;
-  for (let i = 0; i < norm.length; i++) mean += norm[i];
-  mean /= Math.max(1, norm.length);
-
-  let variance = 0;
-  for (let i = 0; i < norm.length; i++) {
-    const d = norm[i] - mean;
-    variance += d * d;
-  }
-  const std = Math.sqrt(variance / Math.max(1, norm.length)) || 1;
-
-  const z = new Float32Array(norm.length);
-  for (let i = 0; i < norm.length; i++) {
-    z[i] = Math.max(0, (norm[i] - mean) / std);
-  }
-
-  return robustNormalize(z);
-}
-
 function normalizePatch(
   gray: Float32Array,
   polarity: "dark" | "light"
@@ -342,6 +263,65 @@ function cropGrayPatch(
   return out;
 }
 
+function trimTemplateMargins(
+  gray: Float32Array,
+  w: number,
+  h: number,
+  polarity: "dark" | "light"
+): { gray: Float32Array; width: number; height: number } {
+  const activity = new Float32Array(gray.length);
+  for (let i = 0; i < gray.length; i++) {
+    const g = gray[i];
+    activity[i] =
+      polarity === "dark"
+        ? Math.max(0, 0.62 - g)
+        : Math.max(0, g - 0.38);
+  }
+
+  const rowEnergy = new Float32Array(h);
+  const colEnergy = new Float32Array(w);
+
+  for (let y = 0; y < h; y++) {
+    let sum = 0;
+    for (let x = 0; x < w; x++) {
+      const v = activity[y * w + x];
+      sum += v;
+      colEnergy[x] += v;
+    }
+    rowEnergy[y] = sum;
+  }
+
+  let rowMax = 0;
+  let colMax = 0;
+  for (let y = 0; y < h; y++) rowMax = Math.max(rowMax, rowEnergy[y]);
+  for (let x = 0; x < w; x++) colMax = Math.max(colMax, colEnergy[x]);
+
+  const rowThr = rowMax * 0.18;
+  const colThr = colMax * 0.18;
+
+  let top = 0;
+  let bottom = h - 1;
+  let left = 0;
+  let right = w - 1;
+
+  while (top < h - 1 && rowEnergy[top] < rowThr) top++;
+  while (bottom > top && rowEnergy[bottom] < rowThr) bottom--;
+  while (left < w - 1 && colEnergy[left] < colThr) left++;
+  while (right > left && colEnergy[right] < colThr) right--;
+
+  const tw = Math.max(8, right - left + 1);
+  const th = Math.max(8, bottom - top + 1);
+  const out = new Float32Array(tw * th);
+
+  for (let y = 0; y < th; y++) {
+    for (let x = 0; x < tw; x++) {
+      out[y * tw + x] = gray[(top + y) * w + (left + x)];
+    }
+  }
+
+  return { gray: out, width: tw, height: th };
+}
+
 async function buildTemplateFeature(sample: SampleItem): Promise<TemplateFeature | null> {
   if (!sample.thumbUrl) return null;
 
@@ -351,51 +331,27 @@ async function buildTemplateFeature(sample: SampleItem): Promise<TemplateFeature
       ? sample.aspectRatio
       : img.naturalWidth / img.naturalHeight || 1;
 
-  const th = 36;
-  const tw = Math.max(16, Math.round(th * ratio));
-  const gray = imageToGray(img, tw, th);
+  const baseH = 42;
+  const baseW = Math.max(18, Math.round(baseH * ratio));
+  const rawGray = imageToGray(img, baseW, baseH);
 
   let darkEnergy = 0;
   let lightEnergy = 0;
-  let meanGray = 0;
-
-  for (let i = 0; i < gray.length; i++) {
-    darkEnergy += Math.max(0, 0.55 - gray[i]);
-    lightEnergy += Math.max(0, gray[i] - 0.45);
-    meanGray += gray[i];
+  for (let i = 0; i < rawGray.length; i++) {
+    darkEnergy += Math.max(0, 0.55 - rawGray[i]);
+    lightEnergy += Math.max(0, rawGray[i] - 0.45);
   }
-  meanGray /= Math.max(1, gray.length);
 
   const polarity: "dark" | "light" = lightEnergy > darkEnergy ? "light" : "dark";
-  const fg = makeForegroundMap(gray, tw, th, polarity);
-
-  let fgCoverage = 0;
-  for (let i = 0; i < fg.length; i++) {
-    if (fg[i] > 0.28) fgCoverage++;
-  }
-  fgCoverage /= Math.max(1, fg.length);
-
-  let grayVar = 0;
-  for (let i = 0; i < gray.length; i++) {
-    const d = gray[i] - meanGray;
-    grayVar += d * d;
-  }
-  const grayStd = Math.sqrt(grayVar / Math.max(1, gray.length));
-
-  const labelLike =
-    polarity === "dark" &&
-    meanGray > 0.56 &&
-    grayStd < 0.18 &&
-    fgCoverage > 0.03 &&
-    fgCoverage < 0.28;
+  const trimmed = trimTemplateMargins(rawGray, baseW, baseH, polarity);
+  const normalized = normalizePatch(trimmed.gray, trimmed.width > 0 ? polarity : polarity);
 
   return {
-    aspectRatio: ratio,
+    aspectRatio: trimmed.width / trimmed.height,
     polarity,
-    width: tw,
-    height: th,
-    data: labelLike ? fg : normalizePatch(gray, polarity),
-    autoMode: labelLike ? "LABEL" : "LOGO",
+    width: trimmed.width,
+    height: trimmed.height,
+    data: normalized,
   };
 }
 
@@ -424,10 +380,6 @@ export default function ReviewPage() {
   const [prepareDetecting, setPrepareDetecting] = useState(false);
   const [isAdjustingSensitivity, setIsAdjustingSensitivity] = useState(false);
   const [isSliderDragging, setIsSliderDragging] = useState(false);
-  const [sampleModes, setSampleModes] = useState<Record<string, MatchMode>>({});
-  const [sampleModeOverrides, setSampleModeOverrides] = useState<
-    Record<string, SampleModeChoice>
-  >({});
 
   useEffect(() => {
     try {
@@ -466,16 +418,6 @@ export default function ReviewPage() {
       } else {
         setSamples(DEFAULT_SAMPLES);
       }
-
-      const savedModeOverride = localStorage.getItem(SAMPLE_MODE_OVERRIDE_KEY);
-      if (savedModeOverride) {
-        try {
-          const parsed = JSON.parse(savedModeOverride);
-          if (parsed && typeof parsed === "object") {
-            setSampleModeOverrides(parsed);
-          }
-        } catch {}
-      }
     } finally {
       setSamplesLoaded(true);
     }
@@ -489,18 +431,6 @@ export default function ReviewPage() {
       console.error("samples save error:", e);
     }
   }, [samples, samplesLoaded]);
-
-  useEffect(() => {
-    if (!samplesLoaded) return;
-    try {
-      localStorage.setItem(
-        SAMPLE_MODE_OVERRIDE_KEY,
-        JSON.stringify(sampleModeOverrides)
-      );
-    } catch (e) {
-      console.error("sample mode override save error:", e);
-    }
-  }, [sampleModeOverrides, samplesLoaded]);
 
   useEffect(() => {
     const stopDragging = () => {
@@ -592,15 +522,6 @@ export default function ReviewPage() {
     localStorage.setItem(MISSING_KEY, String(next));
   };
 
-  const cycleSampleMode = (sampleId: string) => {
-    setSampleModeOverrides((prev) => {
-      const current = prev[sampleId] ?? "AUTO";
-      const next: SampleModeChoice =
-        current === "AUTO" ? "LABEL" : current === "LABEL" ? "LOGO" : "AUTO";
-      return { ...prev, [sampleId]: next };
-    });
-  };
-
   const canAdd = useMemo(() => samples.length < MAX_SAMPLES, [samples.length]);
   const visibleSamples = useMemo(() => samples.filter((s) => !!s.thumbUrl), [samples]);
 
@@ -617,7 +538,6 @@ export default function ReviewPage() {
     async function runDetection() {
       if (!capturedImage || visibleSamples.length === 0) {
         setDetections([]);
-        setSampleModes({});
         return;
       }
 
@@ -664,161 +584,105 @@ export default function ReviewPage() {
         if (cancelled) return;
         if (templateEntries.length === 0) {
           setDetections([]);
-          setSampleModes({});
           return;
         }
 
-        const nextModes: Record<string, MatchMode> = {};
-        for (const entry of templateEntries) {
-          const override = sampleModeOverrides[entry.sample.id] ?? "AUTO";
-          nextModes[entry.sample.id] =
-            override === "AUTO" ? entry.tpl.autoMode : override;
-        }
-        setSampleModes(nextModes);
-
         const allDetections: DetectionBox[] = [];
         const sensitivity01 = Math.max(0, Math.min(100, appliedSensitivity)) / 100;
+        const stride =
+          appliedSensitivity >= 75 ? 10 : appliedSensitivity >= 45 ? 12 : 14;
 
         for (const entry of templateEntries) {
           const { sample, tpl } = entry;
-          const effectiveMode =
-            (sampleModeOverrides[sample.id] ?? "AUTO") === "AUTO"
-              ? tpl.autoMode
-              : (sampleModeOverrides[sample.id] as MatchMode);
 
           await new Promise((resolve) => setTimeout(resolve, 0));
           if (cancelled) return;
 
+          const scenePol = new Float32Array(sceneGray.length);
+          for (let i = 0; i < sceneGray.length; i++) {
+            const g = sceneGray[i];
+            scenePol[i] =
+              tpl.polarity === "dark"
+                ? Math.max(0, (0.68 - g) / 0.68)
+                : Math.max(0, (g - 0.32) / 0.68);
+          }
+          const sceneIntegral = makeIntegralMap(scenePol, sceneW, sceneH);
+
           const candidates: DetectionBox[] = [];
+          const baseH = Math.max(22, tpl.height + 6);
+          const baseW = Math.max(16, Math.round(baseH * tpl.aspectRatio));
+          const scaleList = [0.82, 0.94, 1.0, 1.08, 1.18];
 
-          if (effectiveMode === "LABEL") {
-            const sceneFg = makeForegroundMap(sceneGray, sceneW, sceneH, tpl.polarity);
-            const sceneIntegral = makeIntegralMap(sceneFg, sceneW, sceneH);
+          const looseThreshold = 0.86 - sensitivity01 * 0.20;
 
-            const threshold = 0.34 - sensitivity01 * 0.08;
-            const stride = appliedSensitivity >= 75 ? 10 : appliedSensitivity >= 45 ? 12 : 14;
-            const baseH = Math.max(24, tpl.height + 10);
-            const baseW = Math.max(20, Math.round(baseH * tpl.aspectRatio));
-            const scaleList = [0.88, 1.0, 1.12];
+          for (const scaleMul of scaleList) {
+            const ww = Math.max(14, Math.round(baseW * scaleMul));
+            const hh = Math.max(14, Math.round(baseH * scaleMul));
+            if (ww >= sceneW || hh >= sceneH) continue;
 
-            for (const scaleMul of scaleList) {
-              const ww = Math.max(16, Math.round(baseW * scaleMul));
-              const hh = Math.max(16, Math.round(baseH * scaleMul));
-              if (ww >= sceneW || hh >= sceneH) continue;
-
-              for (let y = 0; y <= sceneH - hh; y += stride) {
-                if (y % (stride * 8) === 0) {
-                  await new Promise((resolve) => setTimeout(resolve, 0));
-                  if (cancelled) return;
-                }
-
-                for (let x = 0; x <= sceneW - ww; x += stride) {
-                  const mass = rectSum(sceneIntegral, sceneW, x, y, ww, hh) / (ww * hh);
-                  if (mass < 0.03) continue;
-
-                  const patchGray = cropGrayPatch(
-                    sceneGray,
-                    sceneW,
-                    sceneH,
-                    x,
-                    y,
-                    ww,
-                    hh,
-                    tpl.width,
-                    tpl.height
-                  );
-                  const patchFg = makeForegroundMap(patchGray, tpl.width, tpl.height, tpl.polarity);
-                  const dist = templateDistance(tpl.data, patchFg);
-
-                  if (dist <= threshold) {
-                    candidates.push({
-                      x: x / sceneW,
-                      y: y / sceneH,
-                      w: ww / sceneW,
-                      h: hh / sceneH,
-                      color: colorFromSample(sample),
-                      sampleId: sample.id,
-                      score: dist,
-                      support: 0,
-                    });
-                  }
-                }
+            for (let y = 0; y <= sceneH - hh; y += stride) {
+              if (y % (stride * 8) === 0) {
+                await new Promise((resolve) => setTimeout(resolve, 0));
+                if (cancelled) return;
               }
-            }
-          } else {
-            const scenePol = new Float32Array(sceneGray.length);
-            for (let i = 0; i < sceneGray.length; i++) {
-              const g = sceneGray[i];
-              scenePol[i] =
-                tpl.polarity === "dark"
-                  ? Math.max(0, (0.68 - g) / 0.68)
-                  : Math.max(0, (g - 0.32) / 0.68);
-            }
-            const sceneIntegral = makeIntegralMap(scenePol, sceneW, sceneH);
 
-            const threshold = 0.9 - sensitivity01 * 0.22;
-            const stride = appliedSensitivity >= 75 ? 10 : appliedSensitivity >= 45 ? 12 : 14;
-            const baseH = Math.max(24, tpl.height + 10);
-            const baseW = Math.max(20, Math.round(baseH * tpl.aspectRatio));
-            const scaleList = [0.88, 1.0, 1.12];
+              for (let x = 0; x <= sceneW - ww; x += stride) {
+                const mass = rectSum(sceneIntegral, sceneW, x, y, ww, hh) / (ww * hh);
+                if (mass < 0.035) continue;
 
-            for (const scaleMul of scaleList) {
-              const ww = Math.max(16, Math.round(baseW * scaleMul));
-              const hh = Math.max(16, Math.round(baseH * scaleMul));
-              if (ww >= sceneW || hh >= sceneH) continue;
+                const patchGray = cropGrayPatch(
+                  sceneGray,
+                  sceneW,
+                  sceneH,
+                  x,
+                  y,
+                  ww,
+                  hh,
+                  tpl.width,
+                  tpl.height
+                );
+                const patchPol = normalizePatch(patchGray, tpl.polarity);
+                const dist = templateDistance(tpl.data, patchPol);
 
-              for (let y = 0; y <= sceneH - hh; y += stride) {
-                if (y % (stride * 8) === 0) {
-                  await new Promise((resolve) => setTimeout(resolve, 0));
-                  if (cancelled) return;
-                }
-
-                for (let x = 0; x <= sceneW - ww; x += stride) {
-                  const mass = rectSum(sceneIntegral, sceneW, x, y, ww, hh) / (ww * hh);
-                  if (mass < 0.035) continue;
-
-                  const patchGray = cropGrayPatch(
-                    sceneGray,
-                    sceneW,
-                    sceneH,
-                    x,
-                    y,
-                    ww,
-                    hh,
-                    tpl.width,
-                    tpl.height
-                  );
-                  const patchPol = normalizePatch(patchGray, tpl.polarity);
-                  const dist = templateDistance(tpl.data, patchPol);
-
-                  if (dist <= threshold) {
-                    candidates.push({
-                      x: x / sceneW,
-                      y: y / sceneH,
-                      w: ww / sceneW,
-                      h: hh / sceneH,
-                      color: colorFromSample(sample),
-                      sampleId: sample.id,
-                      score: dist,
-                      support: 0,
-                    });
-                  }
+                if (dist <= looseThreshold) {
+                  candidates.push({
+                    x: x / sceneW,
+                    y: y / sceneH,
+                    w: ww / sceneW,
+                    h: hh / sceneH,
+                    color: colorFromSample(sample),
+                    sampleId: sample.id,
+                    score: dist,
+                    support: 0,
+                  });
                 }
               }
             }
           }
 
-          const trimmed = candidates.sort((a, b) => a.score - b.score).slice(0, 60);
+          if (candidates.length === 0) continue;
+
+          const trimmed = candidates.sort((a, b) => a.score - b.score).slice(0, 80);
           const supported = addSupportToCandidates(trimmed).sort((a, b) => {
             if (b.support !== a.support) return b.support - a.support;
             return a.score - b.score;
           });
 
+          const bestScore = supported[0]?.score ?? 999;
+          const bestSupport = supported[0]?.support ?? 0;
+
+          const qualityThreshold =
+            Math.min(0.78, bestScore + 0.10 + (bestSupport <= 0 ? 0.03 : 0));
+
           const picked: DetectionBox[] = [];
           for (const c of supported) {
+            if (c.score > qualityThreshold) continue;
+
             const overlaps = picked.some((p) => overlapOrNear(p, c));
             if (!overlaps) picked.push(c);
-            if (picked.length >= 3) break;
+
+            const maxCount = bestScore < 0.42 ? 3 : bestScore < 0.54 ? 2 : 1;
+            if (picked.length >= maxCount) break;
           }
 
           allDetections.push(...picked);
@@ -837,7 +701,6 @@ export default function ReviewPage() {
         console.error("detection error:", e);
         if (!cancelled) {
           setDetections([]);
-          setSampleModes({});
         }
       } finally {
         if (!cancelled) {
@@ -852,7 +715,7 @@ export default function ReviewPage() {
     return () => {
       cancelled = true;
     };
-  }, [capturedImage, visibleSamples, appliedSensitivity, sampleModeOverrides]);
+  }, [capturedImage, visibleSamples, appliedSensitivity]);
 
   const overlayMuted = isAdjustingSensitivity || prepareDetecting || detecting;
   const overlayMessage = isAdjustingSensitivity
@@ -967,10 +830,6 @@ export default function ReviewPage() {
             const ratio =
               sample.aspectRatio && sample.aspectRatio > 0 ? sample.aspectRatio : 1;
             const thumbW = Math.max(40, Math.min(72, Math.round(40 * ratio)));
-            const mode = sampleModes[sample.id];
-            const overrideMode = sampleModeOverrides[sample.id] ?? "AUTO";
-            const modeLabel =
-              overrideMode === "AUTO" ? `AUTO:${mode ?? "-"}` : overrideMode;
 
             return (
               <div key={sample.id} className="relative overflow-visible isolate">
@@ -993,17 +852,6 @@ export default function ReviewPage() {
                         alt="見本"
                         className="max-w-full max-h-full object-contain"
                       />
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          cycleSampleMode(sample.id);
-                        }}
-                        className="absolute right-1 bottom-1 rounded bg-black/75 px-1 py-[1px] text-[8px] leading-none text-white"
-                      >
-                        {modeLabel}
-                      </button>
                     </div>
                   ) : (
                     <div className={`w-10 h-10 rounded-lg border shrink-0 ${sample.color}`} />
@@ -1028,11 +876,6 @@ export default function ReviewPage() {
                         e.stopPropagation();
                         if (window.confirm("削除しますか？")) {
                           setSamples((prev) => prev.filter((s) => s.id !== sample.id));
-                          setSampleModeOverrides((prev) => {
-                            const next = { ...prev };
-                            delete next[sample.id];
-                            return next;
-                          });
                           setShowDeleteFor(null);
                         }
                       }}
