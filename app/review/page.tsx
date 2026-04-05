@@ -23,7 +23,7 @@ type DetectionBox = {
   h: number;
   color: string;
   sampleId: string;
-  score: number; // similarity (higher is better)
+  score: number;
   support: number;
 };
 
@@ -276,8 +276,8 @@ function trimMargins(
   while (left < w - 2 && colEnergy[left] < colThr) left++;
   while (right > left + 1 && colEnergy[right] < colThr) right--;
 
-  const padX = Math.max(1, Math.round((right - left + 1) * 0.08));
-  const padY = Math.max(1, Math.round((bottom - top + 1) * 0.08));
+  const padX = Math.max(1, Math.round((right - left + 1) * 0.12));
+  const padY = Math.max(1, Math.round((bottom - top + 1) * 0.12));
 
   left = Math.max(0, left - padX);
   right = Math.min(w - 1, right + padX);
@@ -443,7 +443,7 @@ function addSupportToCandidates(candidates: DetectionBox[]) {
   });
 }
 
-function buildMassMap(gray: Float32Array, w: number, h: number, polarity: "dark" | "light" | "mixed") {
+function buildMassMap(gray: Float32Array, polarity: "dark" | "light" | "mixed") {
   const out = new Float32Array(gray.length);
   for (let i = 0; i < gray.length; i++) {
     const g = gray[i];
@@ -456,6 +456,42 @@ function buildMassMap(gray: Float32Array, w: number, h: number, polarity: "dark"
     }
   }
   return out;
+}
+
+function makeIntegralMap(src: Float32Array, w: number, h: number) {
+  const integral = new Float32Array((w + 1) * (h + 1));
+
+  for (let y = 1; y <= h; y++) {
+    let rowSum = 0;
+    for (let x = 1; x <= w; x++) {
+      rowSum += src[(y - 1) * w + (x - 1)];
+      integral[y * (w + 1) + x] = integral[(y - 1) * (w + 1) + x] + rowSum;
+    }
+  }
+
+  return integral;
+}
+
+function rectSum(
+  integral: Float32Array,
+  fullW: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number
+) {
+  const stride = fullW + 1;
+  const x1 = x;
+  const y1 = y;
+  const x2 = x + w;
+  const y2 = y + h;
+
+  return (
+    integral[y2 * stride + x2] -
+    integral[y1 * stride + x2] -
+    integral[y2 * stride + x1] +
+    integral[y1 * stride + x1]
+  );
 }
 
 async function buildSampleFeature(sample: SampleItem): Promise<SampleFeature | null> {
@@ -718,67 +754,91 @@ export default function ReviewPage() {
           await new Promise((resolve) => setTimeout(resolve, 0));
           if (cancelled) return;
 
-          const massMap = buildMassMap(sceneGray, sceneW, sceneH, feature.polarity);
+          const massMap = buildMassMap(sceneGray, feature.polarity);
           const integral = makeIntegralMap(massMap, sceneW, sceneH);
 
-          const baseH = Math.max(18, feature.height + 4);
+          const isWide = feature.aspectRatio >= 1.35;
+          const isTall = feature.aspectRatio <= 0.78;
+
+          const baseH = Math.max(18, feature.height + (isWide ? 8 : 5));
           const baseW = Math.max(14, Math.round(baseH * feature.aspectRatio));
-          const scaleList = [0.78, 0.90, 1.0, 1.12, 1.26];
+
+          const scaleList = isWide
+            ? [0.78, 0.92, 1.0, 1.12, 1.26, 1.42]
+            : isTall
+              ? [0.82, 0.94, 1.0, 1.10, 1.22]
+              : [0.80, 0.92, 1.0, 1.10, 1.24, 1.36];
+
+          const ratioBiasList = isWide
+            ? [0.86, 0.94, 1.0, 1.08, 1.18]
+            : isTall
+              ? [0.86, 0.94, 1.0, 1.08]
+              : [0.90, 1.0, 1.10];
+
           const rawCandidates: DetectionBox[] = [];
 
           for (const scaleMul of scaleList) {
-            const ww = Math.max(14, Math.round(baseW * scaleMul));
-            const hh = Math.max(14, Math.round(baseH * scaleMul));
-            if (ww >= sceneW || hh >= sceneH) continue;
+            for (const ratioMul of ratioBiasList) {
+              let ww = Math.max(14, Math.round(baseW * scaleMul * ratioMul));
+              let hh = Math.max(14, Math.round((baseH * scaleMul) / Math.sqrt(ratioMul)));
 
-            for (let y = 0; y <= sceneH - hh; y += stride) {
-              if (y % (stride * 8) === 0) {
-                await new Promise((resolve) => setTimeout(resolve, 0));
-                if (cancelled) return;
-              }
+              const winRatio = ww / hh;
+              const ratioGap = Math.abs(Math.log(winRatio / feature.aspectRatio));
+              if (ratioGap > 0.42) continue;
 
-              for (let x = 0; x <= sceneW - ww; x += stride) {
-                const mass = rectSum(integral, sceneW, x, y, ww, hh) / (ww * hh);
-                if (mass < 0.028) continue;
+              if (ww >= sceneW || hh >= sceneH) continue;
 
-                const patchGray = cropGrayPatch(
-                  sceneGray,
-                  sceneW,
-                  sceneH,
-                  x,
-                  y,
-                  ww,
-                  hh,
-                  feature.width,
-                  feature.height
-                );
-                const patchFeature = buildFeatureVector(
-                  patchGray,
-                  feature.width,
-                  feature.height
-                );
-
-                let sim = cosineSimilarity(feature.vector, patchFeature.vector);
-
-                // 見本の明暗傾向と大きくズレる候補を少し減点
-                if (
-                  feature.polarity !== "mixed" &&
-                  patchFeature.polarity !== "mixed" &&
-                  feature.polarity !== patchFeature.polarity
-                ) {
-                  sim -= 0.04;
+              for (let y = 0; y <= sceneH - hh; y += stride) {
+                if (y % (stride * 8) === 0) {
+                  await new Promise((resolve) => setTimeout(resolve, 0));
+                  if (cancelled) return;
                 }
 
-                rawCandidates.push({
-                  x: x / sceneW,
-                  y: y / sceneH,
-                  w: ww / sceneW,
-                  h: hh / sceneH,
-                  color: colorFromSample(sample),
-                  sampleId: sample.id,
-                  score: sim,
-                  support: 0,
-                });
+                for (let x = 0; x <= sceneW - ww; x += stride) {
+                  const mass = rectSum(integral, sceneW, x, y, ww, hh) / (ww * hh);
+                  const minMass = isWide ? 0.018 : 0.025;
+                  if (mass < minMass) continue;
+
+                  const patchGray = cropGrayPatch(
+                    sceneGray,
+                    sceneW,
+                    sceneH,
+                    x,
+                    y,
+                    ww,
+                    hh,
+                    feature.width,
+                    feature.height
+                  );
+                  const patchFeature = buildFeatureVector(
+                    patchGray,
+                    feature.width,
+                    feature.height
+                  );
+
+                  let sim = cosineSimilarity(feature.vector, patchFeature.vector);
+
+                  if (
+                    feature.polarity !== "mixed" &&
+                    patchFeature.polarity !== "mixed" &&
+                    feature.polarity !== patchFeature.polarity
+                  ) {
+                    sim -= 0.04;
+                  }
+
+                  sim -= ratioGap * 0.08;
+
+                  rawCandidates.push({
+                    x: x / sceneW,
+                    y: y / sceneH,
+                    w: ww / sceneW,
+                    h: hh / sceneH,
+                    color: colorFromSample(sample),
+                    sampleId: sample.id,
+                    score: sim,
+                    support: 0,
+                  });
+                }
               }
             }
           }
@@ -786,14 +846,17 @@ export default function ReviewPage() {
           if (rawCandidates.length === 0) continue;
 
           rawCandidates.sort((a, b) => b.score - a.score);
-          const topTrimmed = rawCandidates.slice(0, 80);
+          const topTrimmed = rawCandidates.slice(0, 100);
           const supported = addSupportToCandidates(topTrimmed).sort((a, b) => {
-            if (b.score !== a.score) return b.score - a.score;
-            return b.support - a.support;
+            if (b.support !== a.support) return b.support - a.support;
+            return b.score - a.score;
           });
 
           const bestScore = supported[0]?.score ?? -1;
-          const acceptThreshold = Math.max(0.60, bestScore - (0.18 - sens01 * 0.10));
+          const acceptThreshold = Math.max(
+            0.60,
+            bestScore - (isWide ? 0.12 : 0.16) + sens01 * 0.05
+          );
 
           const picked: DetectionBox[] = [];
           for (const c of supported) {
@@ -803,12 +866,10 @@ export default function ReviewPage() {
             if (picked.length >= 3) break;
           }
 
-          // 候補が弱い場合は0件にする
-          if (bestScore < 0.68) {
+          if (bestScore < (isWide ? 0.66 : 0.68)) {
             continue;
           }
 
-          // 強い候補がないときは1件まで
           const maxCount =
             bestScore >= 0.88 ? 3 :
             bestScore >= 0.80 ? 2 : 1;
@@ -816,7 +877,18 @@ export default function ReviewPage() {
           allDetections.push(...picked.slice(0, maxCount));
         }
 
-        const merged = mergeGlobalDetections(allDetections);
+        const merged = (() => {
+          const sorted = [...allDetections].sort((a, b) => {
+            if (b.support !== a.support) return b.support - a.support;
+            return b.score - a.score;
+          });
+          const out: DetectionBox[] = [];
+          for (const d of sorted) {
+            const overlaps = out.some((o) => overlapOrNear(o, d));
+            if (!overlaps) out.push(d);
+          }
+          return out;
+        })();
 
         if (!cancelled) {
           await new Promise<void>((resolve) => {
