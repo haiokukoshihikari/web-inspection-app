@@ -134,11 +134,7 @@ async function imageSrcToGrayMat(
 }
 
 function isCvReady() {
-  return !!(
-    window.cv &&
-    typeof window.cv.Mat === "function" &&
-    typeof window.cv.ORB === "function"
-  );
+  return !!(window.cv && typeof window.cv.Mat === "function");
 }
 
 async function ensureOpenCvLoaded(
@@ -149,11 +145,10 @@ async function ensureOpenCvLoaded(
     onStatus?.(msg);
   };
 
-  if (
-    window.cv &&
-    typeof window.cv.Mat === "function" &&
-    typeof window.cv.ORB === "function"
-  ) {
+  const isReadyNow = () =>
+    !!(window.cv && typeof window.cv.Mat === "function");
+
+  if (isReadyNow()) {
     report("既に利用可能");
     return window.cv;
   }
@@ -163,53 +158,64 @@ async function ensureOpenCvLoaded(
       OPENCV_SCRIPT_ID
     ) as HTMLScriptElement | null;
 
-    const startTimeout = () => {
-      const startedAt = Date.now();
+    let timeoutId: number | null = null;
 
-      const timer = window.setInterval(() => {
-        const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+    const cleanupTimeout = () => {
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+    };
 
-        if (
-          window.cv &&
-          typeof window.cv.Mat === "function" &&
-          typeof window.cv.ORB === "function"
-        ) {
-          window.clearInterval(timer);
-          report(`利用可能になりました (${elapsed}s)`);
-          resolve(window.cv);
-          return;
-        }
+    const markReady = () => {
+      cleanupTimeout();
+      report("onRuntimeInitialized 発火 / 利用可能");
+      resolve(window.cv);
+    };
 
-        if (window.cv) {
-          report(`cv は存在 / 初期化待ち (${elapsed}s)`);
-        } else {
-          report(`cv 未生成 (${elapsed}s)`);
-        }
+    const setupCvHook = () => {
+      if (!window.cv) return false;
 
-        if (Date.now() - startedAt > 20000) {
-          window.clearInterval(timer);
-          reject(new Error("OpenCV load timeout"));
-        }
-      }, 500);
+      // 既に利用可能なら即解決
+      if (typeof window.cv.Mat === "function") {
+        markReady();
+        return true;
+      }
+
+      // 公式チュートリアル寄り: cv.onRuntimeInitialized を使う
+      window.cv.onRuntimeInitialized = () => {
+        markReady();
+      };
+
+      report("cv.onRuntimeInitialized を設定");
+      return true;
     };
 
     const setupModule = () => {
       report("Module 設定");
-
       (window as any).Module = {
         locateFile: (path: string) => {
           report(`locateFile: ${path}`);
           return `https://docs.opencv.org/4.x/${path}`;
         },
-        onRuntimeInitialized: () => {
-          report("onRuntimeInitialized 発火");
-        },
       };
     };
 
+    timeoutId = window.setTimeout(() => {
+      reject(new Error("OpenCV load timeout"));
+    }, 20000);
+
     if (existing) {
       report("既存 script を検出");
-      startTimeout();
+      if (setupCvHook()) return;
+
+      // 既存 script があるが cv がまだ無いケース
+      const poll = window.setInterval(() => {
+        if (window.cv) {
+          window.clearInterval(poll);
+          setupCvHook();
+        }
+      }, 100);
       return;
     }
 
@@ -222,10 +228,18 @@ async function ensureOpenCvLoaded(
 
     script.onload = () => {
       report("script.onload 発火");
-      startTimeout();
+      if (setupCvHook()) return;
+
+      const poll = window.setInterval(() => {
+        if (window.cv) {
+          window.clearInterval(poll);
+          setupCvHook();
+        }
+      }, 100);
     };
 
     script.onerror = () => {
+      cleanupTimeout();
       report("script.onerror 発火");
       reject(new Error("Failed to load OpenCV.js"));
     };
