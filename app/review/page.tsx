@@ -716,11 +716,12 @@ export default function ReviewPage() {
             const thumbW = Math.max(40, Math.min(72, Math.round(40 * ratio)));
 
             return (
-              <div key={sample.id} className="relative">
+              <div key={sample.id} className="relative overflow-visible">
                 <button
-                  onClick={() =>
-                    setShowDeleteFor(showDeleteFor === sample.id ? null : sample.id)
-                  }
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowDeleteFor(showDeleteFor === sample.id ? null : sample.id);
+                    }}
                   className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-2 py-2 flex items-center gap-2 min-w-0"
                 >
                   {sample.thumbUrl ? (
@@ -744,19 +745,22 @@ export default function ReviewPage() {
                 </button>
 
                 {showDeleteFor === sample.id && (
-                  <div className="absolute -top-2 -right-2">
+                <div className="absolute top-1 right-1 z-20">
                     <button
-                      onClick={() => {
+                    type="button"
+                    onClick={(e) => {
+                        e.stopPropagation();
                         if (window.confirm("削除しますか？")) {
-                          setSamples((prev) => prev.filter((s) => s.id !== sample.id));
-                          setShowDeleteFor(null);
+                        setSamples((prev) => prev.filter((s) => s.id !== sample.id));
+                        setShowDeleteFor(null);
                         }
-                      }}
-                      className="w-8 h-8 rounded-full bg-rose-500 text-white shadow-lg"
+                    }}
+                    className="w-10 h-10 rounded-full bg-rose-500 text-white shadow-lg flex items-center justify-center"
+                    aria-label="見本を削除"
                     >
-                      ×
+                    ×
                     </button>
-                  </div>
+                </div>
                 )}
               </div>
             );
