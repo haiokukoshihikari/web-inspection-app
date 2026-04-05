@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "v2026-04-05-03";
+const REVIEW_VERSION = "v2026-04-05-04";
 
 const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
@@ -125,6 +125,46 @@ function preprocessEdge(cv: any, gray: any) {
   return edge;
 }
 
+function getScoreThreshold(sensitivity: number) {
+  const s = Math.max(0, Math.min(100, sensitivity));
+  return 0.62 - s * 0.0014;
+}
+
+function isBoxReasonable(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  sceneWidth: number,
+  sceneHeight: number
+) {
+  if (w < 8 || h < 8) return false;
+  if (w > sceneWidth * 0.8 || h > sceneHeight * 0.5) return false;
+
+  const aspect = w / Math.max(1, h);
+  if (aspect > 8 || aspect < 0.18) return false;
+
+  if (x < 0 || y < 0) return false;
+  if (x + w > sceneWidth || y + h > sceneHeight) return false;
+
+  return true;
+}
+
+function centerPenalty(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  sceneWidth: number,
+  sceneHeight: number
+) {
+  const cx = x + w / 2;
+  const cy = y + h / 2;
+  const dx = Math.abs(cx - sceneWidth / 2) / sceneWidth;
+  const dy = Math.abs(cy - sceneHeight / 2) / sceneHeight;
+  return dx * 0.18 + dy * 0.1;
+}
+
 function matchBestFromMatSet(params: {
   cv: any;
   sceneMat: any;
@@ -146,7 +186,7 @@ function matchBestFromMatSet(params: {
     sensitivity,
   } = params;
 
-  const scales = [0.75, 0.9, 1.0, 1.1, 1.25];
+  const scales = [0.72, 0.86, 1.0, 1.14, 1.28];
   let best: DetectionBox | null = null;
 
   for (const scale of scales) {
@@ -169,10 +209,26 @@ function matchBestFromMatSet(params: {
       cv.matchTemplate(sceneMat, tpl, result, cv.TM_CCOEFF_NORMED);
 
       const mm = cv.minMaxLoc(result);
-      const score = mm.maxVal;
+      const rawScore = mm.maxVal;
 
-      const threshold = 0.38 + (sensitivity / 100) * 0.22;
-      if (score < threshold) continue;
+      const threshold = getScoreThreshold(sensitivity);
+      if (rawScore < threshold) continue;
+
+      if (
+        !isBoxReasonable(
+          mm.maxLoc.x,
+          mm.maxLoc.y,
+          tpl.cols,
+          tpl.rows,
+          sceneWidth,
+          sceneHeight
+        )
+      ) {
+        continue;
+      }
+
+      const adjustedScore =
+        rawScore - centerPenalty(mm.maxLoc.x, mm.maxLoc.y, tpl.cols, tpl.rows, sceneWidth, sceneHeight);
 
       const box: DetectionBox = {
         x: clamp01(mm.maxLoc.x / sceneWidth),
@@ -181,7 +237,7 @@ function matchBestFromMatSet(params: {
         h: clamp01(tpl.rows / sceneHeight),
         color,
         sampleId,
-        score,
+        score: adjustedScore,
       };
 
       if (!best || box.score > best.score) {
