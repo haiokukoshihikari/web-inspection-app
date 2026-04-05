@@ -27,11 +27,10 @@ type DetectionBox = {
   support: number;
 };
 
-type CandidateRect = {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
+type SampleFeature = {
+  vector: number[];
+  aspectRatio: number;
+  polarity: "dark" | "light";
 };
 
 const DEFAULT_SAMPLES: SampleItem[] = [
@@ -87,36 +86,6 @@ function canvasToGray(
   return { gray: out, width, height };
 }
 
-function makeEdgeMap(gray: Float32Array, w: number, h: number) {
-  const out = new Float32Array(w * h);
-
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x;
-
-      const gx =
-        -gray[(y - 1) * w + (x - 1)] +
-        gray[(y - 1) * w + (x + 1)] +
-        -2 * gray[y * w + (x - 1)] +
-        2 * gray[y * w + (x + 1)] +
-        -gray[(y + 1) * w + (x - 1)] +
-        gray[(y + 1) * w + (x + 1)];
-
-      const gy =
-        -gray[(y - 1) * w + (x - 1)] +
-        -2 * gray[(y - 1) * w + x] +
-        -gray[(y - 1) * w + (x + 1)] +
-        gray[(y + 1) * w + (x - 1)] +
-        2 * gray[(y + 1) * w + x] +
-        gray[(y + 1) * w + (x + 1)];
-
-      out[i] = Math.min(1, Math.sqrt(gx * gx + gy * gy));
-    }
-  }
-
-  return out;
-}
-
 function makeIntegralMap(src: Float32Array, w: number, h: number) {
   const integral = new Float32Array((w + 1) * (h + 1));
 
@@ -153,10 +122,6 @@ function rectSum(
   );
 }
 
-function clampInt(v: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, v));
-}
-
 function normalizeVector(vec: number[]) {
   const sum = vec.reduce((a, b) => a + Math.abs(b), 0);
   if (sum <= 1e-6) return vec.map(() => 0);
@@ -172,9 +137,8 @@ function featureDistance(a: number[], b: number[]) {
   return sum / Math.max(1, len);
 }
 
-function buildWindowFeatures(
-  darkIntegral: Float32Array,
-  edgeIntegral: Float32Array,
+function buildShapeVector(
+  integral: Float32Array,
   fullW: number,
   fullH: number,
   sx: number,
@@ -182,48 +146,54 @@ function buildWindowFeatures(
   ww: number,
   hh: number
 ) {
-  const x = clampInt(sx, 0, fullW - 1);
-  const y = clampInt(sy, 0, fullH - 1);
-  const w = clampInt(ww, 1, fullW - x);
-  const h = clampInt(hh, 1, fullH - y);
+  const x = Math.max(0, Math.min(sx, fullW - 1));
+  const y = Math.max(0, Math.min(sy, fullH - 1));
+  const w = Math.max(1, Math.min(ww, fullW - x));
+  const h = Math.max(1, Math.min(hh, fullH - y));
 
-  const features: number[] = [];
+  const vec: number[] = [];
 
   for (let gy = 0; gy < 4; gy++) {
     for (let gx = 0; gx < 4; gx++) {
       const cx = x + Math.floor((gx * w) / 4);
       const cy = y + Math.floor((gy * h) / 4);
-      const cw = Math.max(1, Math.floor(((gx + 1) * w) / 4) - Math.floor((gx * w) / 4));
-      const ch = Math.max(1, Math.floor(((gy + 1) * h) / 4) - Math.floor((gy * h) / 4));
-      const darkMean = rectSum(darkIntegral, fullW, cx, cy, cw, ch) / (cw * ch);
-      const edgeMean = rectSum(edgeIntegral, fullW, cx, cy, cw, ch) / (cw * ch);
-      features.push(darkMean);
-      features.push(edgeMean);
+      const cw = Math.max(
+        1,
+        Math.floor(((gx + 1) * w) / 4) - Math.floor((gx * w) / 4)
+      );
+      const ch = Math.max(
+        1,
+        Math.floor(((gy + 1) * h) / 4) - Math.floor((gy * h) / 4)
+      );
+      const mean = rectSum(integral, fullW, cx, cy, cw, ch) / (cw * ch);
+      vec.push(mean);
     }
   }
 
-  for (let gy = 0; gy < 6; gy++) {
-    const cy = y + Math.floor((gy * h) / 6);
-    const ch = Math.max(1, Math.floor(((gy + 1) * h) / 6) - Math.floor((gy * h) / 6));
-    const mean = rectSum(darkIntegral, fullW, x, cy, w, ch) / (w * ch);
-    features.push(mean);
+  for (let gy = 0; gy < 8; gy++) {
+    const cy = y + Math.floor((gy * h) / 8);
+    const ch = Math.max(
+      1,
+      Math.floor(((gy + 1) * h) / 8) - Math.floor((gy * h) / 8)
+    );
+    const mean = rectSum(integral, fullW, x, cy, w, ch) / (w * ch);
+    vec.push(mean);
   }
 
-  for (let gx = 0; gx < 6; gx++) {
-    const cx = x + Math.floor((gx * w) / 6);
-    const cw = Math.max(1, Math.floor(((gx + 1) * w) / 6) - Math.floor((gx * w) / 6));
-    const mean = rectSum(darkIntegral, fullW, cx, y, cw, h) / (cw * h);
-    features.push(mean);
+  for (let gx = 0; gx < 8; gx++) {
+    const cx = x + Math.floor((gx * w) / 8);
+    const cw = Math.max(
+      1,
+      Math.floor(((gx + 1) * w) / 8) - Math.floor((gx * w) / 8)
+    );
+    const mean = rectSum(integral, fullW, cx, y, cw, h) / (cw * h);
+    vec.push(mean);
   }
 
-  const overallDark = rectSum(darkIntegral, fullW, x, y, w, h) / (w * h);
-  const overallEdge = rectSum(edgeIntegral, fullW, x, y, w, h) / (w * h);
-  features.push(overallDark, overallEdge);
-
-  return normalizeVector(features);
+  return normalizeVector(vec);
 }
 
-function iou(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }) {
+function iou(a: DetectionBox, b: DetectionBox) {
   const ax1 = a.x;
   const ay1 = a.y;
   const ax2 = a.x + a.w;
@@ -247,7 +217,7 @@ function iou(a: { x: number; y: number; w: number; h: number }, b: { x: number; 
   return union > 0 ? inter / union : 0;
 }
 
-function centerDistance(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }) {
+function centerDistance(a: DetectionBox, b: DetectionBox) {
   const ax = a.x + a.w / 2;
   const ay = a.y + a.h / 2;
   const bx = b.x + b.w / 2;
@@ -255,9 +225,9 @@ function centerDistance(a: { x: number; y: number; w: number; h: number }, b: { 
   return Math.hypot(ax - bx, ay - by);
 }
 
-function overlapOrNear(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }) {
-  const near = centerDistance(a, b) < Math.max(a.w, b.w) * 0.55;
-  return iou(a, b) > 0.08 || near;
+function overlapOrNear(a: DetectionBox, b: DetectionBox) {
+  const near = centerDistance(a, b) < Math.max(a.w, b.w) * 0.6;
+  return iou(a, b) > 0.1 || near;
 }
 
 function addSupportToCandidates(candidates: DetectionBox[]) {
@@ -285,58 +255,55 @@ function mergeGlobalDetections(detections: DetectionBox[]) {
   return merged;
 }
 
-function buildCandidateRects(
-  darkIntegral: Float32Array,
-  edgeIntegral: Float32Array,
-  sceneW: number,
-  sceneH: number
-): CandidateRect[] {
-  const rects: CandidateRect[] = [];
-  const stepY = 24;
-  const stepX = 24;
-
-  for (const h of [24, 32, 40, 52, 64]) {
-    for (const w of [56, 72, 96, 120, 148, 180]) {
-      if (w >= sceneW || h >= sceneH) continue;
-
-      for (let y = 0; y <= sceneH - h; y += stepY) {
-        for (let x = 0; x <= sceneW - w; x += stepX) {
-          const darkMean = rectSum(darkIntegral, sceneW, x, y, w, h) / (w * h);
-          const edgeMean = rectSum(edgeIntegral, sceneW, x, y, w, h) / (w * h);
-
-          if (darkMean < 0.05) continue;
-          if (edgeMean < 0.01) continue;
-          if (w / h < 1.2) continue;
-
-          rects.push({ x, y, w, h });
-          if (rects.length >= 260) return rects;
-        }
-      }
-    }
-  }
-
-  return rects;
+function colorFromSample(sample: SampleItem) {
+  if (sample.color.includes("sky")) return "#38bdf8";
+  if (sample.color.includes("emerald")) return "#34d399";
+  if (sample.color.includes("amber")) return "#f59e0b";
+  if (sample.color.includes("fuchsia")) return "#d946ef";
+  if (sample.color.includes("cyan")) return "#06b6d4";
+  return "#f43f5e";
 }
 
-function buildFallbackRects(sceneW: number, sceneH: number): CandidateRect[] {
-  const rects: CandidateRect[] = [];
-  const stepY = 28;
-  const stepX = 28;
+async function buildSampleFeature(sample: SampleItem): Promise<SampleFeature | null> {
+  if (!sample.thumbUrl) return null;
 
-  for (const h of [28, 36, 44, 56]) {
-    for (const w of [72, 96, 120, 148]) {
-      if (w >= sceneW || h >= sceneH) continue;
+  const img = await loadImage(sample.thumbUrl);
+  const ratio =
+    sample.aspectRatio && sample.aspectRatio > 0
+      ? sample.aspectRatio
+      : img.naturalWidth / img.naturalHeight || 1;
 
-      for (let y = 0; y <= sceneH - h; y += stepY) {
-        for (let x = 0; x <= sceneW - w; x += stepX) {
-          rects.push({ x, y, w, h });
-          if (rects.length >= 220) return rects;
-        }
-      }
-    }
+  const sw = 96;
+  const sh = Math.max(20, Math.round(96 / ratio));
+  const gray = imageToGray(img, sw, sh);
+
+  let darkTotal = 0;
+  let lightTotal = 0;
+  for (let i = 0; i < gray.length; i++) {
+    const g = gray[i];
+    darkTotal += Math.max(0, (0.6 - g) / 0.6);
+    lightTotal += Math.max(0, (g - 0.4) / 0.6);
   }
 
-  return rects;
+  const polarity: "dark" | "light" = lightTotal > darkTotal ? "light" : "dark";
+
+  const comp = new Float32Array(gray.length);
+  for (let i = 0; i < gray.length; i++) {
+    const g = gray[i];
+    comp[i] =
+      polarity === "dark"
+        ? Math.max(0, (0.62 - g) / 0.62)
+        : Math.max(0, (g - 0.38) / 0.62);
+  }
+
+  const integral = makeIntegralMap(comp, sw, sh);
+  const vector = buildShapeVector(integral, sw, sh, 0, 0, sw, sh);
+
+  return {
+    vector,
+    aspectRatio: ratio,
+    polarity,
+  };
 }
 
 export default function ReviewPage() {
@@ -502,7 +469,7 @@ export default function ReviewPage() {
       setDetections([]);
       setPrepareDetecting(true);
 
-      await new Promise((resolve) => setTimeout(resolve, 220));
+      await new Promise((resolve) => setTimeout(resolve, 180));
       if (cancelled) return;
 
       setPrepareDetecting(false);
@@ -526,116 +493,87 @@ export default function ReviewPage() {
         sceneCtx.drawImage(sceneImg, 0, 0, sceneW, sceneH);
 
         const { gray: sceneGray } = canvasToGray(sceneCanvas);
-        const darkScene = new Float32Array(sceneGray.length);
-        for (let i = 0; i < sceneGray.length; i++) darkScene[i] = 1 - sceneGray[i];
 
-        const sceneEdge = makeEdgeMap(sceneGray, sceneW, sceneH);
-        const darkSceneIntegral = makeIntegralMap(darkScene, sceneW, sceneH);
-        const edgeSceneIntegral = makeIntegralMap(sceneEdge, sceneW, sceneH);
+        const sampleFeatures = (
+          await Promise.all(visibleSamples.map((s) => buildSampleFeature(s)))
+        ).filter((x): x is SampleFeature => !!x);
 
-        let candidateRects = buildCandidateRects(
-          darkSceneIntegral,
-          edgeSceneIntegral,
-          sceneW,
-          sceneH
-        );
-
-        if (candidateRects.length < 12) {
-          candidateRects = buildFallbackRects(sceneW, sceneH);
+        if (cancelled) return;
+        if (sampleFeatures.length === 0) {
+          setDetections([]);
+          return;
         }
 
         const allDetections: DetectionBox[] = [];
         const sensitivity01 = Math.max(0, Math.min(100, appliedSensitivity)) / 100;
-        const featureThreshold = 0.11 + sensitivity01 * 0.035;
+        const baseThreshold = 0.12 + sensitivity01 * 0.035;
+        const stride = appliedSensitivity >= 70 ? 12 : 14;
 
-        for (const sample of visibleSamples) {
+        for (let sampleIndex = 0; sampleIndex < visibleSamples.length; sampleIndex++) {
+          const sample = visibleSamples[sampleIndex];
+          const sampleFeature = sampleFeatures[sampleIndex];
+          if (!sampleFeature) continue;
+
           await new Promise((resolve) => setTimeout(resolve, 0));
           if (cancelled) return;
-          if (!sample.thumbUrl) continue;
 
-          const sampleImg = await loadImage(sample.thumbUrl);
-          if (cancelled) return;
+          const comp = new Float32Array(sceneGray.length);
+          for (let i = 0; i < sceneGray.length; i++) {
+            const g = sceneGray[i];
+            comp[i] =
+              sampleFeature.polarity === "dark"
+                ? Math.max(0, (0.62 - g) / 0.62)
+                : Math.max(0, (g - 0.38) / 0.62);
+          }
 
-          const ratio =
-            sample.aspectRatio && sample.aspectRatio > 0
-              ? sample.aspectRatio
-              : sampleImg.naturalWidth / sampleImg.naturalHeight || 1;
-
-          const sw = 96;
-          const sh = Math.max(20, Math.round(96 / ratio));
-          const sampleGray = imageToGray(sampleImg, sw, sh);
-          const sampleDark = new Float32Array(sampleGray.length);
-          for (let i = 0; i < sampleGray.length; i++) sampleDark[i] = 1 - sampleGray[i];
-          const sampleEdge = makeEdgeMap(sampleGray, sw, sh);
-          const sampleDarkIntegral = makeIntegralMap(sampleDark, sw, sh);
-          const sampleEdgeIntegral = makeIntegralMap(sampleEdge, sw, sh);
-
-          const sampleFeature = buildWindowFeatures(
-            sampleDarkIntegral,
-            sampleEdgeIntegral,
-            sw,
-            sh,
-            0,
-            0,
-            sw,
-            sh
-          );
-
+          const integral = makeIntegralMap(comp, sceneW, sceneH);
           const candidates: DetectionBox[] = [];
+          const baseH = 48;
+          const baseW = Math.max(18, Math.round(baseH * sampleFeature.aspectRatio));
+          const scaleList = [0.9, 1.0, 1.1];
 
-          for (const rect of candidateRects) {
-            const rectRatio = rect.w / rect.h;
-            const ratioGap = Math.abs(rectRatio - ratio);
-            if (ratioGap > Math.max(1.2, ratio * 0.9)) continue;
+          for (const scaleMul of scaleList) {
+            const ww = Math.max(16, Math.round(baseW * scaleMul));
+            const hh = Math.max(16, Math.round(baseH * scaleMul));
+            if (ww >= sceneW || hh >= sceneH) continue;
 
-            const windowFeature = buildWindowFeatures(
-              darkSceneIntegral,
-              edgeSceneIntegral,
-              sceneW,
-              sceneH,
-              rect.x,
-              rect.y,
-              rect.w,
-              rect.h
-            );
+            for (let y = 0; y <= sceneH - hh; y += stride) {
+              if (y % (stride * 8) === 0) {
+                await new Promise((resolve) => setTimeout(resolve, 0));
+                if (cancelled) return;
+              }
 
-            const distance = featureDistance(sampleFeature, windowFeature);
-            if (distance <= featureThreshold) {
-              candidates.push({
-                x: rect.x / sceneW,
-                y: rect.y / sceneH,
-                w: rect.w / sceneW,
-                h: rect.h / sceneH,
-                color: sample.color.includes("sky")
-                  ? "#38bdf8"
-                  : sample.color.includes("emerald")
-                    ? "#34d399"
-                    : sample.color.includes("amber")
-                      ? "#f59e0b"
-                      : sample.color.includes("fuchsia")
-                        ? "#d946ef"
-                        : sample.color.includes("cyan")
-                          ? "#06b6d4"
-                          : "#f43f5e",
-                sampleId: sample.id,
-                score: distance,
-                support: 0,
-              });
+              for (let x = 0; x <= sceneW - ww; x += stride) {
+                const mass = rectSum(integral, sceneW, x, y, ww, hh) / (ww * hh);
+                if (mass < 0.05) continue;
+
+                const vec = buildShapeVector(integral, sceneW, sceneH, x, y, ww, hh);
+                const distance = featureDistance(sampleFeature.vector, vec);
+
+                if (distance <= baseThreshold) {
+                  candidates.push({
+                    x: x / sceneW,
+                    y: y / sceneH,
+                    w: ww / sceneW,
+                    h: hh / sceneH,
+                    color: colorFromSample(sample),
+                    sampleId: sample.id,
+                    score: distance,
+                    support: 0,
+                  });
+                }
+              }
             }
           }
 
-          const trimmedCandidates = candidates
-            .sort((a, b) => a.score - b.score)
-            .slice(0, 30);
-
-          const supportedCandidates = addSupportToCandidates(trimmedCandidates)
-            .sort((a, b) => {
-              if (b.support !== a.support) return b.support - a.support;
-              return a.score - b.score;
-            });
+          const trimmed = candidates.sort((a, b) => a.score - b.score).slice(0, 50);
+          const supported = addSupportToCandidates(trimmed).sort((a, b) => {
+            if (b.support !== a.support) return b.support - a.support;
+            return a.score - b.score;
+          });
 
           const picked: DetectionBox[] = [];
-          for (const c of supportedCandidates) {
+          for (const c of supported) {
             const overlaps = picked.some((p) => overlapOrNear(p, c));
             if (!overlaps) picked.push(c);
             if (picked.length >= 3) break;
