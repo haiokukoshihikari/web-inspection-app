@@ -10,6 +10,8 @@ declare global {
   }
 }
 
+const REVIEW_VERSION = "v2026-04-05-02";
+
 const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
 const MISSING_KEY = "inspection:missingOn";
@@ -532,7 +534,8 @@ export default function ReviewPage() {
     };
   }, [cvReady, capturedImage, visibleSamples, appliedSensitivity]);
 
-  const overlayMuted = isAdjustingSensitivity || prepareDetecting || detecting || !cvReady;
+  const overlayMuted =
+    isAdjustingSensitivity || prepareDetecting || detecting || !cvReady;
   const overlayMessage = !cvReady
     ? "OpenCV 読込中..."
     : isAdjustingSensitivity
@@ -558,6 +561,10 @@ export default function ReviewPage() {
         }}
       />
 
+      <div className="fixed right-2 bottom-2 z-[9999] text-[10px] px-2 py-1 rounded bg-black/70 text-zinc-300 border border-white/10 pointer-events-none">
+        {REVIEW_VERSION}
+      </div>
+
       <div className="px-4 pt-4 pb-3 border-b border-zinc-800 bg-zinc-950 space-y-3">
         <div className="flex items-center gap-3">
           <div className="text-sm text-zinc-300 shrink-0">感度</div>
@@ -576,7 +583,9 @@ export default function ReviewPage() {
             disabled={detecting || prepareDetecting || !cvReady}
             className={`flex-1 ${(detecting || prepareDetecting || !cvReady) ? "opacity-50 cursor-not-allowed" : ""}`}
           />
-          <div className={`text-sm w-9 text-right ${(detecting || prepareDetecting || !cvReady) ? "text-zinc-500" : "text-zinc-300"}`}>
+          <div
+            className={`text-sm w-9 text-right ${(detecting || prepareDetecting || !cvReady) ? "text-zinc-500" : "text-zinc-300"}`}
+          >
             {draftSensitivity}
           </div>
         </div>
