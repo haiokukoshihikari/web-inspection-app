@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 declare global {
   interface Window {
     cv?: any;
+    Module?: any;
   }
 }
 
@@ -13,7 +14,7 @@ const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
 const MISSING_KEY = "inspection:missingOn";
 const SAMPLES_KEY = "inspection:samples";
-const OPENCV_SCRIPT_ID = "opencv-js-script";
+const OPENCV_SCRIPT_ID = "opencv-js-script-local";
 
 type SampleItem = {
   id: string;
@@ -149,10 +150,7 @@ async function ensureOpenCvLoaded(
     onStatus?.(msg);
   };
 
-  const isReadyNow = () =>
-    !!(window.cv && !(window.cv instanceof Promise) && typeof window.cv.Mat === "function");
-
-  if (isReadyNow()) {
+  if (isCvReady()) {
     report("既に利用可能");
     return window.cv;
   }
@@ -198,11 +196,7 @@ async function ensureOpenCvLoaded(
 
     const setupModule = () => {
       report("Module 設定");
-      (window as any).Module = {
-        locateFile: (path: string) => {
-          report(`locateFile: ${path}`);
-          return `https://docs.opencv.org/4.x/${path}`;
-        },
+      window.Module = {
         onRuntimeInitialized: () => {
           report("onRuntimeInitialized 発火");
           finalize();
@@ -216,8 +210,6 @@ async function ensureOpenCvLoaded(
 
     if (existing) {
       report("既存 script を検出");
-
-      // 既に cv が Promise または ready の可能性があるので、そのまま解決を試す
       finalize();
       return;
     }
@@ -227,19 +219,17 @@ async function ensureOpenCvLoaded(
     const script = document.createElement("script");
     script.id = OPENCV_SCRIPT_ID;
     script.async = true;
-    script.src = "https://docs.opencv.org/4.x/opencv.js";
+    script.src = "/opencv/opencv.js";
 
     script.onload = () => {
       report("script.onload 発火");
-
-      // Promise 型 build では onRuntimeInitialized よりこちらで解決できることがある
       finalize();
     };
 
     script.onerror = () => {
       cleanup();
       report("script.onerror 発火");
-      reject(new Error("Failed to load OpenCV.js"));
+      reject(new Error("Failed to load local OpenCV.js"));
     };
 
     document.body.appendChild(script);
@@ -283,8 +273,7 @@ function runOrbSingleMatch(params: {
   let mask: any = null;
 
   try {
-    const nFeatures = 900;
-    orb = new cv.ORB(nFeatures);
+    orb = new cv.ORB(900);
 
     kpScene = new cv.KeyPointVector();
     desScene = new cv.Mat();
@@ -312,24 +301,17 @@ function runOrbSingleMatch(params: {
 
     for (let i = 0; i < knnMatches.size(); i++) {
       const m = knnMatches.get(i);
-      if (m.size() < 2) {
-        m.delete();
-        continue;
+      if (m.size() >= 2) {
+        const m1 = m.get(0);
+        const m2 = m.get(1);
+        if (m1.distance < ratioThreshold * m2.distance) {
+          good.push(m1);
+        }
       }
-
-      const m1 = m.get(0);
-      const m2 = m.get(1);
-
-      if (m1.distance < ratioThreshold * m2.distance) {
-        good.push(m1);
-      }
-
       m.delete();
     }
 
-    if (good.length < 8) {
-      return null;
-    }
+    if (good.length < 8) return null;
 
     srcPts = new cv.Mat(good.length, 1, cv.CV_32FC2);
     dstPts = new cv.Mat(good.length, 1, cv.CV_32FC2);
@@ -348,14 +330,10 @@ function runOrbSingleMatch(params: {
     mask = new cv.Mat();
     H = cv.findHomography(srcPts, dstPts, cv.RANSAC, 5, mask);
 
-    if (!H || H.empty()) {
-      return null;
-    }
+    if (!H || H.empty()) return null;
 
-    const inlierCount = mask.rows || mask.cols ? cv.countNonZero(mask) : 0;
-    if (inlierCount < 6) {
-      return null;
-    }
+    const inlierCount = cv.countNonZero(mask);
+    if (inlierCount < 6) return null;
 
     const sw = sampleGray.cols;
     const sh = sampleGray.rows;
@@ -385,12 +363,7 @@ function runOrbSingleMatch(params: {
     const normW = clamp01(padded.w / sceneWidth);
     const normH = clamp01(padded.h / sceneHeight);
 
-    if (normW < 0.02 || normH < 0.02) {
-      return null;
-    }
-
-    const score =
-      inlierCount * 2 + good.length * 0.15 - Math.abs((padded.w / padded.h) - (sw / sh)) * 2;
+    if (normW < 0.02 || normH < 0.02) return null;
 
     return {
       x: normX,
@@ -399,7 +372,7 @@ function runOrbSingleMatch(params: {
       h: normH,
       color,
       sampleId,
-      score,
+      score: inlierCount + good.length * 0.1,
     };
   } catch (e) {
     console.error("runOrbSingleMatch error:", e);
@@ -534,9 +507,7 @@ export default function ReviewPage() {
   }, [samples, samplesLoaded]);
 
   useEffect(() => {
-    const stopDragging = () => {
-      setIsSliderDragging(false);
-    };
+    const stopDragging = () => setIsSliderDragging(false);
 
     window.addEventListener("pointerup", stopDragging);
     window.addEventListener("pointercancel", stopDragging);
@@ -694,21 +665,15 @@ export default function ReviewPage() {
 
           sampleGray.delete();
 
-          if (box) {
-            nextDetections.push(box);
-          }
+          if (box) nextDetections.push(box);
 
           await new Promise((resolve) => setTimeout(resolve, 0));
         }
 
-        if (!cancelled) {
-          setDetections(nextDetections);
-        }
+        if (!cancelled) setDetections(nextDetections);
       } catch (e) {
         console.error("ORB detection error:", e);
-        if (!cancelled) {
-          setDetections([]);
-        }
+        if (!cancelled) setDetections([]);
       } finally {
         try {
           sceneGray?.delete?.();
@@ -758,9 +723,7 @@ export default function ReviewPage() {
             disabled={detecting || prepareDetecting || !cvReady}
             className={`flex-1 ${(detecting || prepareDetecting || !cvReady) ? "opacity-50 cursor-not-allowed" : ""}`}
           />
-          <div
-            className={`text-sm w-9 text-right ${(detecting || prepareDetecting || !cvReady) ? "text-zinc-500" : "text-zinc-300"}`}
-          >
+          <div className={`text-sm w-9 text-right ${(detecting || prepareDetecting || !cvReady) ? "text-zinc-500" : "text-zinc-300"}`}>
             {draftSensitivity}
           </div>
         </div>
@@ -769,22 +732,16 @@ export default function ReviewPage() {
           <div className="text-sm">欠落候補</div>
           <button
             onClick={handleMissingToggle}
-            className={`w-14 h-8 rounded-full transition ${
-              missingOn ? "bg-rose-500" : "bg-zinc-700"
-            }`}
+            className={`w-14 h-8 rounded-full transition ${missingOn ? "bg-rose-500" : "bg-zinc-700"}`}
           >
             <span
-              className={`block w-6 h-6 bg-white rounded-full transition translate-y-1 ${
-                missingOn ? "translate-x-7" : "translate-x-1"
-              }`}
+              className={`block w-6 h-6 bg-white rounded-full transition translate-y-1 ${missingOn ? "translate-x-7" : "translate-x-1"}`}
             />
           </button>
         </div>
 
         <div className="text-xs text-zinc-400">{cvStatus}</div>
-        {cvError ? (
-          <div className="text-xs text-rose-400">{cvError}</div>
-        ) : null}
+        {cvError ? <div className="text-xs text-rose-400">{cvError}</div> : null}
       </div>
 
       <div className="flex-1 p-4">
@@ -844,8 +801,7 @@ export default function ReviewPage() {
       <div className="px-4 pb-3">
         <div className="grid grid-cols-3 gap-3">
           {samples.map((sample) => {
-            const ratio =
-              sample.aspectRatio && sample.aspectRatio > 0 ? sample.aspectRatio : 1;
+            const ratio = sample.aspectRatio && sample.aspectRatio > 0 ? sample.aspectRatio : 1;
             const thumbW = Math.max(40, Math.min(72, Math.round(40 * ratio)));
 
             return (
