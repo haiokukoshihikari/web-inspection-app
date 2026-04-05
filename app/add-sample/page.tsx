@@ -93,7 +93,9 @@ export default function AddSamplePage() {
   };
 
   useEffect(() => {
-    const onResize = () => updateBaseRect();
+    const onResize = () => {
+      updateBaseRect();
+    };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
@@ -103,23 +105,6 @@ export default function AddSamplePage() {
     if (aspectMode === "tall") return 1 / 1.5;
     return 1;
   }, [aspectMode]);
-
-  const transformedRect = useMemo(() => {
-    const scaledWidth = baseRect.width * imageScale;
-    const scaledHeight = baseRect.height * imageScale;
-
-    const left =
-      baseRect.left + imagePanX - (scaledWidth - baseRect.width) / 2;
-    const top =
-      baseRect.top + imagePanY - (scaledHeight - baseRect.height) / 2;
-
-    return {
-      left,
-      top,
-      width: scaledWidth,
-      height: scaledHeight,
-    };
-  }, [baseRect, imageScale, imagePanX, imagePanY]);
 
   const displayBox = useMemo(() => {
     let width = baseRect.width * boxSize;
@@ -138,37 +123,62 @@ export default function AddSamplePage() {
     };
   }, [baseRect, boxSize, aspectRatio]);
 
-  const getDistance = (a: { x: number; y: number }, b: { x: number; y: number }) =>
-    Math.hypot(a.x - b.x, a.y - b.y);
+  const getScaledImageRect = (panX: number, panY: number, scale: number) => {
+    const scaledWidth = baseRect.width * scale;
+    const scaledHeight = baseRect.height * scale;
+
+    const left = baseRect.left + panX - (scaledWidth - baseRect.width) / 2;
+    const top = baseRect.top + panY - (scaledHeight - baseRect.height) / 2;
+
+    return {
+      left,
+      top,
+      width: scaledWidth,
+      height: scaledHeight,
+      right: left + scaledWidth,
+      bottom: top + scaledHeight,
+    };
+  };
 
   const clampPan = (nextPanX: number, nextPanY: number, nextScale = imageScale) => {
+    if (!baseRect.width || !baseRect.height || !displayBox.width || !displayBox.height) {
+      return { x: nextPanX, y: nextPanY };
+    }
+
     const scaledWidth = baseRect.width * nextScale;
     const scaledHeight = baseRect.height * nextScale;
 
-    const imageLeft = baseRect.left + nextPanX - (scaledWidth - baseRect.width) / 2;
-    const imageTop = baseRect.top + nextPanY - (scaledHeight - baseRect.height) / 2;
+    const minPanX =
+      displayBox.left + displayBox.width - baseRect.left - baseRect.width / 2 - scaledWidth / 2;
+    const maxPanX =
+      displayBox.left - baseRect.left - baseRect.width / 2 + scaledWidth / 2;
 
-    const imageRight = imageLeft + scaledWidth;
-    const imageBottom = imageTop + scaledHeight;
+    const minPanY =
+      displayBox.top + displayBox.height - baseRect.top - baseRect.height / 2 - scaledHeight / 2;
+    const maxPanY =
+      displayBox.top - baseRect.top - baseRect.height / 2 + scaledHeight / 2;
 
-    let correctedPanX = nextPanX;
-    let correctedPanY = nextPanY;
+    const clampedX =
+      minPanX <= maxPanX
+        ? Math.max(minPanX, Math.min(maxPanX, nextPanX))
+        : 0;
 
-    const boxLeft = displayBox.left;
-    const boxTop = displayBox.top;
-    const boxRight = displayBox.left + displayBox.width;
-    const boxBottom = displayBox.top + displayBox.height;
-
-    if (imageLeft > boxLeft) correctedPanX -= imageLeft - boxLeft;
-    if (imageRight < boxRight) correctedPanX += boxRight - imageRight;
-    if (imageTop > boxTop) correctedPanY -= imageTop - boxTop;
-    if (imageBottom < boxBottom) correctedPanY += boxBottom - imageBottom;
+    const clampedY =
+      minPanY <= maxPanY
+        ? Math.max(minPanY, Math.min(maxPanY, nextPanY))
+        : 0;
 
     return {
-      x: correctedPanX,
-      y: correctedPanY,
+      x: clampedX,
+      y: clampedY,
     };
   };
+
+  useEffect(() => {
+    const next = clampPan(imagePanX, imagePanY, imageScale);
+    if (next.x !== imagePanX) setImagePanX(next.x);
+    if (next.y !== imagePanY) setImagePanY(next.y);
+  }, [baseRect.width, baseRect.height, displayBox.width, displayBox.height]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSmaller = () => {
     setBoxSize((v) => Math.max(0.12, v - 0.03));
@@ -177,6 +187,9 @@ export default function AddSamplePage() {
   const handleLarger = () => {
     setBoxSize((v) => Math.min(0.5, v + 0.03));
   };
+
+  const getDistance = (a: { x: number; y: number }, b: { x: number; y: number }) =>
+    Math.hypot(a.x - b.x, a.y - b.y);
 
   const onFramePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     pointersRef.current[e.pointerId] = { x: e.clientX, y: e.clientY };
@@ -219,9 +232,11 @@ export default function AddSamplePage() {
     if (dragRef.current.mode === "pan" && dragRef.current.pointerId === e.pointerId) {
       const dx = e.clientX - dragRef.current.startClientX;
       const dy = e.clientY - dragRef.current.startClientY;
+
       const next = clampPan(
         dragRef.current.startPanX + dx,
-        dragRef.current.startPanY + dy
+        dragRef.current.startPanY + dy,
+        imageScale
       );
       setImagePanX(next.x);
       setImagePanY(next.y);
@@ -240,9 +255,14 @@ export default function AddSamplePage() {
       const rawScale =
         dragRef.current.startScale * (dist / dragRef.current.startDistance);
       const nextScale = Math.max(1, Math.min(4, rawScale));
-      setImageScale(nextScale);
 
-      const next = clampPan(imagePanX, imagePanY, nextScale);
+      const next = clampPan(
+        dragRef.current.startPanX,
+        dragRef.current.startPanY,
+        nextScale
+      );
+
+      setImageScale(nextScale);
       setImagePanX(next.x);
       setImagePanY(next.y);
     }
@@ -271,6 +291,7 @@ export default function AddSamplePage() {
         startClientY: remain.y,
         startPanX: imagePanX,
         startPanY: imagePanY,
+        startScale: imageScale,
       };
     }
   };
@@ -414,7 +435,10 @@ export default function AddSamplePage() {
                   transform: `translate(${imagePanX}px, ${imagePanY}px) scale(${imageScale})`,
                   transformOrigin: "center center",
                 }}
-                onLoad={updateBaseRect}
+                onLoad={() => {
+                  updateBaseRect();
+                  window.setTimeout(() => updateBaseRect(), 120);
+                }}
                 draggable={false}
               />
 
@@ -438,19 +462,31 @@ export default function AddSamplePage() {
         <div className="flex items-center justify-center gap-2 flex-wrap">
           <button
             onClick={() => setAspectMode("square")}
-            className={`px-3 py-2 rounded-2xl border ${aspectMode === "square" ? "border-white bg-white text-black" : "border-zinc-700 bg-zinc-900 text-white"}`}
+            className={`px-3 py-2 rounded-2xl border ${
+              aspectMode === "square"
+                ? "border-white bg-white text-black"
+                : "border-zinc-700 bg-zinc-900 text-white"
+            }`}
           >
             正方形
           </button>
           <button
             onClick={() => setAspectMode("wide")}
-            className={`px-3 py-2 rounded-2xl border ${aspectMode === "wide" ? "border-white bg-white text-black" : "border-zinc-700 bg-zinc-900 text-white"}`}
+            className={`px-3 py-2 rounded-2xl border ${
+              aspectMode === "wide"
+                ? "border-white bg-white text-black"
+                : "border-zinc-700 bg-zinc-900 text-white"
+            }`}
           >
             横長
           </button>
           <button
             onClick={() => setAspectMode("tall")}
-            className={`px-3 py-2 rounded-2xl border ${aspectMode === "tall" ? "border-white bg-white text-black" : "border-zinc-700 bg-zinc-900 text-white"}`}
+            className={`px-3 py-2 rounded-2xl border ${
+              aspectMode === "tall"
+                ? "border-white bg-white text-black"
+                : "border-zinc-700 bg-zinc-900 text-white"
+            }`}
           >
             縦長
           </button>
