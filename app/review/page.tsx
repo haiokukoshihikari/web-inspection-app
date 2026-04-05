@@ -134,7 +134,11 @@ async function imageSrcToGrayMat(
 }
 
 function isCvReady() {
-  return !!(window.cv && typeof window.cv.Mat === "function");
+  return !!(
+    window.cv &&
+    !(window.cv instanceof Promise) &&
+    typeof window.cv.Mat === "function"
+  );
 }
 
 async function ensureOpenCvLoaded(
@@ -146,7 +150,7 @@ async function ensureOpenCvLoaded(
   };
 
   const isReadyNow = () =>
-    !!(window.cv && typeof window.cv.Mat === "function");
+    !!(window.cv && !(window.cv instanceof Promise) && typeof window.cv.Mat === "function");
 
   if (isReadyNow()) {
     report("既に利用可能");
@@ -160,35 +164,36 @@ async function ensureOpenCvLoaded(
 
     let timeoutId: number | null = null;
 
-    const cleanupTimeout = () => {
+    const cleanup = () => {
       if (timeoutId !== null) {
         window.clearTimeout(timeoutId);
         timeoutId = null;
       }
     };
 
-    const markReady = () => {
-      cleanupTimeout();
-      report("onRuntimeInitialized 発火 / 利用可能");
-      resolve(window.cv);
-    };
+    const finalize = async () => {
+      try {
+        report("cv 解決開始");
 
-    const setupCvHook = () => {
-      if (!window.cv) return false;
+        if (window.cv instanceof Promise) {
+          report("cv は Promise / await 開始");
+          window.cv = await window.cv;
+          report("cv Promise 解決完了");
+        }
 
-      // 既に利用可能なら即解決
-      if (typeof window.cv.Mat === "function") {
-        markReady();
-        return true;
+        if (window.cv && typeof window.cv.Mat === "function") {
+          cleanup();
+          report("利用可能");
+          resolve(window.cv);
+          return;
+        }
+
+        cleanup();
+        reject(new Error("cv resolved but Mat is unavailable"));
+      } catch (e) {
+        cleanup();
+        reject(e);
       }
-
-      // 公式チュートリアル寄り: cv.onRuntimeInitialized を使う
-      window.cv.onRuntimeInitialized = () => {
-        markReady();
-      };
-
-      report("cv.onRuntimeInitialized を設定");
-      return true;
     };
 
     const setupModule = () => {
@@ -197,6 +202,10 @@ async function ensureOpenCvLoaded(
         locateFile: (path: string) => {
           report(`locateFile: ${path}`);
           return `https://docs.opencv.org/4.x/${path}`;
+        },
+        onRuntimeInitialized: () => {
+          report("onRuntimeInitialized 発火");
+          finalize();
         },
       };
     };
@@ -207,15 +216,9 @@ async function ensureOpenCvLoaded(
 
     if (existing) {
       report("既存 script を検出");
-      if (setupCvHook()) return;
 
-      // 既存 script があるが cv がまだ無いケース
-      const poll = window.setInterval(() => {
-        if (window.cv) {
-          window.clearInterval(poll);
-          setupCvHook();
-        }
-      }, 100);
+      // 既に cv が Promise または ready の可能性があるので、そのまま解決を試す
+      finalize();
       return;
     }
 
@@ -228,18 +231,13 @@ async function ensureOpenCvLoaded(
 
     script.onload = () => {
       report("script.onload 発火");
-      if (setupCvHook()) return;
 
-      const poll = window.setInterval(() => {
-        if (window.cv) {
-          window.clearInterval(poll);
-          setupCvHook();
-        }
-      }, 100);
+      // Promise 型 build では onRuntimeInitialized よりこちらで解決できることがある
+      finalize();
     };
 
     script.onerror = () => {
-      cleanupTimeout();
+      cleanup();
       report("script.onerror 発火");
       reject(new Error("Failed to load OpenCV.js"));
     };
