@@ -195,36 +195,78 @@ function colorFromSample(sample: SampleItem) {
   return "#f43f5e";
 }
 
-function normalizePatch(
+function robustNormalize(data: Float32Array): Float32Array {
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = 0; i < data.length; i++) {
+    if (data[i] < min) min = data[i];
+    if (data[i] > max) max = data[i];
+  }
+  const range = Math.max(1e-6, max - min);
+  const out = new Float32Array(data.length);
+  for (let i = 0; i < data.length; i++) {
+    out[i] = (data[i] - min) / range;
+  }
+  return out;
+}
+
+function blur3x3(src: Float32Array, w: number, h: number): Float32Array {
+  const out = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      let cnt = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx;
+          const yy = y + dy;
+          if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+          sum += src[yy * w + xx];
+          cnt++;
+        }
+      }
+      out[y * w + x] = sum / cnt;
+    }
+  }
+  return out;
+}
+
+function makeForegroundMap(
   gray: Float32Array,
+  w: number,
+  h: number,
   polarity: "dark" | "light"
 ): Float32Array {
-  const out = new Float32Array(gray.length);
+  const smooth = blur3x3(gray, w, h);
+  const out = new Float32Array(w * h);
 
   for (let i = 0; i < gray.length; i++) {
-    const g = gray[i];
-    out[i] =
+    const diff =
       polarity === "dark"
-        ? Math.max(0, (0.68 - g) / 0.68)
-        : Math.max(0, (g - 0.32) / 0.68);
+        ? Math.max(0, smooth[i] - gray[i])
+        : Math.max(0, gray[i] - smooth[i]);
+    out[i] = diff;
   }
+
+  const norm = robustNormalize(out);
 
   let mean = 0;
-  for (let i = 0; i < out.length; i++) mean += out[i];
-  mean /= Math.max(1, out.length);
+  for (let i = 0; i < norm.length; i++) mean += norm[i];
+  mean /= Math.max(1, norm.length);
 
   let variance = 0;
-  for (let i = 0; i < out.length; i++) {
-    const d = out[i] - mean;
+  for (let i = 0; i < norm.length; i++) {
+    const d = norm[i] - mean;
     variance += d * d;
   }
-  const std = Math.sqrt(variance / Math.max(1, out.length)) || 1;
+  const std = Math.sqrt(variance / Math.max(1, norm.length)) || 1;
 
-  for (let i = 0; i < out.length; i++) {
-    out[i] = (out[i] - mean) / std;
+  const z = new Float32Array(norm.length);
+  for (let i = 0; i < norm.length; i++) {
+    z[i] = Math.max(0, (norm[i] - mean) / std);
   }
 
-  return out;
+  return robustNormalize(z);
 }
 
 function templateDistance(a: Float32Array, b: Float32Array) {
@@ -249,23 +291,22 @@ async function buildTemplateFeature(sample: SampleItem): Promise<TemplateFeature
   const tw = Math.max(16, Math.round(th * ratio));
   const gray = imageToGray(img, tw, th);
 
-  let darkTotal = 0;
-  let lightTotal = 0;
+  let darkEnergy = 0;
+  let lightEnergy = 0;
   for (let i = 0; i < gray.length; i++) {
-    const g = gray[i];
-    darkTotal += Math.max(0, (0.65 - g) / 0.65);
-    lightTotal += Math.max(0, (g - 0.35) / 0.65);
+    darkEnergy += Math.max(0, 0.55 - gray[i]);
+    lightEnergy += Math.max(0, gray[i] - 0.45);
   }
 
-  const polarity: "dark" | "light" = lightTotal > darkTotal ? "light" : "dark";
-  const data = normalizePatch(gray, polarity);
+  const polarity: "dark" | "light" = lightEnergy > darkEnergy ? "light" : "dark";
+  const fg = makeForegroundMap(gray, tw, th, polarity);
 
   return {
     aspectRatio: ratio,
     polarity,
     width: tw,
     height: th,
-    data,
+    data: fg,
   };
 }
 
@@ -530,7 +571,7 @@ export default function ReviewPage() {
 
         const allDetections: DetectionBox[] = [];
         const sensitivity01 = Math.max(0, Math.min(100, appliedSensitivity)) / 100;
-        const threshold = 0.9 - sensitivity01 * 0.22;
+        const threshold = 0.34 - sensitivity01 * 0.08;
         const stride = appliedSensitivity >= 75 ? 10 : appliedSensitivity >= 45 ? 12 : 14;
 
         for (const entry of templateEntries) {
@@ -539,7 +580,10 @@ export default function ReviewPage() {
           await new Promise((resolve) => setTimeout(resolve, 0));
           if (cancelled) return;
 
+          const sceneFg = makeForegroundMap(sceneGray, sceneW, sceneH, tpl.polarity);
+          const sceneIntegral = makeIntegralMap(sceneFg, sceneW, sceneH);
           const candidates: DetectionBox[] = [];
+
           const baseH = Math.max(24, tpl.height + 10);
           const baseW = Math.max(20, Math.round(baseH * tpl.aspectRatio));
           const scaleList = [0.88, 1.0, 1.12];
@@ -549,16 +593,6 @@ export default function ReviewPage() {
             const hh = Math.max(16, Math.round(baseH * scaleMul));
             if (ww >= sceneW || hh >= sceneH) continue;
 
-            const integralSrc = new Float32Array(sceneGray.length);
-            for (let i = 0; i < sceneGray.length; i++) {
-              const g = sceneGray[i];
-              integralSrc[i] =
-                tpl.polarity === "dark"
-                  ? Math.max(0, (0.68 - g) / 0.68)
-                  : Math.max(0, (g - 0.32) / 0.68);
-            }
-            const integral = makeIntegralMap(integralSrc, sceneW, sceneH);
-
             for (let y = 0; y <= sceneH - hh; y += stride) {
               if (y % (stride * 8) === 0) {
                 await new Promise((resolve) => setTimeout(resolve, 0));
@@ -566,8 +600,8 @@ export default function ReviewPage() {
               }
 
               for (let x = 0; x <= sceneW - ww; x += stride) {
-                const mass = rectSum(integral, sceneW, x, y, ww, hh) / (ww * hh);
-                if (mass < 0.035) continue;
+                const mass = rectSum(sceneIntegral, sceneW, x, y, ww, hh) / (ww * hh);
+                if (mass < 0.03) continue;
 
                 const patchGray = cropGrayPatch(
                   sceneGray,
@@ -580,8 +614,8 @@ export default function ReviewPage() {
                   tpl.width,
                   tpl.height
                 );
-                const patchData = normalizePatch(patchGray, tpl.polarity);
-                const dist = templateDistance(tpl.data, patchData);
+                const patchFg = makeForegroundMap(patchGray, tpl.width, tpl.height, tpl.polarity);
+                const dist = templateDistance(tpl.data, patchFg);
 
                 if (dist <= threshold) {
                   candidates.push({
