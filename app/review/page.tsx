@@ -7,7 +7,6 @@ import { useRouter } from "next/navigation";
 declare global {
   interface Window {
     cv?: any;
-    Module?: any;
   }
 }
 
@@ -104,6 +103,14 @@ function expandBox(
     w: Math.max(1, r - x),
     h: Math.max(1, b - y),
   };
+}
+
+function isCvReady() {
+  return !!(
+    window.cv &&
+    !(window.cv instanceof Promise) &&
+    typeof window.cv.getBuildInformation === "function"
+  );
 }
 
 async function imageSrcToGrayMat(
@@ -331,14 +338,6 @@ export default function ReviewPage() {
   const [cvStatus, setCvStatus] = useState("OpenCV 未読込");
 
   useEffect(() => {
-    window.Module = {
-      onRuntimeInitialized: () => {
-        setCvStatus("onRuntimeInitialized 発火");
-      },
-    };
-  }, []);
-
-  useEffect(() => {
     try {
       const storedImage = sessionStorage.getItem("capturedImage");
       if (storedImage && storedImage.startsWith("data:image/")) {
@@ -431,50 +430,76 @@ export default function ReviewPage() {
 
   useEffect(() => {
     let cancelled = false;
-    let timer: number | null = null;
+    let pollId: number | null = null;
+    let timeoutId: number | null = null;
 
-    const checkReady = async () => {
+    const cleanup = () => {
+      if (pollId !== null) window.clearInterval(pollId);
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+    };
+
+    const markReady = (cvObj: any) => {
+      if (cancelled) return;
+      cleanup();
+      window.cv = cvObj;
+      setCvReady(true);
+      setCvError("");
+      setCvStatus("OpenCV 利用可能");
+    };
+
+    const markError = (msg: string) => {
+      if (cancelled) return;
+      cleanup();
+      setCvReady(false);
+      setCvError("OpenCVの読み込みに失敗しました");
+      setCvStatus(msg);
+    };
+
+    const tryResolve = async () => {
       try {
-        setCvStatus("cv 解決開始");
         let cvObj = window.cv;
+
+        if (!cvObj) {
+          setCvStatus("cv 未生成");
+          return;
+        }
 
         if (cvObj instanceof Promise) {
           setCvStatus("cv は Promise / await 開始");
           cvObj = await cvObj;
-          window.cv = cvObj;
           if (cancelled) return;
+          window.cv = cvObj;
           setCvStatus("cv Promise 解決完了");
         }
 
-        if (cvObj && typeof cvObj.Mat === "function") {
-          if (cancelled) return;
-          setCvReady(true);
-          setCvError("");
-          setCvStatus("OpenCV 利用可能");
+        if (cvObj && typeof cvObj.getBuildInformation === "function") {
+          markReady(cvObj);
           return;
         }
 
-        if (!cancelled) {
-          setCvReady(false);
-          setCvError("OpenCVの読み込みに失敗しました");
-          setCvStatus("cv resolved but Mat is unavailable");
-        }
+        setCvStatus("cv あり / getBuildInformation待ち");
       } catch (e: any) {
-        if (cancelled) return;
-        console.error(e);
-        setCvReady(false);
-        setCvError("OpenCVの読み込みに失敗しました");
-        setCvStatus(`失敗: ${String(e?.message ?? e)}`);
+        markError(`失敗: ${String(e?.message ?? e)}`);
       }
     };
 
-    timer = window.setTimeout(() => {
-      checkReady();
-    }, 1500);
+    setCvReady(false);
+    setCvError("");
+    setCvStatus("OpenCV 読込確認開始");
+
+    timeoutId = window.setTimeout(() => {
+      markError("OpenCV load timeout");
+    }, 20000);
+
+    pollId = window.setInterval(() => {
+      tryResolve();
+    }, 300);
+
+    tryResolve();
 
     return () => {
       cancelled = true;
-      if (timer !== null) window.clearTimeout(timer);
+      cleanup();
     };
   }, []);
 
@@ -746,7 +771,8 @@ export default function ReviewPage() {
       <div className="px-4 pb-3">
         <div className="grid grid-cols-3 gap-3">
           {samples.map((sample) => {
-            const ratio = sample.aspectRatio && sample.aspectRatio > 0 ? sample.aspectRatio : 1;
+            const ratio =
+              sample.aspectRatio && sample.aspectRatio > 0 ? sample.aspectRatio : 1;
             const thumbW = Math.max(40, Math.min(72, Math.round(40 * ratio)));
 
             return (
