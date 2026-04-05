@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Script from "next/script";
 import { useRouter } from "next/navigation";
 
 declare global {
@@ -14,7 +15,6 @@ const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
 const MISSING_KEY = "inspection:missingOn";
 const SAMPLES_KEY = "inspection:samples";
-const OPENCV_SCRIPT_ID = "opencv-js-script-local";
 
 type SampleItem = {
   id: string;
@@ -126,159 +126,19 @@ async function imageSrcToGrayMat(
 
   ctx.drawImage(img, 0, 0, width, height);
 
-  const srcMat = cv.imread(canvas);
-  const gray = new cv.Mat();
-  cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY);
-  srcMat.delete();
+  let srcMat: any = null;
+  let gray: any = null;
 
-  return { gray, width, height };
-}
-
-function isCvReady() {
-  return !!(
-    window.cv &&
-    !(window.cv instanceof Promise) &&
-    typeof window.cv.Mat === "function"
-  );
-}
-
-async function ensureOpenCvLoaded(
-  onStatus?: (msg: string) => void
-): Promise<any> {
-  const report = (msg: string) => {
-    console.log("[OpenCV]", msg);
-    onStatus?.(msg);
-  };
-
-  if (isCvReady()) {
-    report("既に利用可能");
-    return window.cv;
+  try {
+    srcMat = cv.imread(canvas);
+    gray = new cv.Mat();
+    cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY);
+    return { gray, width, height };
+  } finally {
+    try {
+      srcMat?.delete?.();
+    } catch {}
   }
-
-  return new Promise((resolve, reject) => {
-    const existing = document.getElementById(
-      OPENCV_SCRIPT_ID
-    ) as HTMLScriptElement | null;
-
-    let timeoutId: number | null = null;
-    let settled = false;
-    let pollId: number | null = null;
-
-    const cleanup = () => {
-      if (timeoutId !== null) {
-        window.clearTimeout(timeoutId);
-        timeoutId = null;
-      }
-      if (pollId !== null) {
-        window.clearInterval(pollId);
-        pollId = null;
-      }
-    };
-
-    const safeResolve = (cvObj: any, msg: string) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      report(msg);
-      resolve(cvObj);
-    };
-
-    const safeReject = (err: unknown, msg: string) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      report(msg);
-      reject(err);
-    };
-
-    const tryFinalize = async () => {
-      if (settled) return;
-
-      try {
-        report("cv 解決開始");
-
-        if (window.cv instanceof Promise) {
-          report("cv は Promise / await 開始");
-          window.cv = await window.cv;
-          if (settled) return;
-          report("cv Promise 解決完了");
-        }
-
-        if (window.cv && typeof window.cv.Mat === "function") {
-          safeResolve(window.cv, "利用可能");
-          return;
-        }
-      } catch (e) {
-        safeReject(e, "cv 解決失敗");
-        return;
-      }
-    };
-
-    timeoutId = window.setTimeout(() => {
-      safeReject(new Error("OpenCV load timeout"), "OpenCV load timeout");
-    }, 20000);
-
-    const startPolling = () => {
-      if (pollId !== null) return;
-
-      pollId = window.setInterval(() => {
-        if (settled) return;
-
-        if (window.cv && !(window.cv instanceof Promise) && typeof window.cv.Mat === "function") {
-          safeResolve(window.cv, "利用可能");
-          return;
-        }
-
-        if (window.cv instanceof Promise) {
-          report("cv は Promise / 解決待ち");
-          return;
-        }
-
-        if (window.cv) {
-          report("cv オブジェクトあり / Mat待ち");
-        } else {
-          report("cv 未生成");
-        }
-      }, 300);
-    };
-
-    const setupModule = () => {
-      report("Module 設定");
-      window.Module = {
-        onRuntimeInitialized: () => {
-          report("onRuntimeInitialized 発火");
-          tryFinalize();
-        },
-      };
-    };
-
-    if (existing) {
-      report("既存 script を検出");
-      tryFinalize();
-      startPolling();
-      return;
-    }
-
-    setupModule();
-
-    const script = document.createElement("script");
-    script.id = OPENCV_SCRIPT_ID;
-    script.async = true;
-    script.src = "/opencv/opencv.js";
-
-    script.onload = () => {
-      report("script.onload 発火");
-      tryFinalize();
-      startPolling();
-    };
-
-    script.onerror = () => {
-      safeReject(new Error("Failed to load local OpenCV.js"), "script.onerror 発火");
-    };
-
-    document.body.appendChild(script);
-    report("script を body に追加");
-  });
 }
 
 function runOrbSingleMatch(params: {
@@ -471,33 +331,12 @@ export default function ReviewPage() {
   const [cvStatus, setCvStatus] = useState("OpenCV 未読込");
 
   useEffect(() => {
-  let cancelled = false;
-
-  setCvStatus("OpenCV 読込開始");
-  setCvError("");
-  setCvReady(false);
-
-  ensureOpenCvLoaded((msg) => {
-    if (!cancelled) setCvStatus(msg);
-  })
-    .then(() => {
-      if (cancelled) return;
-      setCvReady(true);
-      setCvError("");
-      setCvStatus("OpenCV 利用可能");
-    })
-    .catch((e) => {
-      if (cancelled) return;
-      console.error(e);
-      setCvReady(false);
-      setCvError("OpenCVの読み込みに失敗しました");
-      setCvStatus(`失敗: ${String(e?.message ?? e)}`);
-    });
-
-  return () => {
-    cancelled = true;
-  };
-}, []);
+    window.Module = {
+      onRuntimeInitialized: () => {
+        setCvStatus("onRuntimeInitialized 発火");
+      },
+    };
+  }, []);
 
   useEffect(() => {
     try {
@@ -589,6 +428,55 @@ export default function ReviewPage() {
 
     return () => window.clearTimeout(timer);
   }, [draftSensitivity, appliedSensitivity, isSliderDragging]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | null = null;
+
+    const checkReady = async () => {
+      try {
+        setCvStatus("cv 解決開始");
+        let cvObj = window.cv;
+
+        if (cvObj instanceof Promise) {
+          setCvStatus("cv は Promise / await 開始");
+          cvObj = await cvObj;
+          window.cv = cvObj;
+          if (cancelled) return;
+          setCvStatus("cv Promise 解決完了");
+        }
+
+        if (cvObj && typeof cvObj.Mat === "function") {
+          if (cancelled) return;
+          setCvReady(true);
+          setCvError("");
+          setCvStatus("OpenCV 利用可能");
+          return;
+        }
+
+        if (!cancelled) {
+          setCvReady(false);
+          setCvError("OpenCVの読み込みに失敗しました");
+          setCvStatus("cv resolved but Mat is unavailable");
+        }
+      } catch (e: any) {
+        if (cancelled) return;
+        console.error(e);
+        setCvReady(false);
+        setCvError("OpenCVの読み込みに失敗しました");
+        setCvStatus(`失敗: ${String(e?.message ?? e)}`);
+      }
+    };
+
+    timer = window.setTimeout(() => {
+      checkReady();
+    }, 1500);
+
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, []);
 
   const updateImageRect = () => {
     const frame = frameRef.current;
@@ -749,6 +637,19 @@ export default function ReviewPage() {
 
   return (
     <main className="min-h-screen bg-black text-white flex flex-col">
+      <Script
+        src="/opencv/opencv.js"
+        strategy="afterInteractive"
+        onLoad={() => {
+          setCvStatus("script.onload 発火");
+        }}
+        onError={() => {
+          setCvReady(false);
+          setCvError("OpenCVの読み込みに失敗しました");
+          setCvStatus("script.onerror 発火");
+        }}
+      />
+
       <div className="px-4 pt-4 pb-3 border-b border-zinc-800 bg-zinc-950 space-y-3">
         <div className="flex items-center gap-3">
           <div className="text-sm text-zinc-300 shrink-0">感度</div>
