@@ -453,25 +453,24 @@ export default function ReviewPage() {
     let cancelled = false;
 
     async function runDetection() {
-        setPrepareDetecting(true);
-
-        // 画面遷移直後や見本登録直後の固まり感を減らすため少し待つ
-        await new Promise((resolve) => setTimeout(resolve, 220));
-        if (cancelled) return;
-
-  setPrepareDetecting(false);
       if (!capturedImage || visibleSamples.length === 0) {
         setDetections([]);
         return;
       }
 
+      setPrepareDetecting(true);
+
+      await new Promise((resolve) => setTimeout(resolve, 220));
+      if (cancelled) return;
+
+      setPrepareDetecting(false);
       setDetecting(true);
 
       try {
         const sceneImg = await loadImage(capturedImage);
         if (cancelled) return;
 
-        const maxSceneW = 600;
+        const maxSceneW = 520;
         const scale = Math.min(1, maxSceneW / sceneImg.naturalWidth);
         const sceneW = Math.max(1, Math.round(sceneImg.naturalWidth * scale));
         const sceneH = Math.max(1, Math.round(sceneImg.naturalHeight * scale));
@@ -498,7 +497,6 @@ export default function ReviewPage() {
         const stride = appliedSensitivity >= 80 ? 8 : appliedSensitivity >= 50 ? 10 : 12;
 
         for (const sample of visibleSamples) {
-              // 見本ごとに一度UIへ制御を戻for (let y = 0; y <= sceneH - tplH; y += stride) {
           await new Promise((resolve) => setTimeout(resolve, 0));
           if (cancelled) return;
 
@@ -541,9 +539,10 @@ export default function ReviewPage() {
 
           const baseTplH = 54;
           const baseTplW = Math.max(22, Math.round(baseTplH * ratio));
-          const scaleList = [0.92, 1.0, 1.08];
+          const scaleList = [0.96, 1.04];
 
           const candidates: DetectionBox[] = [];
+          const maxCandidatesPerSample = 120;
 
           for (const scaleMul of scaleList) {
             const tplW = Math.max(14, Math.round(baseTplW * scaleMul));
@@ -552,11 +551,11 @@ export default function ReviewPage() {
             if (tplW >= sceneW || tplH >= sceneH) continue;
 
             for (let y = 0; y <= sceneH - tplH; y += stride) {
-                
-                if (y % (stride * 8) === 0) {
+              if (y % (stride * 8) === 0) {
                 await new Promise((resolve) => setTimeout(resolve, 0));
                 if (cancelled) return;
-  }
+              }
+
               for (let x = 0; x <= sceneW - tplW; x += stride) {
                 const darkMean =
                   rectSum(darkSceneIntegral, sceneW, x, y, tplW, tplH) / (tplW * tplH);
@@ -600,12 +599,21 @@ export default function ReviewPage() {
                     score: distance,
                     support: 0,
                   });
+                  if (candidates.length >= maxCandidatesPerSample) break;
                 }
               }
+
+              if (candidates.length >= maxCandidatesPerSample) break;
             }
+
+            if (candidates.length >= maxCandidatesPerSample) break;
           }
 
-          const supportedCandidates = addSupportToCandidates(candidates)
+          const trimmedCandidates = candidates
+            .sort((a, b) => a.score - b.score)
+            .slice(0, 40);
+
+          const supportedCandidates = addSupportToCandidates(trimmedCandidates)
             .filter((c) => c.support >= 0)
             .sort((a, b) => {
               if (b.support !== a.support) return b.support - a.support;
@@ -625,14 +633,24 @@ export default function ReviewPage() {
 
         const merged = mergeGlobalDetections(allDetections);
 
-        if (!cancelled) setDetections(merged);
+        if (!cancelled) {
+          await new Promise<void>((resolve) => {
+            requestAnimationFrame(() => resolve());
+          });
+          if (cancelled) return;
+          setDetections(merged);
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        if (cancelled) return;
       } catch (e) {
         console.error("detection error:", e);
         if (!cancelled) setDetections([]);
       } finally {
         if (!cancelled) {
-            setDetecting(false);
-            setPrepareDetecting(false);
+          setDetecting(false);
+          setPrepareDetecting(false);
+        }
       }
     }
 
@@ -644,15 +662,14 @@ export default function ReviewPage() {
   }, [capturedImage, visibleSamples, appliedSensitivity]);
 
   const overlayMuted = isAdjustingSensitivity || prepareDetecting || detecting;
-
   const overlayMessage = isAdjustingSensitivity
-  ? "調整中..."
-  : prepareDetecting
-    ? "準備中..."
-    : detecting
-      ? "検知中..."
-      : "";
-    
+    ? "調整中..."
+    : prepareDetecting
+      ? "準備中..."
+      : detecting
+        ? "検知中..."
+        : "";
+
   return (
     <main className="min-h-screen bg-black text-white flex flex-col">
       <div className="px-4 pt-4 pb-3 border-b border-zinc-800 bg-zinc-950 space-y-3">
@@ -721,17 +738,16 @@ export default function ReviewPage() {
 
               {overlayMessage ? (
                 <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/45">
-                    <div className="px-6 py-4 rounded-2xl border border-white/15 bg-black/55 text-center shadow-xl">
+                  <div className="px-6 py-4 rounded-2xl border border-white/15 bg-black/55 text-center shadow-xl">
                     <div className="text-2xl font-semibold tracking-wide">{overlayMessage}</div>
                     <div className="mt-1 text-sm text-zinc-300">少しお待ちください</div>
-                    </div>
+                  </div>
                 </div>
-                ) : null}
+              ) : null}
 
-                <div className="absolute left-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10 max-w-[85%] break-all">
+              <div className="absolute left-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10 max-w-[85%] break-all">
                 {`検知数: ${detections.length}`}
-                </div>
-
+              </div>
             </>
           ) : (
             <div className="h-full flex items-center justify-center text-zinc-400">
