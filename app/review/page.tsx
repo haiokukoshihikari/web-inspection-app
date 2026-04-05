@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "v2026-04-05-02";
+const REVIEW_VERSION = "v2026-04-05-03";
 
 const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
@@ -64,14 +64,6 @@ function clamp01(v: number) {
   return Math.max(0, Math.min(1, v));
 }
 
-function isCvReady() {
-  return !!(
-    window.cv &&
-    !(window.cv instanceof Promise) &&
-    typeof window.cv.getBuildInformation === "function"
-  );
-}
-
 async function imageSrcToGrayMat(
   cv: any,
   src: string,
@@ -115,6 +107,99 @@ function scaleMat(cv: any, src: any, scale: number) {
   return dst;
 }
 
+function preprocessBinary(cv: any, gray: any) {
+  const blur = new cv.Mat();
+  const bin = new cv.Mat();
+  cv.GaussianBlur(gray, blur, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
+  cv.threshold(blur, bin, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+  blur.delete();
+  return bin;
+}
+
+function preprocessEdge(cv: any, gray: any) {
+  const blur = new cv.Mat();
+  const edge = new cv.Mat();
+  cv.GaussianBlur(gray, blur, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
+  cv.Canny(blur, edge, 60, 180);
+  blur.delete();
+  return edge;
+}
+
+function matchBestFromMatSet(params: {
+  cv: any;
+  sceneMat: any;
+  sceneWidth: number;
+  sceneHeight: number;
+  sampleMat: any;
+  sampleId: string;
+  color: string;
+  sensitivity: number;
+}): DetectionBox | null {
+  const {
+    cv,
+    sceneMat,
+    sceneWidth,
+    sceneHeight,
+    sampleMat,
+    sampleId,
+    color,
+    sensitivity,
+  } = params;
+
+  const scales = [0.75, 0.9, 1.0, 1.1, 1.25];
+  let best: DetectionBox | null = null;
+
+  for (const scale of scales) {
+    let tpl: any = null;
+    let result: any = null;
+
+    try {
+      tpl = scale === 1 ? sampleMat.clone() : scaleMat(cv, sampleMat, scale);
+
+      if (
+        tpl.cols < 8 ||
+        tpl.rows < 8 ||
+        tpl.cols >= sceneMat.cols ||
+        tpl.rows >= sceneMat.rows
+      ) {
+        continue;
+      }
+
+      result = new cv.Mat();
+      cv.matchTemplate(sceneMat, tpl, result, cv.TM_CCOEFF_NORMED);
+
+      const mm = cv.minMaxLoc(result);
+      const score = mm.maxVal;
+
+      const threshold = 0.38 + (sensitivity / 100) * 0.22;
+      if (score < threshold) continue;
+
+      const box: DetectionBox = {
+        x: clamp01(mm.maxLoc.x / sceneWidth),
+        y: clamp01(mm.maxLoc.y / sceneHeight),
+        w: clamp01(tpl.cols / sceneWidth),
+        h: clamp01(tpl.rows / sceneHeight),
+        color,
+        sampleId,
+        score,
+      };
+
+      if (!best || box.score > best.score) {
+        best = box;
+      }
+    } catch (e) {
+      console.error("matchBestFromMatSet error:", e);
+    } finally {
+      try {
+        tpl?.delete?.();
+        result?.delete?.();
+      } catch {}
+    }
+  }
+
+  return best;
+}
+
 function runTemplateSingleMatch(params: {
   cv: any;
   sceneGray: any;
@@ -136,60 +221,52 @@ function runTemplateSingleMatch(params: {
     sensitivity,
   } = params;
 
-  const scales = [0.7, 0.85, 1.0, 1.15, 1.3];
-  let best: DetectionBox | null = null;
+  let sceneBin: any = null;
+  let sceneEdge: any = null;
+  let sampleBin: any = null;
+  let sampleEdge: any = null;
 
-  for (const scale of scales) {
-    let tpl: any = null;
-    let result: any = null;
+  try {
+    sceneBin = preprocessBinary(cv, sceneGray);
+    sceneEdge = preprocessEdge(cv, sceneGray);
+    sampleBin = preprocessBinary(cv, sampleGray);
+    sampleEdge = preprocessEdge(cv, sampleGray);
 
-    try {
-      tpl = scale === 1 ? sampleGray.clone() : scaleMat(cv, sampleGray, scale);
+    const candidateBin = matchBestFromMatSet({
+      cv,
+      sceneMat: sceneBin,
+      sceneWidth,
+      sceneHeight,
+      sampleMat: sampleBin,
+      sampleId,
+      color,
+      sensitivity,
+    });
 
-      if (
-        tpl.cols < 8 ||
-        tpl.rows < 8 ||
-        tpl.cols >= sceneGray.cols ||
-        tpl.rows >= sceneGray.rows
-      ) {
-        continue;
-      }
+    const candidateEdge = matchBestFromMatSet({
+      cv,
+      sceneMat: sceneEdge,
+      sceneWidth,
+      sceneHeight,
+      sampleMat: sampleEdge,
+      sampleId,
+      color,
+      sensitivity,
+    });
 
-      result = new cv.Mat();
-      cv.matchTemplate(sceneGray, tpl, result, cv.TM_CCOEFF_NORMED);
-
-      const mm = cv.minMaxLoc(result);
-      const score = mm.maxVal;
-
-      const threshold = 0.45 + (sensitivity / 100) * 0.2;
-      if (score < threshold) {
-        continue;
-      }
-
-      const box: DetectionBox = {
-        x: clamp01(mm.maxLoc.x / sceneWidth),
-        y: clamp01(mm.maxLoc.y / sceneHeight),
-        w: clamp01(tpl.cols / sceneWidth),
-        h: clamp01(tpl.rows / sceneHeight),
-        color,
-        sampleId,
-        score,
-      };
-
-      if (!best || box.score > best.score) {
-        best = box;
-      }
-    } catch (e) {
-      console.error("runTemplateSingleMatch error:", e);
-    } finally {
-      try {
-        tpl?.delete?.();
-        result?.delete?.();
-      } catch {}
+    if (candidateBin && candidateEdge) {
+      return candidateBin.score >= candidateEdge.score ? candidateBin : candidateEdge;
     }
-  }
 
-  return best;
+    return candidateBin ?? candidateEdge ?? null;
+  } finally {
+    try {
+      sceneBin?.delete?.();
+      sceneEdge?.delete?.();
+      sampleBin?.delete?.();
+      sampleEdge?.delete?.();
+    } catch {}
+  }
 }
 
 export default function ReviewPage() {
