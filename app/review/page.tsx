@@ -325,6 +325,7 @@ export default function ReviewPage() {
   const [samples, setSamples] = useState<SampleItem[]>(DEFAULT_SAMPLES);
   const [detections, setDetections] = useState<DetectionBox[]>([]);
   const [detecting, setDetecting] = useState(false);
+  const [prepareDetecting, setPrepareDetecting] = useState(false);
   const [isAdjustingSensitivity, setIsAdjustingSensitivity] = useState(false);
 
   useEffect(() => {
@@ -452,6 +453,13 @@ export default function ReviewPage() {
     let cancelled = false;
 
     async function runDetection() {
+        setPrepareDetecting(true);
+
+        // 画面遷移直後や見本登録直後の固まり感を減らすため少し待つ
+        await new Promise((resolve) => setTimeout(resolve, 220));
+        if (cancelled) return;
+
+  setPrepareDetecting(false);
       if (!capturedImage || visibleSamples.length === 0) {
         setDetections([]);
         return;
@@ -463,7 +471,7 @@ export default function ReviewPage() {
         const sceneImg = await loadImage(capturedImage);
         if (cancelled) return;
 
-        const maxSceneW = 720;
+        const maxSceneW = 600;
         const scale = Math.min(1, maxSceneW / sceneImg.naturalWidth);
         const sceneW = Math.max(1, Math.round(sceneImg.naturalWidth * scale));
         const sceneH = Math.max(1, Math.round(sceneImg.naturalHeight * scale));
@@ -490,6 +498,10 @@ export default function ReviewPage() {
         const stride = appliedSensitivity >= 80 ? 8 : appliedSensitivity >= 50 ? 10 : 12;
 
         for (const sample of visibleSamples) {
+              // 見本ごとに一度UIへ制御を戻for (let y = 0; y <= sceneH - tplH; y += stride) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          if (cancelled) return;
+
           if (!sample.thumbUrl) continue;
 
           const sampleImg = await loadImage(sample.thumbUrl);
@@ -540,6 +552,11 @@ export default function ReviewPage() {
             if (tplW >= sceneW || tplH >= sceneH) continue;
 
             for (let y = 0; y <= sceneH - tplH; y += stride) {
+                
+                if (y % (stride * 8) === 0) {
+                await new Promise((resolve) => setTimeout(resolve, 0));
+                if (cancelled) return;
+  }
               for (let x = 0; x <= sceneW - tplW; x += stride) {
                 const darkMean =
                   rectSum(darkSceneIntegral, sceneW, x, y, tplW, tplH) / (tplW * tplH);
@@ -613,7 +630,9 @@ export default function ReviewPage() {
         console.error("detection error:", e);
         if (!cancelled) setDetections([]);
       } finally {
-        if (!cancelled) setDetecting(false);
+        if (!cancelled) {
+            setDetecting(false);
+            setPrepareDetecting(false);
       }
     }
 
@@ -624,13 +643,15 @@ export default function ReviewPage() {
     };
   }, [capturedImage, visibleSamples, appliedSensitivity]);
 
-  const overlayMuted = isAdjustingSensitivity || detecting;
+  const overlayMuted = isAdjustingSensitivity || prepareDetecting || detecting;
 
   const overlayMessage = isAdjustingSensitivity
   ? "調整中..."
-  : detecting
-    ? "検知中..."
-    : "";
+  : prepareDetecting
+    ? "準備中..."
+    : detecting
+      ? "検知中..."
+      : "";
     
   return (
     <main className="min-h-screen bg-black text-white flex flex-col">
@@ -643,9 +664,10 @@ export default function ReviewPage() {
             max={100}
             value={draftSensitivity}
             onChange={(e) => handleSensitivityChange(Number(e.target.value))}
-            className={`flex-1 ${detecting ? "opacity-50 cursor-not-allowed" : ""}`}
+            disabled={detecting || prepareDetecting}
+            className={`flex-1 ${(detecting || prepareDetecting) ? "opacity-50 cursor-not-allowed" : ""}`}
           />
-          <div className={`text-sm w-9 text-right ${detecting ? "text-zinc-500" : "text-zinc-300"}`}>
+          <div className={`text-sm w-9 text-right ${(detecting || prepareDetecting) ? "text-zinc-500" : "text-zinc-300"}`}>
             {draftSensitivity}
           </div>
         </div>
