@@ -23,16 +23,17 @@ type DetectionBox = {
   h: number;
   color: string;
   sampleId: string;
-  score: number;
+  score: number; // similarity (higher is better)
   support: number;
 };
 
-type TemplateFeature = {
+type SampleFeature = {
   aspectRatio: number;
-  polarity: "dark" | "light";
   width: number;
   height: number;
-  data: Float32Array;
+  vector: Float32Array;
+  baseGray: Float32Array;
+  polarity: "dark" | "light" | "mixed";
 };
 
 const DEFAULT_SAMPLES: SampleItem[] = [
@@ -88,40 +89,310 @@ function canvasToGray(
   return { gray: out, width, height };
 }
 
-function makeIntegralMap(src: Float32Array, w: number, h: number) {
-  const integral = new Float32Array((w + 1) * (h + 1));
+function colorFromSample(sample: SampleItem) {
+  if (sample.color.includes("sky")) return "#38bdf8";
+  if (sample.color.includes("emerald")) return "#34d399";
+  if (sample.color.includes("amber")) return "#f59e0b";
+  if (sample.color.includes("fuchsia")) return "#d946ef";
+  if (sample.color.includes("cyan")) return "#06b6d4";
+  return "#f43f5e";
+}
 
-  for (let y = 1; y <= h; y++) {
-    let rowSum = 0;
-    for (let x = 1; x <= w; x++) {
-      rowSum += src[(y - 1) * w + (x - 1)];
-      integral[y * (w + 1) + x] = integral[(y - 1) * (w + 1) + x] + rowSum;
+function robustNormalize(data: Float32Array): Float32Array {
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = 0; i < data.length; i++) {
+    if (data[i] < min) min = data[i];
+    if (data[i] > max) max = data[i];
+  }
+  const range = Math.max(1e-6, max - min);
+  const out = new Float32Array(data.length);
+  for (let i = 0; i < data.length; i++) {
+    out[i] = (data[i] - min) / range;
+  }
+  return out;
+}
+
+function zNormalize(data: Float32Array): Float32Array {
+  let mean = 0;
+  for (let i = 0; i < data.length; i++) mean += data[i];
+  mean /= Math.max(1, data.length);
+
+  let variance = 0;
+  for (let i = 0; i < data.length; i++) {
+    const d = data[i] - mean;
+    variance += d * d;
+  }
+  const std = Math.sqrt(variance / Math.max(1, data.length)) || 1;
+
+  const out = new Float32Array(data.length);
+  for (let i = 0; i < data.length; i++) {
+    out[i] = (data[i] - mean) / std;
+  }
+  return out;
+}
+
+function l2Normalize(data: Float32Array): Float32Array {
+  let sumSq = 0;
+  for (let i = 0; i < data.length; i++) sumSq += data[i] * data[i];
+  const norm = Math.sqrt(sumSq) || 1;
+  const out = new Float32Array(data.length);
+  for (let i = 0; i < data.length; i++) out[i] = data[i] / norm;
+  return out;
+}
+
+function cosineSimilarity(a: Float32Array, b: Float32Array) {
+  const len = Math.min(a.length, b.length);
+  let dot = 0;
+  for (let i = 0; i < len; i++) dot += a[i] * b[i];
+  return dot;
+}
+
+function computeSobel(gray: Float32Array, w: number, h: number) {
+  const gx = new Float32Array(w * h);
+  const gy = new Float32Array(w * h);
+  const mag = new Float32Array(w * h);
+
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const p00 = gray[(y - 1) * w + (x - 1)];
+      const p01 = gray[(y - 1) * w + x];
+      const p02 = gray[(y - 1) * w + (x + 1)];
+      const p10 = gray[y * w + (x - 1)];
+      const p12 = gray[y * w + (x + 1)];
+      const p20 = gray[(y + 1) * w + (x - 1)];
+      const p21 = gray[(y + 1) * w + x];
+      const p22 = gray[(y + 1) * w + (x + 1)];
+
+      const sx =
+        -p00 + p02 +
+        -2 * p10 + 2 * p12 +
+        -p20 + p22;
+
+      const sy =
+        -p00 - 2 * p01 - p02 +
+        p20 + 2 * p21 + p22;
+
+      const idx = y * w + x;
+      gx[idx] = sx;
+      gy[idx] = sy;
+      mag[idx] = Math.hypot(sx, sy);
     }
   }
 
-  return integral;
+  return { gx, gy, mag };
 }
 
-function rectSum(
-  integral: Float32Array,
-  fullW: number,
-  x: number,
-  y: number,
+function averagePool(
+  src: Float32Array,
+  srcW: number,
+  srcH: number,
+  outW: number,
+  outH: number
+) {
+  const out = new Float32Array(outW * outH);
+
+  for (let oy = 0; oy < outH; oy++) {
+    const y0 = Math.floor((oy * srcH) / outH);
+    const y1 = Math.max(y0 + 1, Math.floor(((oy + 1) * srcH) / outH));
+    for (let ox = 0; ox < outW; ox++) {
+      const x0 = Math.floor((ox * srcW) / outW);
+      const x1 = Math.max(x0 + 1, Math.floor(((ox + 1) * srcW) / outW));
+
+      let sum = 0;
+      let cnt = 0;
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          sum += src[y * srcW + x];
+          cnt++;
+        }
+      }
+      out[oy * outW + ox] = cnt > 0 ? sum / cnt : 0;
+    }
+  }
+
+  return out;
+}
+
+function appendVectors(parts: Float32Array[]) {
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  const out = new Float32Array(total);
+  let offset = 0;
+  for (const p of parts) {
+    out.set(p, offset);
+    offset += p.length;
+  }
+  return out;
+}
+
+function estimatePolarity(gray: Float32Array): "dark" | "light" | "mixed" {
+  let dark = 0;
+  let light = 0;
+  for (let i = 0; i < gray.length; i++) {
+    dark += Math.max(0, 0.60 - gray[i]);
+    light += Math.max(0, gray[i] - 0.40);
+  }
+  if (dark > light * 1.25) return "dark";
+  if (light > dark * 1.25) return "light";
+  return "mixed";
+}
+
+function trimMargins(
+  gray: Float32Array,
   w: number,
   h: number
-) {
-  const stride = fullW + 1;
-  const x1 = x;
-  const y1 = y;
-  const x2 = x + w;
-  const y2 = y + h;
+): { gray: Float32Array; width: number; height: number } {
+  const { mag } = computeSobel(gray, w, h);
 
-  return (
-    integral[y2 * stride + x2] -
-    integral[y1 * stride + x2] -
-    integral[y2 * stride + x1] +
-    integral[y1 * stride + x1]
+  const rowEnergy = new Float32Array(h);
+  const colEnergy = new Float32Array(w);
+
+  for (let y = 0; y < h; y++) {
+    let row = 0;
+    for (let x = 0; x < w; x++) {
+      const idx = y * w + x;
+      const v = mag[idx] + Math.abs(gray[idx] - 0.5) * 0.25;
+      row += v;
+      colEnergy[x] += v;
+    }
+    rowEnergy[y] = row;
+  }
+
+  let rowMax = 0;
+  let colMax = 0;
+  for (let y = 0; y < h; y++) rowMax = Math.max(rowMax, rowEnergy[y]);
+  for (let x = 0; x < w; x++) colMax = Math.max(colMax, colEnergy[x]);
+
+  const rowThr = rowMax * 0.10;
+  const colThr = colMax * 0.10;
+
+  let top = 0;
+  let bottom = h - 1;
+  let left = 0;
+  let right = w - 1;
+
+  while (top < h - 2 && rowEnergy[top] < rowThr) top++;
+  while (bottom > top + 1 && rowEnergy[bottom] < rowThr) bottom--;
+  while (left < w - 2 && colEnergy[left] < colThr) left++;
+  while (right > left + 1 && colEnergy[right] < colThr) right--;
+
+  const padX = Math.max(1, Math.round((right - left + 1) * 0.08));
+  const padY = Math.max(1, Math.round((bottom - top + 1) * 0.08));
+
+  left = Math.max(0, left - padX);
+  right = Math.min(w - 1, right + padX);
+  top = Math.max(0, top - padY);
+  bottom = Math.min(h - 1, bottom + padY);
+
+  const tw = Math.max(8, right - left + 1);
+  const th = Math.max(8, bottom - top + 1);
+  const out = new Float32Array(tw * th);
+
+  for (let y = 0; y < th; y++) {
+    for (let x = 0; x < tw; x++) {
+      out[y * tw + x] = gray[(top + y) * w + (left + x)];
+    }
+  }
+
+  return { gray: out, width: tw, height: th };
+}
+
+function buildFeatureVector(
+  grayRaw: Float32Array,
+  w: number,
+  h: number
+): { vector: Float32Array; polarity: "dark" | "light" | "mixed" } {
+  const gray = robustNormalize(grayRaw);
+  const { gx, gy, mag } = computeSobel(gray, w, h);
+
+  const pooledGray = zNormalize(averagePool(gray, w, h, 12, 12));
+  const pooledMag = zNormalize(averagePool(robustNormalize(mag), w, h, 12, 12));
+
+  const absGx = new Float32Array(gx.length);
+  const absGy = new Float32Array(gy.length);
+  for (let i = 0; i < gx.length; i++) {
+    absGx[i] = Math.abs(gx[i]);
+    absGy[i] = Math.abs(gy[i]);
+  }
+
+  const pooledGx = zNormalize(averagePool(robustNormalize(absGx), w, h, 8, 8));
+  const pooledGy = zNormalize(averagePool(robustNormalize(absGy), w, h, 8, 8));
+
+  const rowProj = new Float32Array(8);
+  const colProj = new Float32Array(8);
+
+  for (let i = 0; i < 8; i++) {
+    const y0 = Math.floor((i * h) / 8);
+    const y1 = Math.max(y0 + 1, Math.floor(((i + 1) * h) / 8));
+    let sum = 0;
+    let cnt = 0;
+    for (let y = y0; y < y1; y++) {
+      for (let x = 0; x < w; x++) {
+        sum += mag[y * w + x];
+        cnt++;
+      }
+    }
+    rowProj[i] = cnt > 0 ? sum / cnt : 0;
+  }
+
+  for (let i = 0; i < 8; i++) {
+    const x0 = Math.floor((i * w) / 8);
+    const x1 = Math.max(x0 + 1, Math.floor(((i + 1) * w) / 8));
+    let sum = 0;
+    let cnt = 0;
+    for (let x = x0; x < x1; x++) {
+      for (let y = 0; y < h; y++) {
+        sum += mag[y * w + x];
+        cnt++;
+      }
+    }
+    colProj[i] = cnt > 0 ? sum / cnt : 0;
+  }
+
+  const aspect = new Float32Array([w / h]);
+  const vector = l2Normalize(
+    appendVectors([
+      pooledGray,
+      pooledMag,
+      pooledGx,
+      pooledGy,
+      zNormalize(rowProj),
+      zNormalize(colProj),
+      aspect,
+    ])
   );
+
+  return {
+    vector,
+    polarity: estimatePolarity(gray),
+  };
+}
+
+function cropGrayPatch(
+  sceneGray: Float32Array,
+  sceneW: number,
+  sceneH: number,
+  sx: number,
+  sy: number,
+  sw: number,
+  sh: number,
+  outW: number,
+  outH: number
+): Float32Array {
+  const out = new Float32Array(outW * outH);
+
+  for (let oy = 0; oy < outH; oy++) {
+    const srcY = sy + ((oy + 0.5) * sh) / outH;
+    const iy = Math.max(0, Math.min(sceneH - 1, Math.floor(srcY)));
+
+    for (let ox = 0; ox < outW; ox++) {
+      const srcX = sx + ((ox + 0.5) * sw) / outW;
+      const ix = Math.max(0, Math.min(sceneW - 1, Math.floor(srcX)));
+      out[oy * outW + ox] = sceneGray[iy * sceneW + ix];
+    }
+  }
+
+  return out;
 }
 
 function iou(a: DetectionBox, b: DetectionBox) {
@@ -172,157 +443,22 @@ function addSupportToCandidates(candidates: DetectionBox[]) {
   });
 }
 
-function mergeGlobalDetections(detections: DetectionBox[]) {
-  const sorted = [...detections].sort((a, b) => {
-    if (b.support !== a.support) return b.support - a.support;
-    return a.score - b.score;
-  });
-
-  const merged: DetectionBox[] = [];
-  for (const d of sorted) {
-    const overlaps = merged.some((m) => overlapOrNear(m, d));
-    if (!overlaps) merged.push(d);
-  }
-  return merged;
-}
-
-function colorFromSample(sample: SampleItem) {
-  if (sample.color.includes("sky")) return "#38bdf8";
-  if (sample.color.includes("emerald")) return "#34d399";
-  if (sample.color.includes("amber")) return "#f59e0b";
-  if (sample.color.includes("fuchsia")) return "#d946ef";
-  if (sample.color.includes("cyan")) return "#06b6d4";
-  return "#f43f5e";
-}
-
-function normalizePatch(
-  gray: Float32Array,
-  polarity: "dark" | "light"
-): Float32Array {
+function buildMassMap(gray: Float32Array, w: number, h: number, polarity: "dark" | "light" | "mixed") {
   const out = new Float32Array(gray.length);
-
   for (let i = 0; i < gray.length; i++) {
     const g = gray[i];
-    out[i] =
-      polarity === "dark"
-        ? Math.max(0, (0.68 - g) / 0.68)
-        : Math.max(0, (g - 0.32) / 0.68);
+    if (polarity === "dark") {
+      out[i] = Math.max(0, 0.70 - g);
+    } else if (polarity === "light") {
+      out[i] = Math.max(0, g - 0.30);
+    } else {
+      out[i] = Math.abs(g - 0.5);
+    }
   }
-
-  let mean = 0;
-  for (let i = 0; i < out.length; i++) mean += out[i];
-  mean /= Math.max(1, out.length);
-
-  let variance = 0;
-  for (let i = 0; i < out.length; i++) {
-    const d = out[i] - mean;
-    variance += d * d;
-  }
-  const std = Math.sqrt(variance / Math.max(1, out.length)) || 1;
-
-  for (let i = 0; i < out.length; i++) {
-    out[i] = (out[i] - mean) / std;
-  }
-
   return out;
 }
 
-function templateDistance(a: Float32Array, b: Float32Array) {
-  let sum = 0;
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i++) {
-    sum += Math.abs(a[i] - b[i]);
-  }
-  return sum / Math.max(1, len);
-}
-
-function cropGrayPatch(
-  sceneGray: Float32Array,
-  sceneW: number,
-  sceneH: number,
-  sx: number,
-  sy: number,
-  sw: number,
-  sh: number,
-  outW: number,
-  outH: number
-): Float32Array {
-  const out = new Float32Array(outW * outH);
-
-  for (let oy = 0; oy < outH; oy++) {
-    const srcY = sy + ((oy + 0.5) * sh) / outH;
-    const iy = Math.max(0, Math.min(sceneH - 1, Math.floor(srcY)));
-
-    for (let ox = 0; ox < outW; ox++) {
-      const srcX = sx + ((ox + 0.5) * sw) / outW;
-      const ix = Math.max(0, Math.min(sceneW - 1, Math.floor(srcX)));
-      out[oy * outW + ox] = sceneGray[iy * sceneW + ix];
-    }
-  }
-
-  return out;
-}
-
-function trimTemplateMargins(
-  gray: Float32Array,
-  w: number,
-  h: number,
-  polarity: "dark" | "light"
-): { gray: Float32Array; width: number; height: number } {
-  const activity = new Float32Array(gray.length);
-  for (let i = 0; i < gray.length; i++) {
-    const g = gray[i];
-    activity[i] =
-      polarity === "dark"
-        ? Math.max(0, 0.62 - g)
-        : Math.max(0, g - 0.38);
-  }
-
-  const rowEnergy = new Float32Array(h);
-  const colEnergy = new Float32Array(w);
-
-  for (let y = 0; y < h; y++) {
-    let sum = 0;
-    for (let x = 0; x < w; x++) {
-      const v = activity[y * w + x];
-      sum += v;
-      colEnergy[x] += v;
-    }
-    rowEnergy[y] = sum;
-  }
-
-  let rowMax = 0;
-  let colMax = 0;
-  for (let y = 0; y < h; y++) rowMax = Math.max(rowMax, rowEnergy[y]);
-  for (let x = 0; x < w; x++) colMax = Math.max(colMax, colEnergy[x]);
-
-  const rowThr = rowMax * 0.18;
-  const colThr = colMax * 0.18;
-
-  let top = 0;
-  let bottom = h - 1;
-  let left = 0;
-  let right = w - 1;
-
-  while (top < h - 1 && rowEnergy[top] < rowThr) top++;
-  while (bottom > top && rowEnergy[bottom] < rowThr) bottom--;
-  while (left < w - 1 && colEnergy[left] < colThr) left++;
-  while (right > left && colEnergy[right] < colThr) right--;
-
-  const tw = Math.max(8, right - left + 1);
-  const th = Math.max(8, bottom - top + 1);
-  const out = new Float32Array(tw * th);
-
-  for (let y = 0; y < th; y++) {
-    for (let x = 0; x < tw; x++) {
-      out[y * tw + x] = gray[(top + y) * w + (left + x)];
-    }
-  }
-
-  return { gray: out, width: tw, height: th };
-}
-
-async function buildTemplateFeature(sample: SampleItem): Promise<TemplateFeature | null> {
+async function buildSampleFeature(sample: SampleItem): Promise<SampleFeature | null> {
   if (!sample.thumbUrl) return null;
 
   const img = await loadImage(sample.thumbUrl);
@@ -331,27 +467,19 @@ async function buildTemplateFeature(sample: SampleItem): Promise<TemplateFeature
       ? sample.aspectRatio
       : img.naturalWidth / img.naturalHeight || 1;
 
-  const baseH = 42;
+  const baseH = 48;
   const baseW = Math.max(18, Math.round(baseH * ratio));
-  const rawGray = imageToGray(img, baseW, baseH);
-
-  let darkEnergy = 0;
-  let lightEnergy = 0;
-  for (let i = 0; i < rawGray.length; i++) {
-    darkEnergy += Math.max(0, 0.55 - rawGray[i]);
-    lightEnergy += Math.max(0, rawGray[i] - 0.45);
-  }
-
-  const polarity: "dark" | "light" = lightEnergy > darkEnergy ? "light" : "dark";
-  const trimmed = trimTemplateMargins(rawGray, baseW, baseH, polarity);
-  const normalized = normalizePatch(trimmed.gray, trimmed.width > 0 ? polarity : polarity);
+  const raw = imageToGray(img, baseW, baseH);
+  const trimmed = trimMargins(raw, baseW, baseH);
+  const feature = buildFeatureVector(trimmed.gray, trimmed.width, trimmed.height);
 
   return {
     aspectRatio: trimmed.width / trimmed.height,
-    polarity,
     width: trimmed.width,
     height: trimmed.height,
-    data: normalized,
+    vector: feature.vector,
+    baseGray: trimmed.gray,
+    polarity: feature.polarity,
   };
 }
 
@@ -568,52 +696,35 @@ export default function ReviewPage() {
         sceneCtx.drawImage(sceneImg, 0, 0, sceneW, sceneH);
         const { gray: sceneGray } = canvasToGray(sceneCanvas);
 
-        const templateRaw = await Promise.all(
-          visibleSamples.map((s) => buildTemplateFeature(s))
-        );
-
-        const templateEntries = visibleSamples
-          .map((sample, index) => ({
-            sample,
-            tpl: templateRaw[index],
-          }))
+        const sampleRaw = await Promise.all(visibleSamples.map((s) => buildSampleFeature(s)));
+        const sampleEntries = visibleSamples
+          .map((sample, index) => ({ sample, feature: sampleRaw[index] }))
           .filter(
-            (entry): entry is { sample: SampleItem; tpl: TemplateFeature } => !!entry.tpl
+            (entry): entry is { sample: SampleItem; feature: SampleFeature } => !!entry.feature
           );
 
         if (cancelled) return;
-        if (templateEntries.length === 0) {
+        if (sampleEntries.length === 0) {
           setDetections([]);
           return;
         }
 
         const allDetections: DetectionBox[] = [];
-        const sensitivity01 = Math.max(0, Math.min(100, appliedSensitivity)) / 100;
-        const stride =
-          appliedSensitivity >= 75 ? 10 : appliedSensitivity >= 45 ? 12 : 14;
+        const sens01 = Math.max(0, Math.min(100, appliedSensitivity)) / 100;
+        const stride = appliedSensitivity >= 80 ? 10 : appliedSensitivity >= 45 ? 12 : 14;
 
-        for (const entry of templateEntries) {
-          const { sample, tpl } = entry;
-
+        for (const entry of sampleEntries) {
+          const { sample, feature } = entry;
           await new Promise((resolve) => setTimeout(resolve, 0));
           if (cancelled) return;
 
-          const scenePol = new Float32Array(sceneGray.length);
-          for (let i = 0; i < sceneGray.length; i++) {
-            const g = sceneGray[i];
-            scenePol[i] =
-              tpl.polarity === "dark"
-                ? Math.max(0, (0.68 - g) / 0.68)
-                : Math.max(0, (g - 0.32) / 0.68);
-          }
-          const sceneIntegral = makeIntegralMap(scenePol, sceneW, sceneH);
+          const massMap = buildMassMap(sceneGray, sceneW, sceneH, feature.polarity);
+          const integral = makeIntegralMap(massMap, sceneW, sceneH);
 
-          const candidates: DetectionBox[] = [];
-          const baseH = Math.max(22, tpl.height + 6);
-          const baseW = Math.max(16, Math.round(baseH * tpl.aspectRatio));
-          const scaleList = [0.82, 0.94, 1.0, 1.08, 1.18];
-
-          const looseThreshold = 0.86 - sensitivity01 * 0.20;
+          const baseH = Math.max(18, feature.height + 4);
+          const baseW = Math.max(14, Math.round(baseH * feature.aspectRatio));
+          const scaleList = [0.78, 0.90, 1.0, 1.12, 1.26];
+          const rawCandidates: DetectionBox[] = [];
 
           for (const scaleMul of scaleList) {
             const ww = Math.max(14, Math.round(baseW * scaleMul));
@@ -627,8 +738,8 @@ export default function ReviewPage() {
               }
 
               for (let x = 0; x <= sceneW - ww; x += stride) {
-                const mass = rectSum(sceneIntegral, sceneW, x, y, ww, hh) / (ww * hh);
-                if (mass < 0.035) continue;
+                const mass = rectSum(integral, sceneW, x, y, ww, hh) / (ww * hh);
+                if (mass < 0.028) continue;
 
                 const patchGray = cropGrayPatch(
                   sceneGray,
@@ -638,54 +749,71 @@ export default function ReviewPage() {
                   y,
                   ww,
                   hh,
-                  tpl.width,
-                  tpl.height
+                  feature.width,
+                  feature.height
                 );
-                const patchPol = normalizePatch(patchGray, tpl.polarity);
-                const dist = templateDistance(tpl.data, patchPol);
+                const patchFeature = buildFeatureVector(
+                  patchGray,
+                  feature.width,
+                  feature.height
+                );
 
-                if (dist <= looseThreshold) {
-                  candidates.push({
-                    x: x / sceneW,
-                    y: y / sceneH,
-                    w: ww / sceneW,
-                    h: hh / sceneH,
-                    color: colorFromSample(sample),
-                    sampleId: sample.id,
-                    score: dist,
-                    support: 0,
-                  });
+                let sim = cosineSimilarity(feature.vector, patchFeature.vector);
+
+                // 見本の明暗傾向と大きくズレる候補を少し減点
+                if (
+                  feature.polarity !== "mixed" &&
+                  patchFeature.polarity !== "mixed" &&
+                  feature.polarity !== patchFeature.polarity
+                ) {
+                  sim -= 0.04;
                 }
+
+                rawCandidates.push({
+                  x: x / sceneW,
+                  y: y / sceneH,
+                  w: ww / sceneW,
+                  h: hh / sceneH,
+                  color: colorFromSample(sample),
+                  sampleId: sample.id,
+                  score: sim,
+                  support: 0,
+                });
               }
             }
           }
 
-          if (candidates.length === 0) continue;
+          if (rawCandidates.length === 0) continue;
 
-          const trimmed = candidates.sort((a, b) => a.score - b.score).slice(0, 80);
-          const supported = addSupportToCandidates(trimmed).sort((a, b) => {
-            if (b.support !== a.support) return b.support - a.support;
-            return a.score - b.score;
+          rawCandidates.sort((a, b) => b.score - a.score);
+          const topTrimmed = rawCandidates.slice(0, 80);
+          const supported = addSupportToCandidates(topTrimmed).sort((a, b) => {
+            if (b.score !== a.score) return b.score - a.score;
+            return b.support - a.support;
           });
 
-          const bestScore = supported[0]?.score ?? 999;
-          const bestSupport = supported[0]?.support ?? 0;
-
-          const qualityThreshold =
-            Math.min(0.78, bestScore + 0.10 + (bestSupport <= 0 ? 0.03 : 0));
+          const bestScore = supported[0]?.score ?? -1;
+          const acceptThreshold = Math.max(0.60, bestScore - (0.18 - sens01 * 0.10));
 
           const picked: DetectionBox[] = [];
           for (const c of supported) {
-            if (c.score > qualityThreshold) continue;
-
+            if (c.score < acceptThreshold) continue;
             const overlaps = picked.some((p) => overlapOrNear(p, c));
             if (!overlaps) picked.push(c);
-
-            const maxCount = bestScore < 0.42 ? 3 : bestScore < 0.54 ? 2 : 1;
-            if (picked.length >= maxCount) break;
+            if (picked.length >= 3) break;
           }
 
-          allDetections.push(...picked);
+          // 候補が弱い場合は0件にする
+          if (bestScore < 0.68) {
+            continue;
+          }
+
+          // 強い候補がないときは1件まで
+          const maxCount =
+            bestScore >= 0.88 ? 3 :
+            bestScore >= 0.80 ? 2 : 1;
+
+          allDetections.push(...picked.slice(0, maxCount));
         }
 
         const merged = mergeGlobalDetections(allDetections);
