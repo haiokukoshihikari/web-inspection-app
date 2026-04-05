@@ -330,6 +330,7 @@ export default function ReviewPage() {
   const [detecting, setDetecting] = useState(false);
   const [prepareDetecting, setPrepareDetecting] = useState(false);
   const [isAdjustingSensitivity, setIsAdjustingSensitivity] = useState(false);
+  const [isSliderDragging, setIsSliderDragging] = useState(false);
 
   useEffect(() => {
     try {
@@ -383,10 +384,26 @@ export default function ReviewPage() {
   }, [samples, samplesLoaded]);
 
   useEffect(() => {
-    if (draftSensitivity === appliedSensitivity) {
-      setIsAdjustingSensitivity(false);
-      return;
-    }
+  if (isSliderDragging) {
+    setIsAdjustingSensitivity(true);
+    return;
+  }
+
+  if (draftSensitivity === appliedSensitivity) {
+    setIsAdjustingSensitivity(false);
+    return;
+  }
+
+  setIsAdjustingSensitivity(true);
+
+  const timer = window.setTimeout(() => {
+    setAppliedSensitivity(draftSensitivity);
+    localStorage.setItem(SENSITIVITY_KEY, String(draftSensitivity));
+    setIsAdjustingSensitivity(false);
+  }, 180);
+
+  return () => window.clearTimeout(timer);
+}, [draftSensitivity, appliedSensitivity, isSliderDragging]);
 
     setIsAdjustingSensitivity(true);
 
@@ -629,9 +646,16 @@ export default function ReviewPage() {
             max={100}
             value={draftSensitivity}
             onChange={(e) => handleSensitivityChange(Number(e.target.value))}
+            onPointerDown={() => setIsSliderDragging(true)}
+            onPointerUp={() => setIsSliderDragging(false)}
+            onPointerCancel={() => setIsSliderDragging(false)}
+            onMouseDown={() => setIsSliderDragging(true)}
+            onMouseUp={() => setIsSliderDragging(false)}
+            onTouchStart={() => setIsSliderDragging(true)}
+            onTouchEnd={() => setIsSliderDragging(false)}
             disabled={detecting || prepareDetecting}
             className={`flex-1 ${(detecting || prepareDetecting) ? "opacity-50 cursor-not-allowed" : ""}`}
-          />
+            />
           <div className={`text-sm w-9 text-right ${(detecting || prepareDetecting) ? "text-zinc-500" : "text-zinc-300"}`}>
             {draftSensitivity}
           </div>
