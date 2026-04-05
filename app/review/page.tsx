@@ -141,42 +141,78 @@ function isCvReady() {
   );
 }
 
-async function ensureOpenCvLoaded(): Promise<any> {
-  if (isCvReady()) return window.cv;
+async function ensureOpenCvLoaded(
+  onStatus?: (msg: string) => void
+): Promise<any> {
+  const report = (msg: string) => {
+    console.log("[OpenCV]", msg);
+    onStatus?.(msg);
+  };
+
+  if (isCvReady()) {
+    report("既に利用可能");
+    return window.cv;
+  }
 
   return new Promise((resolve, reject) => {
-    const existing = document.getElementById(OPENCV_SCRIPT_ID) as HTMLScriptElement | null;
+    const finishPolling = () => {
+      report("script.onload 済み / cv 初期化待ち");
 
-    const finish = () => {
       const startedAt = Date.now();
 
       const timer = window.setInterval(() => {
+        const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+
         if (isCvReady()) {
           window.clearInterval(timer);
+          report(`利用可能になりました (${elapsed}s)`);
           resolve(window.cv);
           return;
         }
+
+        if (window.cv) {
+          const keys = Object.keys(window.cv).slice(0, 8).join(", ");
+          report(`cv は存在 / 初期化待ち (${elapsed}s) [${keys}]`);
+        } else {
+          report(`cv 未生成 (${elapsed}s)`);
+        }
+
         if (Date.now() - startedAt > 20000) {
           window.clearInterval(timer);
           reject(new Error("OpenCV load timeout"));
         }
-      }, 120);
+      }, 500);
     };
 
+    const existing = document.getElementById(
+      OPENCV_SCRIPT_ID
+    ) as HTMLScriptElement | null;
+
     if (existing) {
-      finish();
+      report("既存 script を検出");
+      finishPolling();
       return;
     }
+
+    report("script 追加開始");
 
     const script = document.createElement("script");
     script.id = OPENCV_SCRIPT_ID;
     script.async = true;
     script.src = "https://docs.opencv.org/4.x/opencv.js";
 
-    script.onload = () => finish();
-    script.onerror = () => reject(new Error("Failed to load OpenCV.js"));
+    script.onload = () => {
+      report("script.onload 発火");
+      finishPolling();
+    };
+
+    script.onerror = () => {
+      report("script.onerror 発火");
+      reject(new Error("Failed to load OpenCV.js"));
+    };
 
     document.body.appendChild(script);
+    report("script を body に追加");
   });
 }
 
@@ -384,18 +420,35 @@ export default function ReviewPage() {
 
   const [cvReady, setCvReady] = useState(false);
   const [cvError, setCvError] = useState("");
+  const [cvStatus, setCvStatus] = useState("OpenCV 未読込");
 
   useEffect(() => {
-    ensureOpenCvLoaded()
+    let cancelled = false;
+
+    setCvStatus("OpenCV 読込開始");
+    setCvError("");
+    setCvReady(false);
+
+    ensureOpenCvLoaded((msg) => {
+      if (!cancelled) setCvStatus(msg);
+    })
       .then(() => {
+        if (cancelled) return;
         setCvReady(true);
         setCvError("");
+        setCvStatus("OpenCV 利用可能");
       })
       .catch((e) => {
         console.error(e);
+        if (cancelled) return;
         setCvReady(false);
         setCvError("OpenCVの読み込みに失敗しました");
+        setCvStatus(`失敗: ${String(e?.message ?? e)}`);
       });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -590,7 +643,6 @@ export default function ReviewPage() {
 
         for (const sample of visibleSamples) {
           if (cancelled) return;
-
           if (!sample.thumbUrl) continue;
 
           const sampleResult = await imageSrcToGrayMat(cv, sample.thumbUrl, 320);
@@ -698,6 +750,7 @@ export default function ReviewPage() {
           </button>
         </div>
 
+        <div className="text-xs text-zinc-400">{cvStatus}</div>
         {cvError ? (
           <div className="text-xs text-rose-400">{cvError}</div>
         ) : null}
