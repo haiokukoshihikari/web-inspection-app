@@ -3,10 +3,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
+declare global {
+  interface Window {
+    cv?: any;
+  }
+}
+
 const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
 const MISSING_KEY = "inspection:missingOn";
 const SAMPLES_KEY = "inspection:samples";
+const OPENCV_SCRIPT_ID = "opencv-js-script";
 
 type SampleItem = {
   id: string;
@@ -24,16 +31,6 @@ type DetectionBox = {
   color: string;
   sampleId: string;
   score: number;
-  support: number;
-};
-
-type SampleFeature = {
-  aspectRatio: number;
-  width: number;
-  height: number;
-  vector: Float32Array;
-  baseGray: Float32Array;
-  polarity: "dark" | "light" | "mixed";
 };
 
 const DEFAULT_SAMPLES: SampleItem[] = [
@@ -52,43 +49,6 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
-function imageToGray(
-  img: HTMLImageElement,
-  targetW: number,
-  targetH: number
-): Float32Array {
-  const canvas = document.createElement("canvas");
-  canvas.width = targetW;
-  canvas.height = targetH;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return new Float32Array(targetW * targetH);
-
-  ctx.drawImage(img, 0, 0, targetW, targetH);
-  const data = ctx.getImageData(0, 0, targetW, targetH).data;
-  const out = new Float32Array(targetW * targetH);
-
-  for (let i = 0, j = 0; i < data.length; i += 4, j++) {
-    out[j] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) / 255;
-  }
-  return out;
-}
-
-function canvasToGray(
-  canvas: HTMLCanvasElement
-): { gray: Float32Array; width: number; height: number } {
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return { gray: new Float32Array(0), width: 0, height: 0 };
-
-  const { width, height } = canvas;
-  const data = ctx.getImageData(0, 0, width, height).data;
-  const out = new Float32Array(width * height);
-
-  for (let i = 0, j = 0; i < data.length; i += 4, j++) {
-    out[j] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) / 255;
-  }
-  return { gray: out, width, height };
-}
-
 function colorFromSample(sample: SampleItem) {
   if (sample.color.includes("sky")) return "#38bdf8";
   if (sample.color.includes("emerald")) return "#34d399";
@@ -98,425 +58,302 @@ function colorFromSample(sample: SampleItem) {
   return "#f43f5e";
 }
 
-function robustNormalize(data: Float32Array): Float32Array {
-  let min = Infinity;
-  let max = -Infinity;
-  for (let i = 0; i < data.length; i++) {
-    if (data[i] < min) min = data[i];
-    if (data[i] > max) max = data[i];
-  }
-  const range = Math.max(1e-6, max - min);
-  const out = new Float32Array(data.length);
-  for (let i = 0; i < data.length; i++) {
-    out[i] = (data[i] - min) / range;
-  }
-  return out;
+function clamp01(v: number) {
+  return Math.max(0, Math.min(1, v));
 }
 
-function zNormalize(data: Float32Array): Float32Array {
-  let mean = 0;
-  for (let i = 0; i < data.length; i++) mean += data[i];
-  mean /= Math.max(1, data.length);
+function bboxFromPoints(points: { x: number; y: number }[]) {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
 
-  let variance = 0;
-  for (let i = 0; i < data.length; i++) {
-    const d = data[i] - mean;
-    variance += d * d;
+  for (const p of points) {
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x);
+    maxY = Math.max(maxY, p.y);
   }
-  const std = Math.sqrt(variance / Math.max(1, data.length)) || 1;
-
-  const out = new Float32Array(data.length);
-  for (let i = 0; i < data.length; i++) {
-    out[i] = (data[i] - mean) / std;
-  }
-  return out;
-}
-
-function l2Normalize(data: Float32Array): Float32Array {
-  let sumSq = 0;
-  for (let i = 0; i < data.length; i++) sumSq += data[i] * data[i];
-  const norm = Math.sqrt(sumSq) || 1;
-  const out = new Float32Array(data.length);
-  for (let i = 0; i < data.length; i++) out[i] = data[i] / norm;
-  return out;
-}
-
-function cosineSimilarity(a: Float32Array, b: Float32Array) {
-  const len = Math.min(a.length, b.length);
-  let dot = 0;
-  for (let i = 0; i < len; i++) dot += a[i] * b[i];
-  return dot;
-}
-
-function computeSobel(gray: Float32Array, w: number, h: number) {
-  const gx = new Float32Array(w * h);
-  const gy = new Float32Array(w * h);
-  const mag = new Float32Array(w * h);
-
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const p00 = gray[(y - 1) * w + (x - 1)];
-      const p01 = gray[(y - 1) * w + x];
-      const p02 = gray[(y - 1) * w + (x + 1)];
-      const p10 = gray[y * w + (x - 1)];
-      const p12 = gray[y * w + (x + 1)];
-      const p20 = gray[(y + 1) * w + (x - 1)];
-      const p21 = gray[(y + 1) * w + x];
-      const p22 = gray[(y + 1) * w + (x + 1)];
-
-      const sx =
-        -p00 + p02 +
-        -2 * p10 + 2 * p12 +
-        -p20 + p22;
-
-      const sy =
-        -p00 - 2 * p01 - p02 +
-        p20 + 2 * p21 + p22;
-
-      const idx = y * w + x;
-      gx[idx] = sx;
-      gy[idx] = sy;
-      mag[idx] = Math.hypot(sx, sy);
-    }
-  }
-
-  return { gx, gy, mag };
-}
-
-function averagePool(
-  src: Float32Array,
-  srcW: number,
-  srcH: number,
-  outW: number,
-  outH: number
-) {
-  const out = new Float32Array(outW * outH);
-
-  for (let oy = 0; oy < outH; oy++) {
-    const y0 = Math.floor((oy * srcH) / outH);
-    const y1 = Math.max(y0 + 1, Math.floor(((oy + 1) * srcH) / outH));
-    for (let ox = 0; ox < outW; ox++) {
-      const x0 = Math.floor((ox * srcW) / outW);
-      const x1 = Math.max(x0 + 1, Math.floor(((ox + 1) * srcW) / outW));
-
-      let sum = 0;
-      let cnt = 0;
-      for (let y = y0; y < y1; y++) {
-        for (let x = x0; x < x1; x++) {
-          sum += src[y * srcW + x];
-          cnt++;
-        }
-      }
-      out[oy * outW + ox] = cnt > 0 ? sum / cnt : 0;
-    }
-  }
-
-  return out;
-}
-
-function appendVectors(parts: Float32Array[]) {
-  const total = parts.reduce((n, p) => n + p.length, 0);
-  const out = new Float32Array(total);
-  let offset = 0;
-  for (const p of parts) {
-    out.set(p, offset);
-    offset += p.length;
-  }
-  return out;
-}
-
-function estimatePolarity(gray: Float32Array): "dark" | "light" | "mixed" {
-  let dark = 0;
-  let light = 0;
-  for (let i = 0; i < gray.length; i++) {
-    dark += Math.max(0, 0.60 - gray[i]);
-    light += Math.max(0, gray[i] - 0.40);
-  }
-  if (dark > light * 1.25) return "dark";
-  if (light > dark * 1.25) return "light";
-  return "mixed";
-}
-
-function trimMargins(
-  gray: Float32Array,
-  w: number,
-  h: number
-): { gray: Float32Array; width: number; height: number } {
-  const { mag } = computeSobel(gray, w, h);
-
-  const rowEnergy = new Float32Array(h);
-  const colEnergy = new Float32Array(w);
-
-  for (let y = 0; y < h; y++) {
-    let row = 0;
-    for (let x = 0; x < w; x++) {
-      const idx = y * w + x;
-      const v = mag[idx] + Math.abs(gray[idx] - 0.5) * 0.25;
-      row += v;
-      colEnergy[x] += v;
-    }
-    rowEnergy[y] = row;
-  }
-
-  let rowMax = 0;
-  let colMax = 0;
-  for (let y = 0; y < h; y++) rowMax = Math.max(rowMax, rowEnergy[y]);
-  for (let x = 0; x < w; x++) colMax = Math.max(colMax, colEnergy[x]);
-
-  const rowThr = rowMax * 0.10;
-  const colThr = colMax * 0.10;
-
-  let top = 0;
-  let bottom = h - 1;
-  let left = 0;
-  let right = w - 1;
-
-  while (top < h - 2 && rowEnergy[top] < rowThr) top++;
-  while (bottom > top + 1 && rowEnergy[bottom] < rowThr) bottom--;
-  while (left < w - 2 && colEnergy[left] < colThr) left++;
-  while (right > left + 1 && colEnergy[right] < colThr) right--;
-
-  const padX = Math.max(1, Math.round((right - left + 1) * 0.12));
-  const padY = Math.max(1, Math.round((bottom - top + 1) * 0.12));
-
-  left = Math.max(0, left - padX);
-  right = Math.min(w - 1, right + padX);
-  top = Math.max(0, top - padY);
-  bottom = Math.min(h - 1, bottom + padY);
-
-  const tw = Math.max(8, right - left + 1);
-  const th = Math.max(8, bottom - top + 1);
-  const out = new Float32Array(tw * th);
-
-  for (let y = 0; y < th; y++) {
-    for (let x = 0; x < tw; x++) {
-      out[y * tw + x] = gray[(top + y) * w + (left + x)];
-    }
-  }
-
-  return { gray: out, width: tw, height: th };
-}
-
-function buildFeatureVector(
-  grayRaw: Float32Array,
-  w: number,
-  h: number
-): { vector: Float32Array; polarity: "dark" | "light" | "mixed" } {
-  const gray = robustNormalize(grayRaw);
-  const { gx, gy, mag } = computeSobel(gray, w, h);
-
-  const pooledGray = zNormalize(averagePool(gray, w, h, 12, 12));
-  const pooledMag = zNormalize(averagePool(robustNormalize(mag), w, h, 12, 12));
-
-  const absGx = new Float32Array(gx.length);
-  const absGy = new Float32Array(gy.length);
-  for (let i = 0; i < gx.length; i++) {
-    absGx[i] = Math.abs(gx[i]);
-    absGy[i] = Math.abs(gy[i]);
-  }
-
-  const pooledGx = zNormalize(averagePool(robustNormalize(absGx), w, h, 8, 8));
-  const pooledGy = zNormalize(averagePool(robustNormalize(absGy), w, h, 8, 8));
-
-  const rowProj = new Float32Array(8);
-  const colProj = new Float32Array(8);
-
-  for (let i = 0; i < 8; i++) {
-    const y0 = Math.floor((i * h) / 8);
-    const y1 = Math.max(y0 + 1, Math.floor(((i + 1) * h) / 8));
-    let sum = 0;
-    let cnt = 0;
-    for (let y = y0; y < y1; y++) {
-      for (let x = 0; x < w; x++) {
-        sum += mag[y * w + x];
-        cnt++;
-      }
-    }
-    rowProj[i] = cnt > 0 ? sum / cnt : 0;
-  }
-
-  for (let i = 0; i < 8; i++) {
-    const x0 = Math.floor((i * w) / 8);
-    const x1 = Math.max(x0 + 1, Math.floor(((i + 1) * w) / 8));
-    let sum = 0;
-    let cnt = 0;
-    for (let x = x0; x < x1; x++) {
-      for (let y = 0; y < h; y++) {
-        sum += mag[y * w + x];
-        cnt++;
-      }
-    }
-    colProj[i] = cnt > 0 ? sum / cnt : 0;
-  }
-
-  const aspect = new Float32Array([w / h]);
-  const vector = l2Normalize(
-    appendVectors([
-      pooledGray,
-      pooledMag,
-      pooledGx,
-      pooledGy,
-      zNormalize(rowProj),
-      zNormalize(colProj),
-      aspect,
-    ])
-  );
 
   return {
-    vector,
-    polarity: estimatePolarity(gray),
+    x: minX,
+    y: minY,
+    w: Math.max(1, maxX - minX),
+    h: Math.max(1, maxY - minY),
   };
 }
 
-function cropGrayPatch(
-  sceneGray: Float32Array,
-  sceneW: number,
-  sceneH: number,
-  sx: number,
-  sy: number,
-  sw: number,
-  sh: number,
-  outW: number,
-  outH: number
-): Float32Array {
-  const out = new Float32Array(outW * outH);
+function expandBox(
+  box: { x: number; y: number; w: number; h: number },
+  padRatio: number,
+  maxW: number,
+  maxH: number
+) {
+  const padX = box.w * padRatio;
+  const padY = box.h * padRatio;
 
-  for (let oy = 0; oy < outH; oy++) {
-    const srcY = sy + ((oy + 0.5) * sh) / outH;
-    const iy = Math.max(0, Math.min(sceneH - 1, Math.floor(srcY)));
+  const x = Math.max(0, box.x - padX);
+  const y = Math.max(0, box.y - padY);
+  const r = Math.min(maxW, box.x + box.w + padX);
+  const b = Math.min(maxH, box.y + box.h + padY);
 
-    for (let ox = 0; ox < outW; ox++) {
-      const srcX = sx + ((ox + 0.5) * sw) / outW;
-      const ix = Math.max(0, Math.min(sceneW - 1, Math.floor(srcX)));
-      out[oy * outW + ox] = sceneGray[iy * sceneW + ix];
+  return {
+    x,
+    y,
+    w: Math.max(1, r - x),
+    h: Math.max(1, b - y),
+  };
+}
+
+async function imageSrcToGrayMat(
+  cv: any,
+  src: string,
+  maxWidth: number
+): Promise<{ gray: any; width: number; height: number } | null> {
+  const img = await loadImage(src);
+
+  const scale = Math.min(1, maxWidth / img.naturalWidth);
+  const width = Math.max(1, Math.round(img.naturalWidth * scale));
+  const height = Math.max(1, Math.round(img.naturalHeight * scale));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+
+  ctx.drawImage(img, 0, 0, width, height);
+
+  const srcMat = cv.imread(canvas);
+  const gray = new cv.Mat();
+  cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY);
+  srcMat.delete();
+
+  return { gray, width, height };
+}
+
+function isCvReady() {
+  return !!(
+    window.cv &&
+    typeof window.cv.Mat === "function" &&
+    typeof window.cv.ORB === "function"
+  );
+}
+
+async function ensureOpenCvLoaded(): Promise<any> {
+  if (isCvReady()) return window.cv;
+
+  return new Promise((resolve, reject) => {
+    const existing = document.getElementById(OPENCV_SCRIPT_ID) as HTMLScriptElement | null;
+
+    const finish = () => {
+      const startedAt = Date.now();
+
+      const timer = window.setInterval(() => {
+        if (isCvReady()) {
+          window.clearInterval(timer);
+          resolve(window.cv);
+          return;
+        }
+        if (Date.now() - startedAt > 20000) {
+          window.clearInterval(timer);
+          reject(new Error("OpenCV load timeout"));
+        }
+      }, 120);
+    };
+
+    if (existing) {
+      finish();
+      return;
     }
-  }
 
-  return out;
-}
+    const script = document.createElement("script");
+    script.id = OPENCV_SCRIPT_ID;
+    script.async = true;
+    script.src = "https://docs.opencv.org/4.x/opencv.js";
 
-function iou(a: DetectionBox, b: DetectionBox) {
-  const ax1 = a.x;
-  const ay1 = a.y;
-  const ax2 = a.x + a.w;
-  const ay2 = a.y + a.h;
+    script.onload = () => finish();
+    script.onerror = () => reject(new Error("Failed to load OpenCV.js"));
 
-  const bx1 = b.x;
-  const by1 = b.y;
-  const bx2 = b.x + b.w;
-  const by2 = b.y + b.h;
-
-  const ix1 = Math.max(ax1, bx1);
-  const iy1 = Math.max(ay1, by1);
-  const ix2 = Math.min(ax2, bx2);
-  const iy2 = Math.min(ay2, by2);
-
-  const iw = Math.max(0, ix2 - ix1);
-  const ih = Math.max(0, iy2 - iy1);
-  const inter = iw * ih;
-  const union = a.w * a.h + b.w * b.h - inter;
-
-  return union > 0 ? inter / union : 0;
-}
-
-function centerDistance(a: DetectionBox, b: DetectionBox) {
-  const ax = a.x + a.w / 2;
-  const ay = a.y + a.h / 2;
-  const bx = b.x + b.w / 2;
-  const by = b.y + b.h / 2;
-  return Math.hypot(ax - bx, ay - by);
-}
-
-function overlapOrNear(a: DetectionBox, b: DetectionBox) {
-  const near = centerDistance(a, b) < Math.max(a.w, b.w) * 0.55;
-  return iou(a, b) > 0.1 || near;
-}
-
-function addSupportToCandidates(candidates: DetectionBox[]) {
-  return candidates.map((c, idx) => {
-    let support = 0;
-    for (let i = 0; i < candidates.length; i++) {
-      if (i === idx) continue;
-      if (overlapOrNear(c, candidates[i])) support++;
-    }
-    return { ...c, support };
+    document.body.appendChild(script);
   });
 }
 
-function buildMassMap(gray: Float32Array, polarity: "dark" | "light" | "mixed") {
-  const out = new Float32Array(gray.length);
-  for (let i = 0; i < gray.length; i++) {
-    const g = gray[i];
-    if (polarity === "dark") {
-      out[i] = Math.max(0, 0.70 - g);
-    } else if (polarity === "light") {
-      out[i] = Math.max(0, g - 0.30);
-    } else {
-      out[i] = Math.abs(g - 0.5);
+function runOrbSingleMatch(params: {
+  cv: any;
+  sceneGray: any;
+  sceneWidth: number;
+  sceneHeight: number;
+  sampleGray: any;
+  sampleId: string;
+  color: string;
+  sensitivity: number;
+}): DetectionBox | null {
+  const {
+    cv,
+    sceneGray,
+    sceneWidth,
+    sceneHeight,
+    sampleGray,
+    sampleId,
+    color,
+    sensitivity,
+  } = params;
+
+  let orb: any = null;
+  let kpScene: any = null;
+  let desScene: any = null;
+  let kpSample: any = null;
+  let desSample: any = null;
+  let matcher: any = null;
+  let knnMatches: any = null;
+  let srcPts: any = null;
+  let dstPts: any = null;
+  let H: any = null;
+  let corners: any = null;
+  let transformed: any = null;
+  let mask: any = null;
+
+  try {
+    const nFeatures = 900;
+    orb = new cv.ORB(nFeatures);
+
+    kpScene = new cv.KeyPointVector();
+    desScene = new cv.Mat();
+    orb.detectAndCompute(sceneGray, new cv.Mat(), kpScene, desScene);
+
+    kpSample = new cv.KeyPointVector();
+    desSample = new cv.Mat();
+    orb.detectAndCompute(sampleGray, new cv.Mat(), kpSample, desSample);
+
+    if (
+      desScene.empty() ||
+      desSample.empty() ||
+      kpScene.size() < 10 ||
+      kpSample.size() < 10
+    ) {
+      return null;
     }
-  }
-  return out;
-}
 
-function makeIntegralMap(src: Float32Array, w: number, h: number) {
-  const integral = new Float32Array((w + 1) * (h + 1));
+    matcher = new cv.BFMatcher(cv.NORM_HAMMING, false);
+    knnMatches = new cv.DMatchVectorVector();
+    matcher.knnMatch(desSample, desScene, knnMatches, 2);
 
-  for (let y = 1; y <= h; y++) {
-    let rowSum = 0;
-    for (let x = 1; x <= w; x++) {
-      rowSum += src[(y - 1) * w + (x - 1)];
-      integral[y * (w + 1) + x] = integral[(y - 1) * (w + 1) + x] + rowSum;
+    const ratioThreshold = 0.72 + (sensitivity / 100) * 0.16;
+    const good: any[] = [];
+
+    for (let i = 0; i < knnMatches.size(); i++) {
+      const m = knnMatches.get(i);
+      if (m.size() < 2) {
+        m.delete();
+        continue;
+      }
+
+      const m1 = m.get(0);
+      const m2 = m.get(1);
+
+      if (m1.distance < ratioThreshold * m2.distance) {
+        good.push(m1);
+      }
+
+      m.delete();
     }
+
+    if (good.length < 8) {
+      return null;
+    }
+
+    srcPts = new cv.Mat(good.length, 1, cv.CV_32FC2);
+    dstPts = new cv.Mat(good.length, 1, cv.CV_32FC2);
+
+    for (let i = 0; i < good.length; i++) {
+      const gm = good[i];
+      const sp = kpSample.get(gm.queryIdx).pt;
+      const dp = kpScene.get(gm.trainIdx).pt;
+
+      srcPts.data32F[i * 2] = sp.x;
+      srcPts.data32F[i * 2 + 1] = sp.y;
+      dstPts.data32F[i * 2] = dp.x;
+      dstPts.data32F[i * 2 + 1] = dp.y;
+    }
+
+    mask = new cv.Mat();
+    H = cv.findHomography(srcPts, dstPts, cv.RANSAC, 5, mask);
+
+    if (!H || H.empty()) {
+      return null;
+    }
+
+    const inlierCount = mask.rows || mask.cols ? cv.countNonZero(mask) : 0;
+    if (inlierCount < 6) {
+      return null;
+    }
+
+    const sw = sampleGray.cols;
+    const sh = sampleGray.rows;
+
+    corners = cv.matFromArray(4, 1, cv.CV_32FC2, [
+      0, 0,
+      sw, 0,
+      sw, sh,
+      0, sh,
+    ]);
+    transformed = new cv.Mat();
+    cv.perspectiveTransform(corners, transformed, H);
+
+    const pts: { x: number; y: number }[] = [];
+    for (let i = 0; i < 4; i++) {
+      pts.push({
+        x: transformed.data32F[i * 2],
+        y: transformed.data32F[i * 2 + 1],
+      });
+    }
+
+    const rawBox = bboxFromPoints(pts);
+    const padded = expandBox(rawBox, 0.12, sceneWidth, sceneHeight);
+
+    const normX = clamp01(padded.x / sceneWidth);
+    const normY = clamp01(padded.y / sceneHeight);
+    const normW = clamp01(padded.w / sceneWidth);
+    const normH = clamp01(padded.h / sceneHeight);
+
+    if (normW < 0.02 || normH < 0.02) {
+      return null;
+    }
+
+    const score =
+      inlierCount * 2 + good.length * 0.15 - Math.abs((padded.w / padded.h) - (sw / sh)) * 2;
+
+    return {
+      x: normX,
+      y: normY,
+      w: normW,
+      h: normH,
+      color,
+      sampleId,
+      score,
+    };
+  } catch (e) {
+    console.error("runOrbSingleMatch error:", e);
+    return null;
+  } finally {
+    try {
+      orb?.delete?.();
+      kpScene?.delete?.();
+      desScene?.delete?.();
+      kpSample?.delete?.();
+      desSample?.delete?.();
+      matcher?.delete?.();
+      knnMatches?.delete?.();
+      srcPts?.delete?.();
+      dstPts?.delete?.();
+      H?.delete?.();
+      corners?.delete?.();
+      transformed?.delete?.();
+      mask?.delete?.();
+    } catch {}
   }
-
-  return integral;
-}
-
-function rectSum(
-  integral: Float32Array,
-  fullW: number,
-  x: number,
-  y: number,
-  w: number,
-  h: number
-) {
-  const stride = fullW + 1;
-  const x1 = x;
-  const y1 = y;
-  const x2 = x + w;
-  const y2 = y + h;
-
-  return (
-    integral[y2 * stride + x2] -
-    integral[y1 * stride + x2] -
-    integral[y2 * stride + x1] +
-    integral[y1 * stride + x1]
-  );
-}
-
-async function buildSampleFeature(sample: SampleItem): Promise<SampleFeature | null> {
-  if (!sample.thumbUrl) return null;
-
-  const img = await loadImage(sample.thumbUrl);
-  const ratio =
-    sample.aspectRatio && sample.aspectRatio > 0
-      ? sample.aspectRatio
-      : img.naturalWidth / img.naturalHeight || 1;
-
-  const baseH = 48;
-  const baseW = Math.max(18, Math.round(baseH * ratio));
-  const raw = imageToGray(img, baseW, baseH);
-  const trimmed = trimMargins(raw, baseW, baseH);
-  const feature = buildFeatureVector(trimmed.gray, trimmed.width, trimmed.height);
-
-  return {
-    aspectRatio: trimmed.width / trimmed.height,
-    width: trimmed.width,
-    height: trimmed.height,
-    vector: feature.vector,
-    baseGray: trimmed.gray,
-    polarity: feature.polarity,
-  };
 }
 
 export default function ReviewPage() {
@@ -544,6 +381,22 @@ export default function ReviewPage() {
   const [prepareDetecting, setPrepareDetecting] = useState(false);
   const [isAdjustingSensitivity, setIsAdjustingSensitivity] = useState(false);
   const [isSliderDragging, setIsSliderDragging] = useState(false);
+
+  const [cvReady, setCvReady] = useState(false);
+  const [cvError, setCvError] = useState("");
+
+  useEffect(() => {
+    ensureOpenCvLoaded()
+      .then(() => {
+        setCvReady(true);
+        setCvError("");
+      })
+      .catch((e) => {
+        console.error(e);
+        setCvReady(false);
+        setCvError("OpenCVの読み込みに失敗しました");
+      });
+  }, []);
 
   useEffect(() => {
     try {
@@ -700,7 +553,13 @@ export default function ReviewPage() {
     let cancelled = false;
 
     async function runDetection() {
-      if (!capturedImage || visibleSamples.length === 0) {
+      if (!cvReady || !capturedImage || visibleSamples.length === 0) {
+        setDetections([]);
+        return;
+      }
+
+      const cv = window.cv;
+      if (!cv) {
         setDetections([]);
         return;
       }
@@ -714,195 +573,63 @@ export default function ReviewPage() {
       setPrepareDetecting(false);
       setDetecting(true);
 
+      let sceneGray: any = null;
+
       try {
-        const sceneImg = await loadImage(capturedImage);
-        if (cancelled) return;
-
-        const maxSceneW = 520;
-        const resizeScale = Math.min(1, maxSceneW / sceneImg.naturalWidth);
-        const sceneW = Math.max(1, Math.round(sceneImg.naturalWidth * resizeScale));
-        const sceneH = Math.max(1, Math.round(sceneImg.naturalHeight * resizeScale));
-
-        const sceneCanvas = document.createElement("canvas");
-        sceneCanvas.width = sceneW;
-        sceneCanvas.height = sceneH;
-        const sceneCtx = sceneCanvas.getContext("2d");
-        if (!sceneCtx) return;
-
-        sceneCtx.drawImage(sceneImg, 0, 0, sceneW, sceneH);
-        const { gray: sceneGray } = canvasToGray(sceneCanvas);
-
-        const sampleRaw = await Promise.all(visibleSamples.map((s) => buildSampleFeature(s)));
-        const sampleEntries = visibleSamples
-          .map((sample, index) => ({ sample, feature: sampleRaw[index] }))
-          .filter(
-            (entry): entry is { sample: SampleItem; feature: SampleFeature } => !!entry.feature
-          );
-
-        if (cancelled) return;
-        if (sampleEntries.length === 0) {
+        const sceneResult = await imageSrcToGrayMat(cv, capturedImage, 900);
+        if (!sceneResult) {
           setDetections([]);
           return;
         }
 
-        const allDetections: DetectionBox[] = [];
-        const sens01 = Math.max(0, Math.min(100, appliedSensitivity)) / 100;
-        const stride = appliedSensitivity >= 80 ? 10 : appliedSensitivity >= 45 ? 12 : 14;
+        sceneGray = sceneResult.gray;
+        const sceneWidth = sceneResult.width;
+        const sceneHeight = sceneResult.height;
 
-        for (const entry of sampleEntries) {
-          const { sample, feature } = entry;
-          await new Promise((resolve) => setTimeout(resolve, 0));
+        const nextDetections: DetectionBox[] = [];
+
+        for (const sample of visibleSamples) {
           if (cancelled) return;
 
-          const massMap = buildMassMap(sceneGray, feature.polarity);
-          const integral = makeIntegralMap(massMap, sceneW, sceneH);
+          if (!sample.thumbUrl) continue;
 
-          const isWide = feature.aspectRatio >= 1.35;
-          const isTall = feature.aspectRatio <= 0.78;
+          const sampleResult = await imageSrcToGrayMat(cv, sample.thumbUrl, 320);
+          if (!sampleResult) continue;
 
-          const baseH = Math.max(18, feature.height + (isWide ? 8 : 5));
-          const baseW = Math.max(14, Math.round(baseH * feature.aspectRatio));
+          const sampleGray = sampleResult.gray;
 
-          const scaleList = isWide
-            ? [0.78, 0.92, 1.0, 1.12, 1.26, 1.42]
-            : isTall
-              ? [0.82, 0.94, 1.0, 1.10, 1.22]
-              : [0.80, 0.92, 1.0, 1.10, 1.24, 1.36];
-
-          const ratioBiasList = isWide
-            ? [0.86, 0.94, 1.0, 1.08, 1.18]
-            : isTall
-              ? [0.86, 0.94, 1.0, 1.08]
-              : [0.90, 1.0, 1.10];
-
-          const rawCandidates: DetectionBox[] = [];
-
-          for (const scaleMul of scaleList) {
-            for (const ratioMul of ratioBiasList) {
-              let ww = Math.max(14, Math.round(baseW * scaleMul * ratioMul));
-              let hh = Math.max(14, Math.round((baseH * scaleMul) / Math.sqrt(ratioMul)));
-
-              const winRatio = ww / hh;
-              const ratioGap = Math.abs(Math.log(winRatio / feature.aspectRatio));
-              if (ratioGap > 0.42) continue;
-
-              if (ww >= sceneW || hh >= sceneH) continue;
-
-              for (let y = 0; y <= sceneH - hh; y += stride) {
-                if (y % (stride * 8) === 0) {
-                  await new Promise((resolve) => setTimeout(resolve, 0));
-                  if (cancelled) return;
-                }
-
-                for (let x = 0; x <= sceneW - ww; x += stride) {
-                  const mass = rectSum(integral, sceneW, x, y, ww, hh) / (ww * hh);
-                  const minMass = isWide ? 0.018 : 0.025;
-                  if (mass < minMass) continue;
-
-                  const patchGray = cropGrayPatch(
-                    sceneGray,
-                    sceneW,
-                    sceneH,
-                    x,
-                    y,
-                    ww,
-                    hh,
-                    feature.width,
-                    feature.height
-                  );
-                  const patchFeature = buildFeatureVector(
-                    patchGray,
-                    feature.width,
-                    feature.height
-                  );
-
-                  let sim = cosineSimilarity(feature.vector, patchFeature.vector);
-
-                  if (
-                    feature.polarity !== "mixed" &&
-                    patchFeature.polarity !== "mixed" &&
-                    feature.polarity !== patchFeature.polarity
-                  ) {
-                    sim -= 0.04;
-                  }
-
-                  sim -= ratioGap * 0.08;
-
-                  rawCandidates.push({
-                    x: x / sceneW,
-                    y: y / sceneH,
-                    w: ww / sceneW,
-                    h: hh / sceneH,
-                    color: colorFromSample(sample),
-                    sampleId: sample.id,
-                    score: sim,
-                    support: 0,
-                  });
-                }
-              }
-            }
-          }
-
-          if (rawCandidates.length === 0) continue;
-
-          rawCandidates.sort((a, b) => b.score - a.score);
-          const topTrimmed = rawCandidates.slice(0, 100);
-          const supported = addSupportToCandidates(topTrimmed).sort((a, b) => {
-            if (b.support !== a.support) return b.support - a.support;
-            return b.score - a.score;
+          const box = runOrbSingleMatch({
+            cv,
+            sceneGray,
+            sceneWidth,
+            sceneHeight,
+            sampleGray,
+            sampleId: sample.id,
+            color: colorFromSample(sample),
+            sensitivity: appliedSensitivity,
           });
 
-          const bestScore = supported[0]?.score ?? -1;
-          const acceptThreshold = Math.max(
-            0.60,
-            bestScore - (isWide ? 0.12 : 0.16) + sens01 * 0.05
-          );
+          sampleGray.delete();
 
-          const picked: DetectionBox[] = [];
-          for (const c of supported) {
-            if (c.score < acceptThreshold) continue;
-            const overlaps = picked.some((p) => overlapOrNear(p, c));
-            if (!overlaps) picked.push(c);
-            if (picked.length >= 3) break;
+          if (box) {
+            nextDetections.push(box);
           }
 
-          if (bestScore < (isWide ? 0.66 : 0.68)) {
-            continue;
-          }
-
-          const maxCount =
-            bestScore >= 0.88 ? 3 :
-            bestScore >= 0.80 ? 2 : 1;
-
-          allDetections.push(...picked.slice(0, maxCount));
+          await new Promise((resolve) => setTimeout(resolve, 0));
         }
-
-        const merged = (() => {
-          const sorted = [...allDetections].sort((a, b) => {
-            if (b.support !== a.support) return b.support - a.support;
-            return b.score - a.score;
-          });
-          const out: DetectionBox[] = [];
-          for (const d of sorted) {
-            const overlaps = out.some((o) => overlapOrNear(o, d));
-            if (!overlaps) out.push(d);
-          }
-          return out;
-        })();
 
         if (!cancelled) {
-          await new Promise<void>((resolve) => {
-            requestAnimationFrame(() => resolve());
-          });
-          if (cancelled) return;
-          setDetections(merged);
+          setDetections(nextDetections);
         }
       } catch (e) {
-        console.error("detection error:", e);
+        console.error("ORB detection error:", e);
         if (!cancelled) {
           setDetections([]);
         }
       } finally {
+        try {
+          sceneGray?.delete?.();
+        } catch {}
         if (!cancelled) {
           setDetecting(false);
           setPrepareDetecting(false);
@@ -915,16 +642,18 @@ export default function ReviewPage() {
     return () => {
       cancelled = true;
     };
-  }, [capturedImage, visibleSamples, appliedSensitivity]);
+  }, [cvReady, capturedImage, visibleSamples, appliedSensitivity]);
 
-  const overlayMuted = isAdjustingSensitivity || prepareDetecting || detecting;
-  const overlayMessage = isAdjustingSensitivity
-    ? "調整中..."
-    : prepareDetecting
-      ? "準備中..."
-      : detecting
-        ? "検知中..."
-        : "";
+  const overlayMuted = isAdjustingSensitivity || prepareDetecting || detecting || !cvReady;
+  const overlayMessage = !cvReady
+    ? "OpenCV 読込中..."
+    : isAdjustingSensitivity
+      ? "調整中..."
+      : prepareDetecting
+        ? "準備中..."
+        : detecting
+          ? "検知中..."
+          : "";
 
   return (
     <main className="min-h-screen bg-black text-white flex flex-col">
@@ -943,11 +672,11 @@ export default function ReviewPage() {
             onPointerDown={() => setIsSliderDragging(true)}
             onTouchStart={() => setIsSliderDragging(true)}
             onMouseDown={() => setIsSliderDragging(true)}
-            disabled={detecting || prepareDetecting}
-            className={`flex-1 ${(detecting || prepareDetecting) ? "opacity-50 cursor-not-allowed" : ""}`}
+            disabled={detecting || prepareDetecting || !cvReady}
+            className={`flex-1 ${(detecting || prepareDetecting || !cvReady) ? "opacity-50 cursor-not-allowed" : ""}`}
           />
           <div
-            className={`text-sm w-9 text-right ${(detecting || prepareDetecting) ? "text-zinc-500" : "text-zinc-300"}`}
+            className={`text-sm w-9 text-right ${(detecting || prepareDetecting || !cvReady) ? "text-zinc-500" : "text-zinc-300"}`}
           >
             {draftSensitivity}
           </div>
@@ -968,6 +697,10 @@ export default function ReviewPage() {
             />
           </button>
         </div>
+
+        {cvError ? (
+          <div className="text-xs text-rose-400">{cvError}</div>
+        ) : null}
       </div>
 
       <div className="flex-1 p-4">
