@@ -11,7 +11,7 @@ type SampleItem = {
   count: number;
   color: string;
   thumbUrl?: string;
-  aspectRatio?: number; // width / height
+  aspectRatio?: number;
 };
 
 const SAMPLE_COLORS = [
@@ -24,7 +24,6 @@ const SAMPLE_COLORS = [
 ];
 
 type PointerMap = Record<number, { x: number; y: number }>;
-type AspectMode = "square" | "wide" | "tall";
 
 export default function AddSamplePage() {
   const router = useRouter();
@@ -60,8 +59,8 @@ export default function AddSamplePage() {
     height: 0,
   });
 
-  const [boxSize, setBoxSize] = useState(0.22);
-  const [aspectMode, setAspectMode] = useState<AspectMode>("square");
+  const [boxWidthRatio, setBoxWidthRatio] = useState(0.32);
+  const [boxHeightRatio, setBoxHeightRatio] = useState(0.18);
 
   const [imageScale, setImageScale] = useState(1);
   const [imagePanX, setImagePanX] = useState(0);
@@ -93,27 +92,14 @@ export default function AddSamplePage() {
   };
 
   useEffect(() => {
-    const onResize = () => {
-      updateBaseRect();
-    };
+    const onResize = () => updateBaseRect();
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  const aspectRatio = useMemo(() => {
-    if (aspectMode === "wide") return 1.5;
-    if (aspectMode === "tall") return 1 / 1.5;
-    return 1;
-  }, [aspectMode]);
-
   const displayBox = useMemo(() => {
-    let width = baseRect.width * boxSize;
-    let height = width / aspectRatio;
-
-    if (height > baseRect.height * boxSize) {
-      height = baseRect.height * boxSize;
-      width = height * aspectRatio;
-    }
+    const width = baseRect.width * boxWidthRatio;
+    const height = baseRect.height * boxHeightRatio;
 
     return {
       left: baseRect.left + (baseRect.width - width) / 2,
@@ -121,75 +107,47 @@ export default function AddSamplePage() {
       width,
       height,
     };
-  }, [baseRect, boxSize, aspectRatio]);
+  }, [baseRect, boxWidthRatio, boxHeightRatio]);
 
-  const getScaledImageRect = (panX: number, panY: number, scale: number) => {
-    const scaledWidth = baseRect.width * scale;
-    const scaledHeight = baseRect.height * scale;
+  const getDistance = (
+    a: { x: number; y: number },
+    b: { x: number; y: number }
+  ) => Math.hypot(a.x - b.x, a.y - b.y);
 
-    const left = baseRect.left + panX - (scaledWidth - baseRect.width) / 2;
-    const top = baseRect.top + panY - (scaledHeight - baseRect.height) / 2;
-
-    return {
-      left,
-      top,
-      width: scaledWidth,
-      height: scaledHeight,
-      right: left + scaledWidth,
-      bottom: top + scaledHeight,
-    };
-  };
-
-  const clampPan = (nextPanX: number, nextPanY: number, nextScale = imageScale) => {
-    if (!baseRect.width || !baseRect.height || !displayBox.width || !displayBox.height) {
-      return { x: nextPanX, y: nextPanY };
-    }
-
+  const clampPan = (
+    nextPanX: number,
+    nextPanY: number,
+    nextScale = imageScale
+  ) => {
     const scaledWidth = baseRect.width * nextScale;
     const scaledHeight = baseRect.height * nextScale;
 
-    const minPanX =
-      displayBox.left + displayBox.width - baseRect.left - baseRect.width / 2 - scaledWidth / 2;
-    const maxPanX =
-      displayBox.left - baseRect.left - baseRect.width / 2 + scaledWidth / 2;
+    const imageLeft =
+      baseRect.left + nextPanX - (scaledWidth - baseRect.width) / 2;
+    const imageTop =
+      baseRect.top + nextPanY - (scaledHeight - baseRect.height) / 2;
 
-    const minPanY =
-      displayBox.top + displayBox.height - baseRect.top - baseRect.height / 2 - scaledHeight / 2;
-    const maxPanY =
-      displayBox.top - baseRect.top - baseRect.height / 2 + scaledHeight / 2;
+    const imageRight = imageLeft + scaledWidth;
+    const imageBottom = imageTop + scaledHeight;
 
-    const clampedX =
-      minPanX <= maxPanX
-        ? Math.max(minPanX, Math.min(maxPanX, nextPanX))
-        : 0;
+    let correctedPanX = nextPanX;
+    let correctedPanY = nextPanY;
 
-    const clampedY =
-      minPanY <= maxPanY
-        ? Math.max(minPanY, Math.min(maxPanY, nextPanY))
-        : 0;
+    const boxLeft = displayBox.left;
+    const boxTop = displayBox.top;
+    const boxRight = displayBox.left + displayBox.width;
+    const boxBottom = displayBox.top + displayBox.height;
+
+    if (imageLeft > boxLeft) correctedPanX -= imageLeft - boxLeft;
+    if (imageRight < boxRight) correctedPanX += boxRight - imageRight;
+    if (imageTop > boxTop) correctedPanY -= imageTop - boxTop;
+    if (imageBottom < boxBottom) correctedPanY += boxBottom - imageBottom;
 
     return {
-      x: clampedX,
-      y: clampedY,
+      x: correctedPanX,
+      y: correctedPanY,
     };
   };
-
-  useEffect(() => {
-    const next = clampPan(imagePanX, imagePanY, imageScale);
-    if (next.x !== imagePanX) setImagePanX(next.x);
-    if (next.y !== imagePanY) setImagePanY(next.y);
-  }, [baseRect.width, baseRect.height, displayBox.width, displayBox.height]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleSmaller = () => {
-    setBoxSize((v) => Math.max(0.12, v - 0.03));
-  };
-
-  const handleLarger = () => {
-    setBoxSize((v) => Math.min(0.5, v + 0.03));
-  };
-
-  const getDistance = (a: { x: number; y: number }, b: { x: number; y: number }) =>
-    Math.hypot(a.x - b.x, a.y - b.y);
 
   const onFramePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     pointersRef.current[e.pointerId] = { x: e.clientX, y: e.clientY };
@@ -229,14 +187,15 @@ export default function AddSamplePage() {
   const onFramePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     pointersRef.current[e.pointerId] = { x: e.clientX, y: e.clientY };
 
-    if (dragRef.current.mode === "pan" && dragRef.current.pointerId === e.pointerId) {
+    if (
+      dragRef.current.mode === "pan" &&
+      dragRef.current.pointerId === e.pointerId
+    ) {
       const dx = e.clientX - dragRef.current.startClientX;
       const dy = e.clientY - dragRef.current.startClientY;
-
       const next = clampPan(
         dragRef.current.startPanX + dx,
-        dragRef.current.startPanY + dy,
-        imageScale
+        dragRef.current.startPanY + dy
       );
       setImagePanX(next.x);
       setImagePanY(next.y);
@@ -255,14 +214,9 @@ export default function AddSamplePage() {
       const rawScale =
         dragRef.current.startScale * (dist / dragRef.current.startDistance);
       const nextScale = Math.max(1, Math.min(4, rawScale));
-
-      const next = clampPan(
-        dragRef.current.startPanX,
-        dragRef.current.startPanY,
-        nextScale
-      );
-
       setImageScale(nextScale);
+
+      const next = clampPan(imagePanX, imagePanY, nextScale);
       setImagePanX(next.x);
       setImagePanY(next.y);
     }
@@ -291,7 +245,6 @@ export default function AddSamplePage() {
         startClientY: remain.y,
         startPanX: imagePanX,
         startPanY: imagePanY,
-        startScale: imageScale,
       };
     }
   };
@@ -342,8 +295,10 @@ export default function AddSamplePage() {
       previewCtx.restore();
 
       const cropCanvas = document.createElement("canvas");
-      const thumbH = 120;
-      const thumbW = Math.max(1, Math.round(thumbH * aspectRatio));
+      const thumbBase = 140;
+      const thumbW = Math.max(1, Math.round(thumbBase * boxWidthRatio * 2.2));
+      const thumbH = Math.max(1, Math.round(thumbBase * boxHeightRatio * 2.2));
+
       cropCanvas.width = thumbW;
       cropCanvas.height = thumbH;
 
@@ -390,7 +345,7 @@ export default function AddSamplePage() {
         count: 0,
         color: nextColor,
         thumbUrl,
-        aspectRatio,
+        aspectRatio: thumbW / thumbH,
       };
 
       const nextSamples = [...existing, nextItem];
@@ -435,10 +390,7 @@ export default function AddSamplePage() {
                   transform: `translate(${imagePanX}px, ${imagePanY}px) scale(${imageScale})`,
                   transformOrigin: "center center",
                 }}
-                onLoad={() => {
-                  updateBaseRect();
-                  window.setTimeout(() => updateBaseRect(), 120);
-                }}
+                onLoad={updateBaseRect}
                 draggable={false}
               />
 
@@ -458,53 +410,37 @@ export default function AddSamplePage() {
         </div>
       </div>
 
-      <div className="px-4 pb-4 space-y-3">
-        <div className="flex items-center justify-center gap-2 flex-wrap">
-          <button
-            onClick={() => setAspectMode("square")}
-            className={`px-3 py-2 rounded-2xl border ${
-              aspectMode === "square"
-                ? "border-white bg-white text-black"
-                : "border-zinc-700 bg-zinc-900 text-white"
-            }`}
-          >
-            正方形
-          </button>
-          <button
-            onClick={() => setAspectMode("wide")}
-            className={`px-3 py-2 rounded-2xl border ${
-              aspectMode === "wide"
-                ? "border-white bg-white text-black"
-                : "border-zinc-700 bg-zinc-900 text-white"
-            }`}
-          >
-            横長
-          </button>
-          <button
-            onClick={() => setAspectMode("tall")}
-            className={`px-3 py-2 rounded-2xl border ${
-              aspectMode === "tall"
-                ? "border-white bg-white text-black"
-                : "border-zinc-700 bg-zinc-900 text-white"
-            }`}
-          >
-            縦長
-          </button>
-        </div>
+      <div className="px-4 pb-4 space-y-4">
+        <div className="space-y-2">
+          <div className="flex items-center gap-3">
+            <div className="w-14 text-sm text-zinc-300 shrink-0">横サイズ</div>
+            <input
+              type="range"
+              min={12}
+              max={80}
+              value={Math.round(boxWidthRatio * 100)}
+              onChange={(e) => setBoxWidthRatio(Number(e.target.value) / 100)}
+              className="flex-1"
+            />
+            <div className="w-10 text-right text-sm text-zinc-400">
+              {Math.round(boxWidthRatio * 100)}
+            </div>
+          </div>
 
-        <div className="flex items-center justify-center gap-3">
-          <button
-            onClick={handleSmaller}
-            className="px-4 py-2 rounded-2xl border border-zinc-700 bg-zinc-900"
-          >
-            小さく
-          </button>
-          <button
-            onClick={handleLarger}
-            className="px-4 py-2 rounded-2xl border border-zinc-700 bg-zinc-900"
-          >
-            大きく
-          </button>
+          <div className="flex items-center gap-3">
+            <div className="w-14 text-sm text-zinc-300 shrink-0">縦サイズ</div>
+            <input
+              type="range"
+              min={10}
+              max={60}
+              value={Math.round(boxHeightRatio * 100)}
+              onChange={(e) => setBoxHeightRatio(Number(e.target.value) / 100)}
+              className="flex-1"
+            />
+            <div className="w-10 text-right text-sm text-zinc-400">
+              {Math.round(boxHeightRatio * 100)}
+            </div>
+          </div>
         </div>
 
         <div className="text-center text-xs text-zinc-400">
