@@ -643,9 +643,11 @@ export default function ReviewPage() {
             max={100}
             value={draftSensitivity}
             onChange={(e) => handleSensitivityChange(Number(e.target.value))}
-            className="flex-1"
+            className={`flex-1 ${detecting ? "opacity-50 cursor-not-allowed" : ""}`}
           />
-          <div className="text-sm w-9 text-right text-zinc-300">{draftSensitivity}</div>
+          <div className={`text-sm w-9 text-right ${detecting ? "text-zinc-500" : "text-zinc-300"}`}>
+            {draftSensitivity}
+          </div>
         </div>
 
         <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2">
