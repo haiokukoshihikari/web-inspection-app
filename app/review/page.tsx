@@ -418,6 +418,20 @@ export default function ReviewPage() {
   };
 
   useEffect(() => {
+  if (!capturedImage) return;
+
+    const t1 = window.setTimeout(() => updateImageRect(), 0);
+    const t2 = window.setTimeout(() => updateImageRect(), 120);
+    const t3 = window.setTimeout(() => updateImageRect(), 300);
+
+    return () => {
+        window.clearTimeout(t1);
+        window.clearTimeout(t2);
+        window.clearTimeout(t3);
+        };
+    }, [capturedImage, detections.length]);
+
+  useEffect(() => {
     const onResize = () => updateImageRect();
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
@@ -718,7 +732,10 @@ export default function ReviewPage() {
                 src={capturedImage}
                 alt="撮影画像"
                 className="max-w-full max-h-full object-contain block"
-                onLoad={updateImageRect}
+                onLoad={() => {
+            updateImageRect();
+            window.setTimeout(() => updateImageRect(), 120);
+            }}
               />
 
               {detections.map((box, index) => (
