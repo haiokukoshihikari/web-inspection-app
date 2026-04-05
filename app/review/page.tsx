@@ -149,21 +149,31 @@ async function ensureOpenCvLoaded(
     onStatus?.(msg);
   };
 
-  if (isCvReady()) {
+  if (
+    window.cv &&
+    typeof window.cv.Mat === "function" &&
+    typeof window.cv.ORB === "function"
+  ) {
     report("既に利用可能");
     return window.cv;
   }
 
   return new Promise((resolve, reject) => {
-    const finishPolling = () => {
-      report("script.onload 済み / cv 初期化待ち");
+    const existing = document.getElementById(
+      OPENCV_SCRIPT_ID
+    ) as HTMLScriptElement | null;
 
+    const startTimeout = () => {
       const startedAt = Date.now();
 
       const timer = window.setInterval(() => {
         const elapsed = Math.floor((Date.now() - startedAt) / 1000);
 
-        if (isCvReady()) {
+        if (
+          window.cv &&
+          typeof window.cv.Mat === "function" &&
+          typeof window.cv.ORB === "function"
+        ) {
           window.clearInterval(timer);
           report(`利用可能になりました (${elapsed}s)`);
           resolve(window.cv);
@@ -171,8 +181,7 @@ async function ensureOpenCvLoaded(
         }
 
         if (window.cv) {
-          const keys = Object.keys(window.cv).slice(0, 8).join(", ");
-          report(`cv は存在 / 初期化待ち (${elapsed}s) [${keys}]`);
+          report(`cv は存在 / 初期化待ち (${elapsed}s)`);
         } else {
           report(`cv 未生成 (${elapsed}s)`);
         }
@@ -184,17 +193,27 @@ async function ensureOpenCvLoaded(
       }, 500);
     };
 
-    const existing = document.getElementById(
-      OPENCV_SCRIPT_ID
-    ) as HTMLScriptElement | null;
+    const setupModule = () => {
+      report("Module 設定");
+
+      (window as any).Module = {
+        locateFile: (path: string) => {
+          report(`locateFile: ${path}`);
+          return `https://docs.opencv.org/4.x/${path}`;
+        },
+        onRuntimeInitialized: () => {
+          report("onRuntimeInitialized 発火");
+        },
+      };
+    };
 
     if (existing) {
       report("既存 script を検出");
-      finishPolling();
+      startTimeout();
       return;
     }
 
-    report("script 追加開始");
+    setupModule();
 
     const script = document.createElement("script");
     script.id = OPENCV_SCRIPT_ID;
@@ -203,7 +222,7 @@ async function ensureOpenCvLoaded(
 
     script.onload = () => {
       report("script.onload 発火");
-      finishPolling();
+      startTimeout();
     };
 
     script.onerror = () => {
