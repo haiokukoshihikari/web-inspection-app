@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "v2026-04-05-04";
+const REVIEW_VERSION = "v2026-04-05-05";
 
 const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
@@ -33,6 +33,7 @@ type DetectionBox = {
   color: string;
   sampleId: string;
   score: number;
+  mode?: "LABEL" | "LOGO" | "TEXT";
 };
 
 const DEFAULT_SAMPLES: SampleItem[] = [
@@ -116,6 +117,15 @@ function preprocessBinary(cv: any, gray: any) {
   return bin;
 }
 
+function preprocessBinaryInv(cv: any, gray: any) {
+  const blur = new cv.Mat();
+  const bin = new cv.Mat();
+  cv.GaussianBlur(gray, blur, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
+  cv.threshold(blur, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+  blur.delete();
+  return bin;
+}
+
 function preprocessEdge(cv: any, gray: any) {
   const blur = new cv.Mat();
   const edge = new cv.Mat();
@@ -125,9 +135,17 @@ function preprocessEdge(cv: any, gray: any) {
   return edge;
 }
 
-function getScoreThreshold(sensitivity: number) {
+function getModeThreshold(mode: "LABEL" | "LOGO" | "TEXT", sensitivity: number) {
   const s = Math.max(0, Math.min(100, sensitivity));
-  return 0.62 - s * 0.0014;
+  if (mode === "LABEL") return 0.64 - s * 0.0015;
+  if (mode === "LOGO") return 0.60 - s * 0.0014;
+  return 0.54 - s * 0.0012;
+}
+
+function getModeScales(mode: "LABEL" | "LOGO" | "TEXT") {
+  if (mode === "LABEL") return [0.72, 0.86, 1.0, 1.14, 1.28];
+  if (mode === "LOGO") return [0.8, 0.92, 1.0, 1.08, 1.2];
+  return [0.7, 0.85, 1.0, 1.15, 1.3];
 }
 
 function isBoxReasonable(
@@ -136,13 +154,20 @@ function isBoxReasonable(
   w: number,
   h: number,
   sceneWidth: number,
-  sceneHeight: number
+  sceneHeight: number,
+  mode: "LABEL" | "LOGO" | "TEXT"
 ) {
   if (w < 8 || h < 8) return false;
-  if (w > sceneWidth * 0.8 || h > sceneHeight * 0.5) return false;
+  if (w > sceneWidth * 0.85 || h > sceneHeight * 0.55) return false;
 
   const aspect = w / Math.max(1, h);
-  if (aspect > 8 || aspect < 0.18) return false;
+  if (mode === "LABEL") {
+    if (aspect > 8.5 || aspect < 0.5) return false;
+  } else if (mode === "LOGO") {
+    if (aspect > 4.5 || aspect < 0.35) return false;
+  } else {
+    if (aspect > 10 || aspect < 0.18) return false;
+  }
 
   if (x < 0 || y < 0) return false;
   if (x + w > sceneWidth || y + h > sceneHeight) return false;
@@ -165,6 +190,12 @@ function centerPenalty(
   return dx * 0.18 + dy * 0.1;
 }
 
+function modeBonus(mode: "LABEL" | "LOGO" | "TEXT") {
+  if (mode === "LABEL") return 0.03;
+  if (mode === "LOGO") return 0.01;
+  return 0;
+}
+
 function matchBestFromMatSet(params: {
   cv: any;
   sceneMat: any;
@@ -174,7 +205,8 @@ function matchBestFromMatSet(params: {
   sampleId: string;
   color: string;
   sensitivity: number;
-}): DetectionBox | null {
+  mode: "LABEL" | "LOGO" | "TEXT";
+}) {
   const {
     cv,
     sceneMat,
@@ -184,9 +216,10 @@ function matchBestFromMatSet(params: {
     sampleId,
     color,
     sensitivity,
+    mode,
   } = params;
 
-  const scales = [0.72, 0.86, 1.0, 1.14, 1.28];
+  const scales = getModeScales(mode);
   let best: DetectionBox | null = null;
 
   for (const scale of scales) {
@@ -211,7 +244,7 @@ function matchBestFromMatSet(params: {
       const mm = cv.minMaxLoc(result);
       const rawScore = mm.maxVal;
 
-      const threshold = getScoreThreshold(sensitivity);
+      const threshold = getModeThreshold(mode, sensitivity);
       if (rawScore < threshold) continue;
 
       if (
@@ -221,14 +254,17 @@ function matchBestFromMatSet(params: {
           tpl.cols,
           tpl.rows,
           sceneWidth,
-          sceneHeight
+          sceneHeight,
+          mode
         )
       ) {
         continue;
       }
 
       const adjustedScore =
-        rawScore - centerPenalty(mm.maxLoc.x, mm.maxLoc.y, tpl.cols, tpl.rows, sceneWidth, sceneHeight);
+        rawScore -
+        centerPenalty(mm.maxLoc.x, mm.maxLoc.y, tpl.cols, tpl.rows, sceneWidth, sceneHeight) +
+        modeBonus(mode);
 
       const box: DetectionBox = {
         x: clamp01(mm.maxLoc.x / sceneWidth),
@@ -238,6 +274,7 @@ function matchBestFromMatSet(params: {
         color,
         sampleId,
         score: adjustedScore,
+        mode,
       };
 
       if (!best || box.score > best.score) {
@@ -256,7 +293,7 @@ function matchBestFromMatSet(params: {
   return best;
 }
 
-function runTemplateSingleMatch(params: {
+function runModeMatch(params: {
   cv: any;
   sceneGray: any;
   sceneWidth: number;
@@ -265,7 +302,8 @@ function runTemplateSingleMatch(params: {
   sampleId: string;
   color: string;
   sensitivity: number;
-}): DetectionBox | null {
+  mode: "LABEL" | "LOGO" | "TEXT";
+}) {
   const {
     cv,
     sceneGray,
@@ -275,54 +313,92 @@ function runTemplateSingleMatch(params: {
     sampleId,
     color,
     sensitivity,
+    mode,
   } = params;
 
-  let sceneBin: any = null;
-  let sceneEdge: any = null;
-  let sampleBin: any = null;
-  let sampleEdge: any = null;
+  let sceneA: any = null;
+  let sampleA: any = null;
+  let sceneB: any = null;
+  let sampleB: any = null;
 
   try {
-    sceneBin = preprocessBinary(cv, sceneGray);
-    sceneEdge = preprocessEdge(cv, sceneGray);
-    sampleBin = preprocessBinary(cv, sampleGray);
-    sampleEdge = preprocessEdge(cv, sampleGray);
-
-    const candidateBin = matchBestFromMatSet({
-      cv,
-      sceneMat: sceneBin,
-      sceneWidth,
-      sceneHeight,
-      sampleMat: sampleBin,
-      sampleId,
-      color,
-      sensitivity,
-    });
-
-    const candidateEdge = matchBestFromMatSet({
-      cv,
-      sceneMat: sceneEdge,
-      sceneWidth,
-      sceneHeight,
-      sampleMat: sampleEdge,
-      sampleId,
-      color,
-      sensitivity,
-    });
-
-    if (candidateBin && candidateEdge) {
-      return candidateBin.score >= candidateEdge.score ? candidateBin : candidateEdge;
+    if (mode === "LABEL") {
+      sceneA = preprocessBinary(cv, sceneGray);
+      sampleA = preprocessBinary(cv, sampleGray);
+      sceneB = preprocessEdge(cv, sceneGray);
+      sampleB = preprocessEdge(cv, sampleGray);
+    } else if (mode === "LOGO") {
+      sceneA = preprocessEdge(cv, sceneGray);
+      sampleA = preprocessEdge(cv, sampleGray);
+      sceneB = preprocessBinaryInv(cv, sceneGray);
+      sampleB = preprocessBinaryInv(cv, sampleGray);
+    } else {
+      sceneA = preprocessBinaryInv(cv, sceneGray);
+      sampleA = preprocessBinaryInv(cv, sampleGray);
+      sceneB = preprocessBinary(cv, sceneGray);
+      sampleB = preprocessBinary(cv, sampleGray);
     }
 
-    return candidateBin ?? candidateEdge ?? null;
+    const candidateA = matchBestFromMatSet({
+      cv,
+      sceneMat: sceneA,
+      sceneWidth,
+      sceneHeight,
+      sampleMat: sampleA,
+      sampleId,
+      color,
+      sensitivity,
+      mode,
+    });
+
+    const candidateB = matchBestFromMatSet({
+      cv,
+      sceneMat: sceneB,
+      sceneWidth,
+      sceneHeight,
+      sampleMat: sampleB,
+      sampleId,
+      color,
+      sensitivity,
+      mode,
+    });
+
+    if (candidateA && candidateB) {
+      return candidateA.score >= candidateB.score ? candidateA : candidateB;
+    }
+
+    return candidateA ?? candidateB ?? null;
   } finally {
     try {
-      sceneBin?.delete?.();
-      sceneEdge?.delete?.();
-      sampleBin?.delete?.();
-      sampleEdge?.delete?.();
+      sceneA?.delete?.();
+      sampleA?.delete?.();
+      sceneB?.delete?.();
+      sampleB?.delete?.();
     } catch {}
   }
+}
+
+function runAutoBestMatch(params: {
+  cv: any;
+  sceneGray: any;
+  sceneWidth: number;
+  sceneHeight: number;
+  sampleGray: any;
+  sampleId: string;
+  color: string;
+  sensitivity: number;
+}) {
+  const modes: Array<"LABEL" | "LOGO" | "TEXT"> = ["LABEL", "LOGO", "TEXT"];
+  let best: DetectionBox | null = null;
+
+  for (const mode of modes) {
+    const candidate = runModeMatch({ ...params, mode });
+    if (candidate && (!best || candidate.score > best.score)) {
+      best = candidate;
+    }
+  }
+
+  return best;
 }
 
 export default function ReviewPage() {
@@ -627,7 +703,7 @@ export default function ReviewPage() {
 
           const sampleGray = sampleResult.gray;
 
-          const box = runTemplateSingleMatch({
+          const box = runAutoBestMatch({
             cv,
             sceneGray,
             sceneWidth,
