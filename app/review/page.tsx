@@ -62,49 +62,6 @@ function clamp01(v: number) {
   return Math.max(0, Math.min(1, v));
 }
 
-function bboxFromPoints(points: { x: number; y: number }[]) {
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-
-  for (const p of points) {
-    minX = Math.min(minX, p.x);
-    minY = Math.min(minY, p.y);
-    maxX = Math.max(maxX, p.x);
-    maxY = Math.max(maxY, p.y);
-  }
-
-  return {
-    x: minX,
-    y: minY,
-    w: Math.max(1, maxX - minX),
-    h: Math.max(1, maxY - minY),
-  };
-}
-
-function expandBox(
-  box: { x: number; y: number; w: number; h: number },
-  padRatio: number,
-  maxW: number,
-  maxH: number
-) {
-  const padX = box.w * padRatio;
-  const padY = box.h * padRatio;
-
-  const x = Math.max(0, box.x - padX);
-  const y = Math.max(0, box.y - padY);
-  const r = Math.min(maxW, box.x + box.w + padX);
-  const b = Math.min(maxH, box.y + box.h + padY);
-
-  return {
-    x,
-    y,
-    w: Math.max(1, r - x),
-    h: Math.max(1, b - y),
-  };
-}
-
 function isCvReady() {
   return !!(
     window.cv &&
@@ -148,7 +105,15 @@ async function imageSrcToGrayMat(
   }
 }
 
-function runOrbSingleMatch(params: {
+function scaleMat(cv: any, src: any, scale: number) {
+  const dst = new cv.Mat();
+  const w = Math.max(1, Math.round(src.cols * scale));
+  const h = Math.max(1, Math.round(src.rows * scale));
+  cv.resize(src, dst, new cv.Size(w, h), 0, 0, cv.INTER_AREA);
+  return dst;
+}
+
+function runTemplateSingleMatch(params: {
   cv: any;
   sceneGray: any;
   sceneWidth: number;
@@ -169,142 +134,60 @@ function runOrbSingleMatch(params: {
     sensitivity,
   } = params;
 
-  let orb: any = null;
-  let kpScene: any = null;
-  let desScene: any = null;
-  let kpSample: any = null;
-  let desSample: any = null;
-  let matcher: any = null;
-  let knnMatches: any = null;
-  let srcPts: any = null;
-  let dstPts: any = null;
-  let H: any = null;
-  let corners: any = null;
-  let transformed: any = null;
-  let mask: any = null;
+  const scales = [0.7, 0.85, 1.0, 1.15, 1.3];
+  let best: DetectionBox | null = null;
 
-  try {
-    orb = new cv.ORB(900);
+  for (const scale of scales) {
+    let tpl: any = null;
+    let result: any = null;
 
-    kpScene = new cv.KeyPointVector();
-    desScene = new cv.Mat();
-    orb.detectAndCompute(sceneGray, new cv.Mat(), kpScene, desScene);
-
-    kpSample = new cv.KeyPointVector();
-    desSample = new cv.Mat();
-    orb.detectAndCompute(sampleGray, new cv.Mat(), kpSample, desSample);
-
-    if (
-      desScene.empty() ||
-      desSample.empty() ||
-      kpScene.size() < 10 ||
-      kpSample.size() < 10
-    ) {
-      return null;
-    }
-
-    matcher = new cv.BFMatcher(cv.NORM_HAMMING, false);
-    knnMatches = new cv.DMatchVectorVector();
-    matcher.knnMatch(desSample, desScene, knnMatches, 2);
-
-    const ratioThreshold = 0.72 + (sensitivity / 100) * 0.16;
-    const good: any[] = [];
-
-    for (let i = 0; i < knnMatches.size(); i++) {
-      const m = knnMatches.get(i);
-      if (m.size() >= 2) {
-        const m1 = m.get(0);
-        const m2 = m.get(1);
-        if (m1.distance < ratioThreshold * m2.distance) {
-          good.push(m1);
-        }
-      }
-      m.delete();
-    }
-
-    if (good.length < 8) return null;
-
-    srcPts = new cv.Mat(good.length, 1, cv.CV_32FC2);
-    dstPts = new cv.Mat(good.length, 1, cv.CV_32FC2);
-
-    for (let i = 0; i < good.length; i++) {
-      const gm = good[i];
-      const sp = kpSample.get(gm.queryIdx).pt;
-      const dp = kpScene.get(gm.trainIdx).pt;
-
-      srcPts.data32F[i * 2] = sp.x;
-      srcPts.data32F[i * 2 + 1] = sp.y;
-      dstPts.data32F[i * 2] = dp.x;
-      dstPts.data32F[i * 2 + 1] = dp.y;
-    }
-
-    mask = new cv.Mat();
-    H = cv.findHomography(srcPts, dstPts, cv.RANSAC, 5, mask);
-
-    if (!H || H.empty()) return null;
-
-    const inlierCount = cv.countNonZero(mask);
-    if (inlierCount < 6) return null;
-
-    const sw = sampleGray.cols;
-    const sh = sampleGray.rows;
-
-    corners = cv.matFromArray(4, 1, cv.CV_32FC2, [
-      0, 0,
-      sw, 0,
-      sw, sh,
-      0, sh,
-    ]);
-    transformed = new cv.Mat();
-    cv.perspectiveTransform(corners, transformed, H);
-
-    const pts: { x: number; y: number }[] = [];
-    for (let i = 0; i < 4; i++) {
-      pts.push({
-        x: transformed.data32F[i * 2],
-        y: transformed.data32F[i * 2 + 1],
-      });
-    }
-
-    const rawBox = bboxFromPoints(pts);
-    const padded = expandBox(rawBox, 0.12, sceneWidth, sceneHeight);
-
-    const normX = clamp01(padded.x / sceneWidth);
-    const normY = clamp01(padded.y / sceneHeight);
-    const normW = clamp01(padded.w / sceneWidth);
-    const normH = clamp01(padded.h / sceneHeight);
-
-    if (normW < 0.02 || normH < 0.02) return null;
-
-    return {
-      x: normX,
-      y: normY,
-      w: normW,
-      h: normH,
-      color,
-      sampleId,
-      score: inlierCount + good.length * 0.1,
-    };
-  } catch (e) {
-    console.error("runOrbSingleMatch error:", e);
-    return null;
-  } finally {
     try {
-      orb?.delete?.();
-      kpScene?.delete?.();
-      desScene?.delete?.();
-      kpSample?.delete?.();
-      desSample?.delete?.();
-      matcher?.delete?.();
-      knnMatches?.delete?.();
-      srcPts?.delete?.();
-      dstPts?.delete?.();
-      H?.delete?.();
-      corners?.delete?.();
-      transformed?.delete?.();
-      mask?.delete?.();
-    } catch {}
+      tpl = scale === 1 ? sampleGray.clone() : scaleMat(cv, sampleGray, scale);
+
+      if (
+        tpl.cols < 8 ||
+        tpl.rows < 8 ||
+        tpl.cols >= sceneGray.cols ||
+        tpl.rows >= sceneGray.rows
+      ) {
+        continue;
+      }
+
+      result = new cv.Mat();
+      cv.matchTemplate(sceneGray, tpl, result, cv.TM_CCOEFF_NORMED);
+
+      const mm = cv.minMaxLoc(result);
+      const score = mm.maxVal;
+
+      const threshold = 0.45 + (sensitivity / 100) * 0.2;
+      if (score < threshold) {
+        continue;
+      }
+
+      const box: DetectionBox = {
+        x: clamp01(mm.maxLoc.x / sceneWidth),
+        y: clamp01(mm.maxLoc.y / sceneHeight),
+        w: clamp01(tpl.cols / sceneWidth),
+        h: clamp01(tpl.rows / sceneHeight),
+        color,
+        sampleId,
+        score,
+      };
+
+      if (!best || box.score > best.score) {
+        best = box;
+      }
+    } catch (e) {
+      console.error("runTemplateSingleMatch error:", e);
+    } finally {
+      try {
+        tpl?.delete?.();
+        result?.delete?.();
+      } catch {}
+    }
   }
+
+  return best;
 }
 
 export default function ReviewPage() {
@@ -609,7 +492,7 @@ export default function ReviewPage() {
 
           const sampleGray = sampleResult.gray;
 
-          const box = runOrbSingleMatch({
+          const box = runTemplateSingleMatch({
             cv,
             sceneGray,
             sceneWidth,
@@ -629,7 +512,7 @@ export default function ReviewPage() {
 
         if (!cancelled) setDetections(nextDetections);
       } catch (e) {
-        console.error("ORB detection error:", e);
+        console.error("Template detection error:", e);
         if (!cancelled) setDetections([]);
       } finally {
         try {
