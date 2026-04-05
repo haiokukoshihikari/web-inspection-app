@@ -27,12 +27,15 @@ type DetectionBox = {
   support: number;
 };
 
+type MatchMode = "LABEL" | "LOGO";
+
 type TemplateFeature = {
   aspectRatio: number;
   polarity: "dark" | "light";
   width: number;
   height: number;
   data: Float32Array;
+  mode: MatchMode;
 };
 
 const DEFAULT_SAMPLES: SampleItem[] = [
@@ -269,6 +272,38 @@ function makeForegroundMap(
   return robustNormalize(z);
 }
 
+function normalizePatch(
+  gray: Float32Array,
+  polarity: "dark" | "light"
+): Float32Array {
+  const out = new Float32Array(gray.length);
+
+  for (let i = 0; i < gray.length; i++) {
+    const g = gray[i];
+    out[i] =
+      polarity === "dark"
+        ? Math.max(0, (0.68 - g) / 0.68)
+        : Math.max(0, (g - 0.32) / 0.68);
+  }
+
+  let mean = 0;
+  for (let i = 0; i < out.length; i++) mean += out[i];
+  mean /= Math.max(1, out.length);
+
+  let variance = 0;
+  for (let i = 0; i < out.length; i++) {
+    const d = out[i] - mean;
+    variance += d * d;
+  }
+  const std = Math.sqrt(variance / Math.max(1, out.length)) || 1;
+
+  for (let i = 0; i < out.length; i++) {
+    out[i] = (out[i] - mean) / std;
+  }
+
+  return out;
+}
+
 function templateDistance(a: Float32Array, b: Float32Array) {
   let sum = 0;
   const len = Math.min(a.length, b.length);
@@ -276,38 +311,6 @@ function templateDistance(a: Float32Array, b: Float32Array) {
     sum += Math.abs(a[i] - b[i]);
   }
   return sum / Math.max(1, len);
-}
-
-async function buildTemplateFeature(sample: SampleItem): Promise<TemplateFeature | null> {
-  if (!sample.thumbUrl) return null;
-
-  const img = await loadImage(sample.thumbUrl);
-  const ratio =
-    sample.aspectRatio && sample.aspectRatio > 0
-      ? sample.aspectRatio
-      : img.naturalWidth / img.naturalHeight || 1;
-
-  const th = 36;
-  const tw = Math.max(16, Math.round(th * ratio));
-  const gray = imageToGray(img, tw, th);
-
-  let darkEnergy = 0;
-  let lightEnergy = 0;
-  for (let i = 0; i < gray.length; i++) {
-    darkEnergy += Math.max(0, 0.55 - gray[i]);
-    lightEnergy += Math.max(0, gray[i] - 0.45);
-  }
-
-  const polarity: "dark" | "light" = lightEnergy > darkEnergy ? "light" : "dark";
-  const fg = makeForegroundMap(gray, tw, th, polarity);
-
-  return {
-    aspectRatio: ratio,
-    polarity,
-    width: tw,
-    height: th,
-    data: fg,
-  };
 }
 
 function cropGrayPatch(
@@ -337,6 +340,63 @@ function cropGrayPatch(
   return out;
 }
 
+async function buildTemplateFeature(sample: SampleItem): Promise<TemplateFeature | null> {
+  if (!sample.thumbUrl) return null;
+
+  const img = await loadImage(sample.thumbUrl);
+  const ratio =
+    sample.aspectRatio && sample.aspectRatio > 0
+      ? sample.aspectRatio
+      : img.naturalWidth / img.naturalHeight || 1;
+
+  const th = 36;
+  const tw = Math.max(16, Math.round(th * ratio));
+  const gray = imageToGray(img, tw, th);
+
+  let darkEnergy = 0;
+  let lightEnergy = 0;
+  let meanGray = 0;
+
+  for (let i = 0; i < gray.length; i++) {
+    darkEnergy += Math.max(0, 0.55 - gray[i]);
+    lightEnergy += Math.max(0, gray[i] - 0.45);
+    meanGray += gray[i];
+  }
+  meanGray /= Math.max(1, gray.length);
+
+  const polarity: "dark" | "light" = lightEnergy > darkEnergy ? "light" : "dark";
+  const fg = makeForegroundMap(gray, tw, th, polarity);
+
+  let fgCoverage = 0;
+  for (let i = 0; i < fg.length; i++) {
+    if (fg[i] > 0.28) fgCoverage++;
+  }
+  fgCoverage /= Math.max(1, fg.length);
+
+  let grayVar = 0;
+  for (let i = 0; i < gray.length; i++) {
+    const d = gray[i] - meanGray;
+    grayVar += d * d;
+  }
+  const grayStd = Math.sqrt(grayVar / Math.max(1, gray.length));
+
+  const labelLike =
+    polarity === "dark" &&
+    meanGray > 0.56 &&
+    grayStd < 0.18 &&
+    fgCoverage > 0.03 &&
+    fgCoverage < 0.28;
+
+  return {
+    aspectRatio: ratio,
+    polarity,
+    width: tw,
+    height: th,
+    data: labelLike ? fg : normalizePatch(gray, polarity),
+    mode: labelLike ? "LABEL" : "LOGO",
+  };
+}
+
 export default function ReviewPage() {
   const router = useRouter();
   const frameRef = useRef<HTMLDivElement | null>(null);
@@ -362,6 +422,7 @@ export default function ReviewPage() {
   const [prepareDetecting, setPrepareDetecting] = useState(false);
   const [isAdjustingSensitivity, setIsAdjustingSensitivity] = useState(false);
   const [isSliderDragging, setIsSliderDragging] = useState(false);
+  const [sampleModes, setSampleModes] = useState<Record<string, MatchMode>>({});
 
   useEffect(() => {
     try {
@@ -520,6 +581,7 @@ export default function ReviewPage() {
     async function runDetection() {
       if (!capturedImage || visibleSamples.length === 0) {
         setDetections([]);
+        setSampleModes({});
         return;
       }
 
@@ -566,13 +628,18 @@ export default function ReviewPage() {
         if (cancelled) return;
         if (templateEntries.length === 0) {
           setDetections([]);
+          setSampleModes({});
           return;
         }
 
+        const nextModes: Record<string, MatchMode> = {};
+        for (const entry of templateEntries) {
+          nextModes[entry.sample.id] = entry.tpl.mode;
+        }
+        setSampleModes(nextModes);
+
         const allDetections: DetectionBox[] = [];
         const sensitivity01 = Math.max(0, Math.min(100, appliedSensitivity)) / 100;
-        const threshold = 0.34 - sensitivity01 * 0.08;
-        const stride = appliedSensitivity >= 75 ? 10 : appliedSensitivity >= 45 ? 12 : 14;
 
         for (const entry of templateEntries) {
           const { sample, tpl } = entry;
@@ -580,54 +647,120 @@ export default function ReviewPage() {
           await new Promise((resolve) => setTimeout(resolve, 0));
           if (cancelled) return;
 
-          const sceneFg = makeForegroundMap(sceneGray, sceneW, sceneH, tpl.polarity);
-          const sceneIntegral = makeIntegralMap(sceneFg, sceneW, sceneH);
           const candidates: DetectionBox[] = [];
 
-          const baseH = Math.max(24, tpl.height + 10);
-          const baseW = Math.max(20, Math.round(baseH * tpl.aspectRatio));
-          const scaleList = [0.88, 1.0, 1.12];
+          if (tpl.mode === "LABEL") {
+            const sceneFg = makeForegroundMap(sceneGray, sceneW, sceneH, tpl.polarity);
+            const sceneIntegral = makeIntegralMap(sceneFg, sceneW, sceneH);
 
-          for (const scaleMul of scaleList) {
-            const ww = Math.max(16, Math.round(baseW * scaleMul));
-            const hh = Math.max(16, Math.round(baseH * scaleMul));
-            if (ww >= sceneW || hh >= sceneH) continue;
+            const threshold = 0.34 - sensitivity01 * 0.08;
+            const stride = appliedSensitivity >= 75 ? 10 : appliedSensitivity >= 45 ? 12 : 14;
+            const baseH = Math.max(24, tpl.height + 10);
+            const baseW = Math.max(20, Math.round(baseH * tpl.aspectRatio));
+            const scaleList = [0.88, 1.0, 1.12];
 
-            for (let y = 0; y <= sceneH - hh; y += stride) {
-              if (y % (stride * 8) === 0) {
-                await new Promise((resolve) => setTimeout(resolve, 0));
-                if (cancelled) return;
+            for (const scaleMul of scaleList) {
+              const ww = Math.max(16, Math.round(baseW * scaleMul));
+              const hh = Math.max(16, Math.round(baseH * scaleMul));
+              if (ww >= sceneW || hh >= sceneH) continue;
+
+              for (let y = 0; y <= sceneH - hh; y += stride) {
+                if (y % (stride * 8) === 0) {
+                  await new Promise((resolve) => setTimeout(resolve, 0));
+                  if (cancelled) return;
+                }
+
+                for (let x = 0; x <= sceneW - ww; x += stride) {
+                  const mass = rectSum(sceneIntegral, sceneW, x, y, ww, hh) / (ww * hh);
+                  if (mass < 0.03) continue;
+
+                  const patchGray = cropGrayPatch(
+                    sceneGray,
+                    sceneW,
+                    sceneH,
+                    x,
+                    y,
+                    ww,
+                    hh,
+                    tpl.width,
+                    tpl.height
+                  );
+                  const patchFg = makeForegroundMap(patchGray, tpl.width, tpl.height, tpl.polarity);
+                  const dist = templateDistance(tpl.data, patchFg);
+
+                  if (dist <= threshold) {
+                    candidates.push({
+                      x: x / sceneW,
+                      y: y / sceneH,
+                      w: ww / sceneW,
+                      h: hh / sceneH,
+                      color: colorFromSample(sample),
+                      sampleId: sample.id,
+                      score: dist,
+                      support: 0,
+                    });
+                  }
+                }
               }
+            }
+          } else {
+            const scenePol = new Float32Array(sceneGray.length);
+            for (let i = 0; i < sceneGray.length; i++) {
+              const g = sceneGray[i];
+              scenePol[i] =
+                tpl.polarity === "dark"
+                  ? Math.max(0, (0.68 - g) / 0.68)
+                  : Math.max(0, (g - 0.32) / 0.68);
+            }
+            const sceneIntegral = makeIntegralMap(scenePol, sceneW, sceneH);
 
-              for (let x = 0; x <= sceneW - ww; x += stride) {
-                const mass = rectSum(sceneIntegral, sceneW, x, y, ww, hh) / (ww * hh);
-                if (mass < 0.03) continue;
+            const threshold = 0.9 - sensitivity01 * 0.22;
+            const stride = appliedSensitivity >= 75 ? 10 : appliedSensitivity >= 45 ? 12 : 14;
+            const baseH = Math.max(24, tpl.height + 10);
+            const baseW = Math.max(20, Math.round(baseH * tpl.aspectRatio));
+            const scaleList = [0.88, 1.0, 1.12];
 
-                const patchGray = cropGrayPatch(
-                  sceneGray,
-                  sceneW,
-                  sceneH,
-                  x,
-                  y,
-                  ww,
-                  hh,
-                  tpl.width,
-                  tpl.height
-                );
-                const patchFg = makeForegroundMap(patchGray, tpl.width, tpl.height, tpl.polarity);
-                const dist = templateDistance(tpl.data, patchFg);
+            for (const scaleMul of scaleList) {
+              const ww = Math.max(16, Math.round(baseW * scaleMul));
+              const hh = Math.max(16, Math.round(baseH * scaleMul));
+              if (ww >= sceneW || hh >= sceneH) continue;
 
-                if (dist <= threshold) {
-                  candidates.push({
-                    x: x / sceneW,
-                    y: y / sceneH,
-                    w: ww / sceneW,
-                    h: hh / sceneH,
-                    color: colorFromSample(sample),
-                    sampleId: sample.id,
-                    score: dist,
-                    support: 0,
-                  });
+              for (let y = 0; y <= sceneH - hh; y += stride) {
+                if (y % (stride * 8) === 0) {
+                  await new Promise((resolve) => setTimeout(resolve, 0));
+                  if (cancelled) return;
+                }
+
+                for (let x = 0; x <= sceneW - ww; x += stride) {
+                  const mass = rectSum(sceneIntegral, sceneW, x, y, ww, hh) / (ww * hh);
+                  if (mass < 0.035) continue;
+
+                  const patchGray = cropGrayPatch(
+                    sceneGray,
+                    sceneW,
+                    sceneH,
+                    x,
+                    y,
+                    ww,
+                    hh,
+                    tpl.width,
+                    tpl.height
+                  );
+                  const patchPol = normalizePatch(patchGray, tpl.polarity);
+                  const dist = templateDistance(tpl.data, patchPol);
+
+                  if (dist <= threshold) {
+                    candidates.push({
+                      x: x / sceneW,
+                      y: y / sceneH,
+                      w: ww / sceneW,
+                      h: hh / sceneH,
+                      color: colorFromSample(sample),
+                      sampleId: sample.id,
+                      score: dist,
+                      support: 0,
+                    });
+                  }
                 }
               }
             }
@@ -660,7 +793,10 @@ export default function ReviewPage() {
         }
       } catch (e) {
         console.error("detection error:", e);
-        if (!cancelled) setDetections([]);
+        if (!cancelled) {
+          setDetections([]);
+          setSampleModes({});
+        }
       } finally {
         if (!cancelled) {
           setDetecting(false);
@@ -789,6 +925,7 @@ export default function ReviewPage() {
             const ratio =
               sample.aspectRatio && sample.aspectRatio > 0 ? sample.aspectRatio : 1;
             const thumbW = Math.max(40, Math.min(72, Math.round(40 * ratio)));
+            const mode = sampleModes[sample.id];
 
             return (
               <div key={sample.id} className="relative overflow-visible">
@@ -801,7 +938,7 @@ export default function ReviewPage() {
                 >
                   {sample.thumbUrl ? (
                     <div
-                      className="h-10 shrink-0 rounded-lg overflow-hidden border border-white/10 bg-black flex items-center justify-center"
+                      className="relative h-10 shrink-0 rounded-lg overflow-hidden border border-white/10 bg-black flex items-center justify-center"
                       style={{ width: thumbW }}
                     >
                       <img
@@ -809,6 +946,11 @@ export default function ReviewPage() {
                         alt="見本"
                         className="max-w-full max-h-full object-contain"
                       />
+                      {mode ? (
+                        <div className="absolute right-1 bottom-1 rounded bg-black/75 px-1 py-[1px] text-[8px] leading-none text-white">
+                          {mode}
+                        </div>
+                      ) : null}
                     </div>
                   ) : (
                     <div className={`w-10 h-10 rounded-lg border shrink-0 ${sample.color}`} />
