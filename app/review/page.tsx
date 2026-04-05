@@ -384,26 +384,35 @@ export default function ReviewPage() {
   }, [samples, samplesLoaded]);
 
   useEffect(() => {
-  if (isSliderDragging) {
-    setIsAdjustingSensitivity(true);
-    return;
-  }
+    const stopDragging = () => {
+      setIsSliderDragging(false);
+    };
 
-  if (draftSensitivity === appliedSensitivity) {
-    setIsAdjustingSensitivity(false);
-    return;
-  }
+    window.addEventListener("pointerup", stopDragging);
+    window.addEventListener("pointercancel", stopDragging);
+    window.addEventListener("mouseup", stopDragging);
+    window.addEventListener("touchend", stopDragging);
+    window.addEventListener("touchcancel", stopDragging);
 
-  setIsAdjustingSensitivity(true);
+    return () => {
+      window.removeEventListener("pointerup", stopDragging);
+      window.removeEventListener("pointercancel", stopDragging);
+      window.removeEventListener("mouseup", stopDragging);
+      window.removeEventListener("touchend", stopDragging);
+      window.removeEventListener("touchcancel", stopDragging);
+    };
+  }, []);
 
-  const timer = window.setTimeout(() => {
-    setAppliedSensitivity(draftSensitivity);
-    localStorage.setItem(SENSITIVITY_KEY, String(draftSensitivity));
-    setIsAdjustingSensitivity(false);
-  }, 180);
+  useEffect(() => {
+    if (isSliderDragging) {
+      setIsAdjustingSensitivity(true);
+      return;
+    }
 
-  return () => window.clearTimeout(timer);
-}, [draftSensitivity, appliedSensitivity, isSliderDragging]);
+    if (draftSensitivity === appliedSensitivity) {
+      setIsAdjustingSensitivity(false);
+      return;
+    }
 
     setIsAdjustingSensitivity(true);
 
@@ -411,10 +420,10 @@ export default function ReviewPage() {
       setAppliedSensitivity(draftSensitivity);
       localStorage.setItem(SENSITIVITY_KEY, String(draftSensitivity));
       setIsAdjustingSensitivity(false);
-    }, 350);
+    }, 120);
 
     return () => window.clearTimeout(timer);
-  }, [draftSensitivity, appliedSensitivity]);
+  }, [draftSensitivity, appliedSensitivity, isSliderDragging]);
 
   const updateImageRect = () => {
     const frame = frameRef.current;
@@ -511,12 +520,21 @@ export default function ReviewPage() {
 
         const { gray: sceneGray } = canvasToGray(sceneCanvas);
 
-        const sampleFeatures = (
-          await Promise.all(visibleSamples.map((s) => buildSampleFeature(s)))
-        ).filter((x): x is SampleFeature => !!x);
+        const sampleFeaturesRaw = await Promise.all(
+          visibleSamples.map((s) => buildSampleFeature(s))
+        );
+        const sampleEntries = visibleSamples
+          .map((sample, index) => ({
+            sample,
+            feature: sampleFeaturesRaw[index],
+          }))
+          .filter(
+            (entry): entry is { sample: SampleItem; feature: SampleFeature } =>
+              !!entry.feature
+          );
 
         if (cancelled) return;
-        if (sampleFeatures.length === 0) {
+        if (sampleEntries.length === 0) {
           setDetections([]);
           return;
         }
@@ -526,10 +544,8 @@ export default function ReviewPage() {
         const baseThreshold = 0.12 + sensitivity01 * 0.035;
         const stride = appliedSensitivity >= 70 ? 12 : 14;
 
-        for (let sampleIndex = 0; sampleIndex < visibleSamples.length; sampleIndex++) {
-          const sample = visibleSamples[sampleIndex];
-          const sampleFeature = sampleFeatures[sampleIndex];
-          if (!sampleFeature) continue;
+        for (const entry of sampleEntries) {
+          const { sample, feature: sampleFeature } = entry;
 
           await new Promise((resolve) => setTimeout(resolve, 0));
           if (cancelled) return;
@@ -646,17 +662,18 @@ export default function ReviewPage() {
             max={100}
             value={draftSensitivity}
             onChange={(e) => handleSensitivityChange(Number(e.target.value))}
+            onInput={(e) =>
+              handleSensitivityChange(Number((e.target as HTMLInputElement).value))
+            }
             onPointerDown={() => setIsSliderDragging(true)}
-            onPointerUp={() => setIsSliderDragging(false)}
-            onPointerCancel={() => setIsSliderDragging(false)}
-            onMouseDown={() => setIsSliderDragging(true)}
-            onMouseUp={() => setIsSliderDragging(false)}
             onTouchStart={() => setIsSliderDragging(true)}
-            onTouchEnd={() => setIsSliderDragging(false)}
+            onMouseDown={() => setIsSliderDragging(true)}
             disabled={detecting || prepareDetecting}
             className={`flex-1 ${(detecting || prepareDetecting) ? "opacity-50 cursor-not-allowed" : ""}`}
-            />
-          <div className={`text-sm w-9 text-right ${(detecting || prepareDetecting) ? "text-zinc-500" : "text-zinc-300"}`}>
+          />
+          <div
+            className={`text-sm w-9 text-right ${(detecting || prepareDetecting) ? "text-zinc-500" : "text-zinc-300"}`}
+          >
             {draftSensitivity}
           </div>
         </div>
@@ -745,7 +762,7 @@ export default function ReviewPage() {
                   onClick={(e) => {
                     e.stopPropagation();
                     setShowDeleteFor(showDeleteFor === sample.id ? null : sample.id);
-                    }}
+                  }}
                   className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-2 py-2 flex items-center gap-2 min-w-0"
                 >
                   {sample.thumbUrl ? (
@@ -769,22 +786,22 @@ export default function ReviewPage() {
                 </button>
 
                 {showDeleteFor === sample.id && (
-                <div className="absolute top-1 right-1 z-20">
+                  <div className="absolute top-1 right-1 z-20">
                     <button
-                    type="button"
-                    onClick={(e) => {
+                      type="button"
+                      onClick={(e) => {
                         e.stopPropagation();
                         if (window.confirm("削除しますか？")) {
-                        setSamples((prev) => prev.filter((s) => s.id !== sample.id));
-                        setShowDeleteFor(null);
+                          setSamples((prev) => prev.filter((s) => s.id !== sample.id));
+                          setShowDeleteFor(null);
                         }
-                    }}
-                    className="w-10 h-10 rounded-full bg-rose-500 text-white shadow-lg flex items-center justify-center"
-                    aria-label="見本を削除"
+                      }}
+                      className="w-10 h-10 rounded-full bg-rose-500 text-white shadow-lg flex items-center justify-center"
+                      aria-label="見本を削除"
                     >
-                    ×
+                      ×
                     </button>
-                </div>
+                  </div>
                 )}
               </div>
             );
