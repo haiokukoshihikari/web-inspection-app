@@ -6,6 +6,13 @@ import { useRouter } from "next/navigation";
 const SAMPLES_KEY = "inspection:samples";
 const MAX_SAMPLES = 6;
 
+const REVIEW_VERSION = "add-sample-fix-01";
+
+const MIN_BOX_W = 0.12;
+const MAX_BOX_W = 0.8;
+const MIN_BOX_H = 0.1;
+const MAX_BOX_H = 0.6;
+
 type SampleItem = {
   id: string;
   count: number;
@@ -24,6 +31,10 @@ const SAMPLE_COLORS = [
 ];
 
 type PointerMap = Record<number, { x: number; y: number }>;
+
+function clamp(v: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, v));
+}
 
 export default function AddSamplePage() {
   const router = useRouter();
@@ -77,17 +88,35 @@ export default function AddSamplePage() {
     }
   }, []);
 
+  const safeBoxWidthRatio = clamp(boxWidthRatio, MIN_BOX_W, MAX_BOX_W);
+  const safeBoxHeightRatio = clamp(boxHeightRatio, MIN_BOX_H, MAX_BOX_H);
+
+  useEffect(() => {
+    if (boxWidthRatio !== safeBoxWidthRatio) {
+      setBoxWidthRatio(safeBoxWidthRatio);
+    }
+  }, [boxWidthRatio, safeBoxWidthRatio]);
+
+  useEffect(() => {
+    if (boxHeightRatio !== safeBoxHeightRatio) {
+      setBoxHeightRatio(safeBoxHeightRatio);
+    }
+  }, [boxHeightRatio, safeBoxHeightRatio]);
+
   const updateBaseRect = () => {
     if (!frameRef.current || !imgRef.current) return;
 
     const frame = frameRef.current.getBoundingClientRect();
     const img = imgRef.current.getBoundingClientRect();
 
+    const width = Math.max(0, img.width);
+    const height = Math.max(0, img.height);
+
     setBaseRect({
       left: img.left - frame.left,
       top: img.top - frame.top,
-      width: img.width,
-      height: img.height,
+      width,
+      height,
     });
   };
 
@@ -98,8 +127,14 @@ export default function AddSamplePage() {
   }, []);
 
   const displayBox = useMemo(() => {
-    const width = baseRect.width * boxWidthRatio;
-    const height = baseRect.height * boxHeightRatio;
+    const maxWidth = Math.max(0, baseRect.width);
+    const maxHeight = Math.max(0, baseRect.height);
+
+    const rawWidth = maxWidth * safeBoxWidthRatio;
+    const rawHeight = maxHeight * safeBoxHeightRatio;
+
+    const width = Math.min(rawWidth, maxWidth);
+    const height = Math.min(rawHeight, maxHeight);
 
     return {
       left: baseRect.left + (baseRect.width - width) / 2,
@@ -107,7 +142,7 @@ export default function AddSamplePage() {
       width,
       height,
     };
-  }, [baseRect, boxWidthRatio, boxHeightRatio]);
+  }, [baseRect, safeBoxWidthRatio, safeBoxHeightRatio]);
 
   const getDistance = (
     a: { x: number; y: number },
@@ -213,7 +248,7 @@ export default function AddSamplePage() {
 
       const rawScale =
         dragRef.current.startScale * (dist / dragRef.current.startDistance);
-      const nextScale = Math.max(1, Math.min(4, rawScale));
+      const nextScale = clamp(rawScale, 1, 4);
       setImageScale(nextScale);
 
       const next = clampPan(imagePanX, imagePanY, nextScale);
@@ -262,42 +297,10 @@ export default function AddSamplePage() {
 
     const sourceImg = new Image();
     sourceImg.onload = () => {
-      const frameW = frameRef.current!.clientWidth;
-      const frameH = frameRef.current!.clientHeight;
-
-      const previewCanvas = document.createElement("canvas");
-      previewCanvas.width = frameW;
-      previewCanvas.height = frameH;
-
-      const previewCtx = previewCanvas.getContext("2d");
-      if (!previewCtx) return;
-
-      previewCtx.clearRect(0, 0, frameW, frameH);
-      previewCtx.fillStyle = "#111";
-      previewCtx.fillRect(0, 0, frameW, frameH);
-
-      previewCtx.save();
-
-      const cx = baseRect.left + baseRect.width / 2 + imagePanX;
-      const cy = baseRect.top + baseRect.height / 2 + imagePanY;
-
-      previewCtx.translate(cx, cy);
-      previewCtx.scale(imageScale, imageScale);
-
-      previewCtx.drawImage(
-        sourceImg,
-        -baseRect.width / 2,
-        -baseRect.height / 2,
-        baseRect.width,
-        baseRect.height
-      );
-
-      previewCtx.restore();
-
       const cropCanvas = document.createElement("canvas");
       const thumbBase = 140;
-      const thumbW = Math.max(1, Math.round(thumbBase * boxWidthRatio * 2.2));
-      const thumbH = Math.max(1, Math.round(thumbBase * boxHeightRatio * 2.2));
+      const thumbW = Math.max(1, Math.round(thumbBase * safeBoxWidthRatio * 2.2));
+      const thumbH = Math.max(1, Math.round(thumbBase * safeBoxHeightRatio * 2.2));
 
       cropCanvas.width = thumbW;
       cropCanvas.height = thumbH;
@@ -308,12 +311,45 @@ export default function AddSamplePage() {
       cropCtx.fillStyle = "#111";
       cropCtx.fillRect(0, 0, thumbW, thumbH);
 
+      const scaledWidth = baseRect.width * imageScale;
+      const scaledHeight = baseRect.height * imageScale;
+
+      const imageLeft =
+        baseRect.left + imagePanX - (scaledWidth - baseRect.width) / 2;
+      const imageTop =
+        baseRect.top + imagePanY - (scaledHeight - baseRect.height) / 2;
+
+      const cropLeftOnScreen = displayBox.left - imageLeft;
+      const cropTopOnScreen = displayBox.top - imageTop;
+
+      let srcX = (cropLeftOnScreen / scaledWidth) * naturalWidth;
+      let srcY = (cropTopOnScreen / scaledHeight) * naturalHeight;
+      let srcW = (displayBox.width / scaledWidth) * naturalWidth;
+      let srcH = (displayBox.height / scaledHeight) * naturalHeight;
+
+      if (srcX < 0) {
+        srcW += srcX;
+        srcX = 0;
+      }
+      if (srcY < 0) {
+        srcH += srcY;
+        srcY = 0;
+      }
+      if (srcX + srcW > naturalWidth) {
+        srcW = naturalWidth - srcX;
+      }
+      if (srcY + srcH > naturalHeight) {
+        srcH = naturalHeight - srcY;
+      }
+
+      if (srcW <= 1 || srcH <= 1) return;
+
       cropCtx.drawImage(
-        previewCanvas,
-        displayBox.left,
-        displayBox.top,
-        displayBox.width,
-        displayBox.height,
+        sourceImg,
+        srcX,
+        srcY,
+        srcW,
+        srcH,
         0,
         0,
         thumbW,
@@ -359,6 +395,10 @@ export default function AddSamplePage() {
 
   return (
     <main className="min-h-screen bg-black text-white flex flex-col">
+      <div className="fixed right-2 bottom-2 z-[9999] text-[10px] px-2 py-1 rounded bg-black/70 text-zinc-300 border border-white/10 pointer-events-none">
+        {REVIEW_VERSION}
+      </div>
+
       <div className="flex items-center justify-between px-4 py-4 border-b border-zinc-800 bg-zinc-950">
         <div className="text-base font-medium">見本にしたい部分を囲って下さい</div>
         <button
@@ -390,7 +430,10 @@ export default function AddSamplePage() {
                   transform: `translate(${imagePanX}px, ${imagePanY}px) scale(${imageScale})`,
                   transformOrigin: "center center",
                 }}
-                onLoad={updateBaseRect}
+                onLoad={() => {
+                  updateBaseRect();
+                  window.setTimeout(() => updateBaseRect(), 120);
+                }}
                 draggable={false}
               />
 
@@ -418,12 +461,14 @@ export default function AddSamplePage() {
               type="range"
               min={12}
               max={80}
-              value={Math.round(boxWidthRatio * 100)}
-              onChange={(e) => setBoxWidthRatio(Number(e.target.value) / 100)}
+              value={Math.round(safeBoxWidthRatio * 100)}
+              onChange={(e) =>
+                setBoxWidthRatio(clamp(Number(e.target.value) / 100, MIN_BOX_W, MAX_BOX_W))
+              }
               className="flex-1"
             />
-            <div className="w-10 text-right text-sm text-zinc-400">
-              {Math.round(boxWidthRatio * 100)}
+            <div className="w-10 text-right text-sm text-zinc-400 select-none">
+              {Math.round(safeBoxWidthRatio * 100)}
             </div>
           </div>
 
@@ -433,12 +478,14 @@ export default function AddSamplePage() {
               type="range"
               min={10}
               max={60}
-              value={Math.round(boxHeightRatio * 100)}
-              onChange={(e) => setBoxHeightRatio(Number(e.target.value) / 100)}
+              value={Math.round(safeBoxHeightRatio * 100)}
+              onChange={(e) =>
+                setBoxHeightRatio(clamp(Number(e.target.value) / 100, MIN_BOX_H, MAX_BOX_H))
+              }
               className="flex-1"
             />
-            <div className="w-10 text-right text-sm text-zinc-400">
-              {Math.round(boxHeightRatio * 100)}
+            <div className="w-10 text-right text-sm text-zinc-400 select-none">
+              {Math.round(safeBoxHeightRatio * 100)}
             </div>
           </div>
         </div>

@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "v2026-04-05-06";
+const REVIEW_VERSION = "v2026-04-05-07";
 
 const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
@@ -74,6 +74,10 @@ function colorFromSample(sample: SampleItem) {
 
 function clamp01(v: number) {
   return Math.max(0, Math.min(1, v));
+}
+
+function clamp(v: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, v));
 }
 
 async function imageSrcToGrayMat(
@@ -165,7 +169,7 @@ function preprocessEdgeFromAdjusted(
 }
 
 function getModeThreshold(mode: DetectMode, sensitivity: number) {
-  const s = Math.max(0, Math.min(100, sensitivity));
+  const s = clamp(sensitivity, 0, 100);
   if (mode === "LABEL") return 0.63 - s * 0.00135;
   if (mode === "LOGO") return 0.59 - s * 0.0013;
   return 0.52 - s * 0.0011;
@@ -190,6 +194,7 @@ function isBoxReasonable(
   if (w > sceneWidth * 0.85 || h > sceneHeight * 0.55) return false;
 
   const aspect = w / Math.max(1, h);
+
   if (mode === "LABEL") {
     if (aspect > 9 || aspect < 0.45) return false;
   } else if (mode === "LOGO") {
@@ -231,20 +236,51 @@ function prepBonus(prep: PreprocessName) {
   return 0;
 }
 
-function matchBestFromMat(
-  params: {
-    cv: any;
-    sceneMat: any;
-    sceneWidth: number;
-    sceneHeight: number;
-    sampleMat: any;
-    sampleId: string;
-    color: string;
-    sensitivity: number;
-    mode: DetectMode;
-    prep: PreprocessName;
-  }
-): DetectionBox | null {
+function aspectRatioPenalty(
+  candidateW: number,
+  candidateH: number,
+  sampleAspectRatio: number | undefined,
+  mode: DetectMode
+) {
+  if (!sampleAspectRatio || sampleAspectRatio <= 0) return 0;
+
+  const candidateAspect = candidateW / Math.max(1, candidateH);
+  const diff = Math.abs(Math.log(candidateAspect / sampleAspectRatio));
+
+  let weight = 0.22;
+  if (mode === "LABEL") weight = 0.28;
+  if (mode === "TEXT") weight = 0.32;
+  if (mode === "LOGO") weight = 0.2;
+
+  return diff * weight;
+}
+
+function extremeThinPenalty(
+  candidateW: number,
+  candidateH: number,
+  sampleAspectRatio: number | undefined
+) {
+  const aspect = candidateW / Math.max(1, candidateH);
+  if (!sampleAspectRatio || sampleAspectRatio <= 0) return 0;
+
+  if (aspect > sampleAspectRatio * 1.9) return 0.08;
+  if (aspect < sampleAspectRatio * 0.45) return 0.08;
+  return 0;
+}
+
+function matchBestFromMat(params: {
+  cv: any;
+  sceneMat: any;
+  sceneWidth: number;
+  sceneHeight: number;
+  sampleMat: any;
+  sampleId: string;
+  color: string;
+  sensitivity: number;
+  mode: DetectMode;
+  prep: PreprocessName;
+  sampleAspectRatio?: number;
+}) {
   const {
     cv,
     sceneMat,
@@ -256,6 +292,7 @@ function matchBestFromMat(
     sensitivity,
     mode,
     prep,
+    sampleAspectRatio,
   } = params;
 
   const scales = getModeScales(mode);
@@ -300,6 +337,19 @@ function matchBestFromMat(
         continue;
       }
 
+      const ratioPenalty = aspectRatioPenalty(
+        tpl.cols,
+        tpl.rows,
+        sampleAspectRatio,
+        mode
+      );
+
+      const thinPenalty = extremeThinPenalty(
+        tpl.cols,
+        tpl.rows,
+        sampleAspectRatio
+      );
+
       const adjustedScore =
         rawScore -
         centerPenalty(
@@ -309,7 +359,9 @@ function matchBestFromMat(
           tpl.rows,
           sceneWidth,
           sceneHeight
-        ) +
+        ) -
+        ratioPenalty -
+        thinPenalty +
         modeBonus(mode) +
         prepBonus(prep);
 
@@ -341,19 +393,18 @@ function matchBestFromMat(
   return best;
 }
 
-function runModeMatch(
-  params: {
-    cv: any;
-    sceneGray: any;
-    sceneWidth: number;
-    sceneHeight: number;
-    sampleGray: any;
-    sampleId: string;
-    color: string;
-    sensitivity: number;
-    mode: DetectMode;
-  }
-): DetectionBox | null {
+function runModeMatch(params: {
+  cv: any;
+  sceneGray: any;
+  sceneWidth: number;
+  sceneHeight: number;
+  sampleGray: any;
+  sampleId: string;
+  color: string;
+  sensitivity: number;
+  mode: DetectMode;
+  sampleAspectRatio?: number;
+}) {
   const {
     cv,
     sceneGray,
@@ -364,6 +415,7 @@ function runModeMatch(
     color,
     sensitivity,
     mode,
+    sampleAspectRatio,
   } = params;
 
   const candidates: DetectionBox[] = [];
@@ -387,6 +439,7 @@ function runModeMatch(
         sensitivity,
         mode,
         prep,
+        sampleAspectRatio,
       });
       if (hit) candidates.push(hit);
     };
@@ -462,18 +515,17 @@ function runModeMatch(
   }
 }
 
-function runAutoBestMatch(
-  params: {
-    cv: any;
-    sceneGray: any;
-    sceneWidth: number;
-    sceneHeight: number;
-    sampleGray: any;
-    sampleId: string;
-    color: string;
-    sensitivity: number;
-  }
-): DetectionBox | null {
+function runAutoBestMatch(params: {
+  cv: any;
+  sceneGray: any;
+  sceneWidth: number;
+  sceneHeight: number;
+  sampleGray: any;
+  sampleId: string;
+  color: string;
+  sensitivity: number;
+  sampleAspectRatio?: number;
+}) {
   const modes: DetectMode[] = ["LABEL", "LOGO", "TEXT"];
   let best: DetectionBox | null = null;
 
@@ -809,6 +861,7 @@ export default function ReviewPage() {
             sampleId: sample.id,
             color: colorFromSample(sample),
             sensitivity: appliedSensitivity,
+            sampleAspectRatio: sample.aspectRatio,
           });
 
           sampleGray.delete();
