@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "v2026-04-06-01";
+const REVIEW_VERSION = "v2026-04-06-02";
 
 const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
@@ -45,6 +45,10 @@ const DEFAULT_SAMPLES: SampleItem[] = [
   { id: "4", count: 0, color: "border-fuchsia-400 bg-fuchsia-500/20", aspectRatio: 1 },
 ];
 
+function clamp01(v: number) {
+  return Math.max(0, Math.min(1, v));
+}
+
 function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -61,97 +65,6 @@ function colorFromSample(sample: SampleItem) {
   if (sample.color.includes("fuchsia")) return "#d946ef";
   if (sample.color.includes("cyan")) return "#06b6d4";
   return "#f43f5e";
-}
-
-function clamp01(v: number) {
-  return Math.max(0, Math.min(1, v));
-}
-
-function clamp(v: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, v));
-}
-
-function distance2D(a: { x: number; y: number }, b: { x: number; y: number }) {
-  const dx = a.x - b.x;
-  const dy = a.y - b.y;
-  return Math.hypot(dx, dy);
-}
-
-function clampBox(box: DetectionBox): DetectionBox {
-  const x = clamp01(box.x);
-  const y = clamp01(box.y);
-  const w = clamp01(box.w);
-  const h = clamp01(box.h);
-
-  return {
-    ...box,
-    x,
-    y,
-    w: Math.min(w, 1 - x),
-    h: Math.min(h, 1 - y),
-  };
-}
-
-function dedupeBoxesByCenter(boxes: DetectionBox[], centerDistRatio = 0.08) {
-  const sorted = [...boxes].sort((a, b) => b.score - a.score);
-  const kept: DetectionBox[] = [];
-
-  for (const box of sorted) {
-    const cx = box.x + box.w / 2;
-    const cy = box.y + box.h / 2;
-
-    const duplicated = kept.some((k) => {
-      const kx = k.x + k.w / 2;
-      const ky = k.y + k.h / 2;
-      return distance2D({ x: cx, y: cy }, { x: kx, y: ky }) < centerDistRatio;
-    });
-
-    if (!duplicated) kept.push(box);
-  }
-
-  return kept;
-}
-
-function clusterPredictedCenters(
-  items: Array<{
-    cx: number;
-    cy: number;
-    scale: number;
-    score: number;
-  }>,
-  mergeDistPx: number
-) {
-  const clusters: Array<{
-    items: Array<{
-      cx: number;
-      cy: number;
-      scale: number;
-      score: number;
-    }>;
-  }> = [];
-
-  for (const item of items) {
-    let found = false;
-
-    for (const cluster of clusters) {
-      const avgCx =
-        cluster.items.reduce((s, v) => s + v.cx, 0) / cluster.items.length;
-      const avgCy =
-        cluster.items.reduce((s, v) => s + v.cy, 0) / cluster.items.length;
-
-      if (distance2D({ x: item.cx, y: item.cy }, { x: avgCx, y: avgCy }) <= mergeDistPx) {
-        cluster.items.push(item);
-        found = true;
-        break;
-      }
-    }
-
-    if (!found) {
-      clusters.push({ items: [item] });
-    }
-  }
-
-  return clusters;
 }
 
 async function imageSrcToGrayMat(
@@ -189,199 +102,148 @@ async function imageSrcToGrayMat(
   }
 }
 
-async function runOrbMultiInstanceMatch(params: {
+function iou(a: DetectionBox, b: DetectionBox) {
+  const ax1 = a.x;
+  const ay1 = a.y;
+  const ax2 = a.x + a.w;
+  const ay2 = a.y + a.h;
+
+  const bx1 = b.x;
+  const by1 = b.y;
+  const bx2 = b.x + b.w;
+  const by2 = b.y + b.h;
+
+  const ix1 = Math.max(ax1, bx1);
+  const iy1 = Math.max(ay1, by1);
+  const ix2 = Math.min(ax2, bx2);
+  const iy2 = Math.min(ay2, by2);
+
+  const iw = Math.max(0, ix2 - ix1);
+  const ih = Math.max(0, iy2 - iy1);
+  const inter = iw * ih;
+
+  const areaA = a.w * a.h;
+  const areaB = b.w * b.h;
+  const union = areaA + areaB - inter;
+
+  if (union <= 0) return 0;
+  return inter / union;
+}
+
+function dedupeCandidates(boxes: DetectionBox[]) {
+  const sorted = [...boxes].sort((a, b) => b.score - a.score);
+  const kept: DetectionBox[] = [];
+
+  for (const box of sorted) {
+    const duplicated = kept.some((k) => iou(k, box) > 0.35);
+    if (!duplicated) kept.push(box);
+  }
+
+  return kept;
+}
+
+function runRegionProposalDetection(params: {
   cv: any;
   sceneGray: any;
   sceneWidth: number;
   sceneHeight: number;
-  sampleGray: any;
-  sampleWidth: number;
-  sampleHeight: number;
-  sampleId: string;
-  color: string;
+  samples: SampleItem[];
 }) {
-  const {
-    cv,
-    sceneGray,
-    sceneWidth,
-    sceneHeight,
-    sampleGray,
-    sampleWidth,
-    sampleHeight,
-    sampleId,
-    color,
-  } = params;
+  const { cv, sceneGray, sceneWidth, sceneHeight, samples } = params;
 
-  let orb: any = null;
-  let kp1: any = null;
-  let kp2: any = null;
-  let des1: any = null;
-  let des2: any = null;
-  let matcher: any = null;
-  let emptyMask1: any = null;
-  let emptyMask2: any = null;
+  let blur: any = null;
+  let edge: any = null;
+  let kernel: any = null;
+  let morphed: any = null;
+  let contours: any = null;
+  let hierarchy: any = null;
 
   try {
-    if (!cv.ORB_create) {
-      console.error("ORB_create is not available in this OpenCV.js build.");
-      return [];
-    }
+    blur = new cv.Mat();
+    edge = new cv.Mat();
+    morphed = new cv.Mat();
+    contours = new cv.MatVector();
+    hierarchy = new cv.Mat();
 
-    orb = cv.ORB_create(500);
+    cv.GaussianBlur(
+      sceneGray,
+      blur,
+      new cv.Size(5, 5),
+      0,
+      0,
+      cv.BORDER_DEFAULT
+    );
 
-    kp1 = new cv.KeyPointVector();
-    kp2 = new cv.KeyPointVector();
-    des1 = new cv.Mat();
-    des2 = new cv.Mat();
-    emptyMask1 = new cv.Mat();
-    emptyMask2 = new cv.Mat();
+    cv.Canny(blur, edge, 50, 150);
 
-    orb.detectAndCompute(sampleGray, emptyMask1, kp1, des1);
-    orb.detectAndCompute(sceneGray, emptyMask2, kp2, des2);
+    kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(9, 5));
+    cv.dilate(edge, morphed, kernel);
+    cv.morphologyEx(morphed, morphed, cv.MORPH_CLOSE, kernel);
+    cv.erode(morphed, morphed, kernel);
 
-    if (
-      !des1 ||
-      !des2 ||
-      des1.empty() ||
-      des2.empty() ||
-      kp1.size() < 6 ||
-      kp2.size() < 20
-    ) {
-      return [];
-    }
-
-    matcher = new cv.BFMatcher(cv.NORM_HAMMING, false);
-    const knnMatches = new cv.DMatchVectorVector();
-    matcher.knnMatch(des1, des2, knnMatches, 2);
-
-    const goodMatches: Array<{
-      queryIdx: number;
-      trainIdx: number;
-      distance: number;
-    }> = [];
-
-    for (let i = 0; i < knnMatches.size(); i++) {
-      const mv = knnMatches.get(i);
-      if (mv.size() < 2) {
-        mv.delete();
-        continue;
-      }
-
-      const d0 = mv.get(0);
-      const d1 = mv.get(1);
-
-      if (d0.distance < 0.78 * d1.distance) {
-        goodMatches.push({
-          queryIdx: d0.queryIdx,
-          trainIdx: d0.trainIdx,
-          distance: d0.distance,
-        });
-      }
-
-      d0.delete();
-      d1.delete();
-      mv.delete();
-    }
-
-    knnMatches.delete();
-
-    if (goodMatches.length < 4) return [];
-
-    const sampleCx = sampleWidth / 2;
-    const sampleCy = sampleHeight / 2;
-
-    const predictedCenters: Array<{
-      cx: number;
-      cy: number;
-      scale: number;
-      score: number;
-    }> = [];
-
-    for (const gm of goodMatches) {
-      const q = kp1.get(gm.queryIdx);
-      const t = kp2.get(gm.trainIdx);
-
-      const qx = q.pt.x;
-      const qy = q.pt.y;
-      const tx = t.pt.x;
-      const ty = t.pt.y;
-
-      const qSize = Math.max(q.size || 1, 1);
-      const tSize = Math.max(t.size || 1, 1);
-      const scale = clamp(tSize / qSize, 0.5, 2.0);
-
-      const predCx = tx - (qx - sampleCx) * scale;
-      const predCy = ty - (qy - sampleCy) * scale;
-
-      predictedCenters.push({
-        cx: predCx,
-        cy: predCy,
-        scale,
-        score: 1 / (1 + gm.distance),
-      });
-
-      q.delete();
-      t.delete();
-    }
-
-    const mergeDistPx = Math.max(sampleWidth, sampleHeight) * 0.35;
-    const clusters = clusterPredictedCenters(predictedCenters, mergeDistPx);
+    cv.findContours(
+      morphed,
+      contours,
+      hierarchy,
+      cv.RETR_EXTERNAL,
+      cv.CHAIN_APPROX_SIMPLE
+    );
 
     const boxes: DetectionBox[] = [];
+    const palette =
+      samples.length > 0
+        ? samples.map((s) => colorFromSample(s))
+        : ["#38bdf8", "#34d399", "#f59e0b", "#d946ef"];
 
-    for (const cluster of clusters) {
-      if (cluster.items.length < 4) continue;
+    for (let i = 0; i < contours.size(); i++) {
+      const cnt = contours.get(i);
+      const rect = cv.boundingRect(cnt);
 
-      const cx =
-        cluster.items.reduce((s, v) => s + v.cx, 0) / cluster.items.length;
-      const cy =
-        cluster.items.reduce((s, v) => s + v.cy, 0) / cluster.items.length;
+      cnt.delete();
 
-      const scales = cluster.items.map((v) => v.scale).sort((a, b) => a - b);
-      const mid = Math.floor(scales.length / 2);
-      const medianScale =
-        scales.length % 2 === 0
-          ? (scales[mid - 1] + scales[mid]) / 2
-          : scales[mid];
+      if (rect.width < 20 || rect.height < 12) continue;
+      if (rect.width > sceneWidth * 0.95 || rect.height > sceneHeight * 0.8)
+        continue;
 
-      const boxW = sampleWidth * medianScale;
-      const boxH = sampleHeight * medianScale;
+      const area = rect.width * rect.height;
+      if (area < sceneWidth * sceneHeight * 0.00035) continue;
 
-      const avgScore =
-        cluster.items.reduce((s, v) => s + v.score, 0) / cluster.items.length;
+      const aspect = rect.width / Math.max(1, rect.height);
+      if (aspect < 0.4 || aspect > 12) continue;
 
-      const box = clampBox({
-        x: (cx - boxW / 2) / sceneWidth,
-        y: (cy - boxH / 2) / sceneHeight,
-        w: boxW / sceneWidth,
-        h: boxH / sceneHeight,
-        color,
-        sampleId,
-        score: avgScore + cluster.items.length * 0.02,
-        rawScore: avgScore,
-        mode: "ORB",
-        prep: "KNN",
+      const borderMarginX = Math.min(rect.x, sceneWidth - (rect.x + rect.width));
+      const borderMarginY = Math.min(rect.y, sceneHeight - (rect.y + rect.height));
+      const minBorderMargin = Math.min(borderMarginX, borderMarginY);
+
+      let score = area / (sceneWidth * sceneHeight);
+
+      if (aspect >= 1.5 && aspect <= 8) score += 0.08;
+      if (minBorderMargin < 3) score -= 0.08;
+      if (minBorderMargin < 8) score -= 0.04;
+
+      boxes.push({
+        x: clamp01(rect.x / sceneWidth),
+        y: clamp01(rect.y / sceneHeight),
+        w: clamp01(rect.width / sceneWidth),
+        h: clamp01(rect.height / sceneHeight),
+        color: palette[boxes.length % palette.length],
+        sampleId: samples.length > 0 ? samples[boxes.length % samples.length].id : "proposal",
+        score,
+        rawScore: score,
+        mode: "REGION",
+        prep: "EDGE+CLOSE",
       });
-
-      if (box.w > 0.03 && box.h > 0.03) {
-        boxes.push(box);
-      }
     }
 
-    return dedupeBoxesByCenter(boxes, 0.06).sort((a, b) => b.score - a.score);
-  } catch (e) {
-    console.error("runOrbMultiInstanceMatch error:", e);
-    return [];
+    return dedupeCandidates(boxes).sort((a, b) => b.score - a.score);
   } finally {
     try {
-      orb?.delete?.();
-      kp1?.delete?.();
-      kp2?.delete?.();
-      des1?.delete?.();
-      des2?.delete?.();
-      matcher?.delete?.();
-      emptyMask1?.delete?.();
-      emptyMask2?.delete?.();
+      blur?.delete?.();
+      edge?.delete?.();
+      kernel?.delete?.();
+      morphed?.delete?.();
+      contours?.delete?.();
+      hierarchy?.delete?.();
     } catch {}
   }
 }
@@ -631,24 +493,12 @@ export default function ReviewPage() {
   };
 
   const canAdd = useMemo(() => samples.length < MAX_SAMPLES, [samples.length]);
-  const visibleSamples = useMemo(() => samples.filter((s) => !!s.thumbUrl), [samples]);
 
   const detectedCounts = useMemo(() => {
     const map: Record<string, number> = {};
     for (const s of samples) map[s.id] = 0;
-    for (const d of detections) map[d.sampleId] = (map[d.sampleId] || 0) + 1;
-    return map;
-  }, [samples, detections]);
-
-  const detectedModes = useMemo(() => {
-    const map: Record<string, string> = {};
-    for (const s of samples) map[s.id] = "";
-
-    const sorted = [...detections].sort((a, b) => b.score - a.score);
-    for (const d of sorted) {
-      if (!map[d.sampleId]) {
-        map[d.sampleId] = d.mode ? `${d.mode}/${d.prep ?? "-"}` : "-";
-      }
+    for (const d of detections) {
+      map[d.sampleId] = (map[d.sampleId] || 0) + 1;
     }
     return map;
   }, [samples, detections]);
@@ -657,7 +507,7 @@ export default function ReviewPage() {
     let cancelled = false;
 
     async function runDetection() {
-      if (!cvReady || !capturedImage || visibleSamples.length === 0) {
+      if (!cvReady || !capturedImage) {
         setDetections([]);
         return;
       }
@@ -687,42 +537,18 @@ export default function ReviewPage() {
         }
 
         sceneGray = sceneResult.gray;
-        const sceneWidth = sceneResult.width;
-        const sceneHeight = sceneResult.height;
 
-        const nextDetections: DetectionBox[] = [];
+        const boxes = runRegionProposalDetection({
+          cv,
+          sceneGray,
+          sceneWidth: sceneResult.width,
+          sceneHeight: sceneResult.height,
+          samples,
+        });
 
-        for (const sample of visibleSamples) {
-          if (cancelled) return;
-          if (!sample.thumbUrl) continue;
-
-          const sampleResult = await imageSrcToGrayMat(cv, sample.thumbUrl, 320);
-          if (!sampleResult) continue;
-
-          const sampleGray = sampleResult.gray;
-
-          const boxes = await runOrbMultiInstanceMatch({
-            cv,
-            sceneGray,
-            sceneWidth,
-            sceneHeight,
-            sampleGray,
-            sampleWidth: sampleResult.width,
-            sampleHeight: sampleResult.height,
-            sampleId: sample.id,
-            color: colorFromSample(sample),
-          });
-
-          sampleGray.delete();
-
-          nextDetections.push(...boxes);
-
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
-
-        if (!cancelled) setDetections(nextDetections);
+        if (!cancelled) setDetections(boxes);
       } catch (e) {
-        console.error("ORB detection error:", e);
+        console.error("Region proposal detection error:", e);
         if (!cancelled) setDetections([]);
       } finally {
         try {
@@ -740,7 +566,7 @@ export default function ReviewPage() {
     return () => {
       cancelled = true;
     };
-  }, [cvReady, capturedImage, visibleSamples]);
+  }, [cvReady, capturedImage, samples, appliedSensitivity]);
 
   const overlayMuted =
     isAdjustingSensitivity || prepareDetecting || detecting || !cvReady;
@@ -751,7 +577,7 @@ export default function ReviewPage() {
       : prepareDetecting
         ? "準備中..."
         : detecting
-          ? "検知中..."
+          ? "候補領域抽出中..."
           : "";
 
   return (
@@ -834,7 +660,7 @@ export default function ReviewPage() {
 
               {detections.map((box, index) => (
                 <div
-                  key={`${box.sampleId}-${index}-${box.x}-${box.y}`}
+                  key={`${index}-${box.x}-${box.y}-${box.w}-${box.h}`}
                   className="absolute rounded-md border-[3px] transition-opacity"
                   style={{
                     left: imageRect.left + imageRect.width * box.x,
@@ -857,7 +683,7 @@ export default function ReviewPage() {
               ) : null}
 
               <div className="absolute left-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10">
-                {`検知数: ${detections.length}`}
+                {`候補数: ${detections.length}`}
               </div>
             </>
           ) : (
@@ -906,10 +732,10 @@ export default function ReviewPage() {
                       {detectedCounts[sample.id] ?? 0}
                     </div>
                     <div className="text-[10px] leading-none text-zinc-400 mt-1">
-                      ORB
+                      REGION
                     </div>
                     <div className="text-[10px] leading-none text-zinc-500 mt-1">
-                      {detectedModes[sample.id] || "-"}
+                      EDGE+CLOSE
                     </div>
                   </div>
                 </button>
