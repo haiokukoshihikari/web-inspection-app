@@ -10,12 +10,13 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "v2026-04-05-08";
+const REVIEW_VERSION = "v2026-04-05-09";
 
 const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
 const MISSING_KEY = "inspection:missingOn";
 const SAMPLES_KEY = "inspection:samples";
+const SAMPLE_MODE_KEY = "inspection:sampleModes";
 
 const MAX_LOCAL_PEAKS_PER_PREP = 10;
 const MAX_FINAL_CANDIDATES_PER_SAMPLE = 8;
@@ -28,15 +29,9 @@ type SampleItem = {
   aspectRatio?: number;
 };
 
-type DetectMode = "LABEL" | "LOGO" | "TEXT";
-type PreprocessName =
-  | "GRAY"
-  | "BIN20"
-  | "BIN50"
-  | "BIN80"
-  | "EDGE_DARK"
-  | "EDGE_BASE"
-  | "EDGE_BRIGHT";
+type DetectMode = "LABEL";
+type PreprocessName = "BIN20" | "BIN50" | "BIN80";
+type UserSelectMode = "AUTO" | "BIN20" | "BIN50" | "BIN80";
 
 type DetectionBox = {
   x: number;
@@ -127,12 +122,6 @@ function scaleMat(cv: any, src: any, scale: number) {
   return dst;
 }
 
-function adjustGray(cv: any, gray: any, alpha: number, beta: number) {
-  const dst = new cv.Mat();
-  gray.convertTo(dst, -1, alpha, beta);
-  return dst;
-}
-
 function preprocessBinaryFixed(cv: any, gray: any, thresholdValue: number) {
   const blur = new cv.Mat();
   const bin = new cv.Mat();
@@ -142,47 +131,13 @@ function preprocessBinaryFixed(cv: any, gray: any, thresholdValue: number) {
   return bin;
 }
 
-function preprocessBinaryInvFixed(cv: any, gray: any, thresholdValue: number) {
-  const blur = new cv.Mat();
-  const bin = new cv.Mat();
-  cv.GaussianBlur(gray, blur, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
-  cv.threshold(blur, bin, thresholdValue, 255, cv.THRESH_BINARY_INV);
-  blur.delete();
-  return bin;
-}
-
-function preprocessEdge(cv: any, gray: any) {
-  const blur = new cv.Mat();
-  const edge = new cv.Mat();
-  cv.GaussianBlur(gray, blur, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
-  cv.Canny(blur, edge, 60, 180);
-  blur.delete();
-  return edge;
-}
-
-function preprocessEdgeFromAdjusted(
-  cv: any,
-  gray: any,
-  alpha: number,
-  beta: number
-) {
-  const adjusted = adjustGray(cv, gray, alpha, beta);
-  const edge = preprocessEdge(cv, adjusted);
-  adjusted.delete();
-  return edge;
-}
-
-function getModeThreshold(mode: DetectMode, sensitivity: number) {
+function getThresholdBase(sensitivity: number) {
   const s = clamp(sensitivity, 0, 100);
-  if (mode === "LABEL") return 0.63 - s * 0.00135;
-  if (mode === "LOGO") return 0.59 - s * 0.0013;
-  return 0.52 - s * 0.0011;
+  return 0.63 - s * 0.00135;
 }
 
-function getModeScales(mode: DetectMode) {
-  if (mode === "LABEL") return [0.72, 0.86, 1.0, 1.14, 1.28];
-  if (mode === "LOGO") return [0.82, 0.92, 1.0, 1.08, 1.18];
-  return [0.7, 0.85, 1.0, 1.15, 1.3];
+function getScales() {
+  return [0.72, 0.86, 1.0, 1.14, 1.28];
 }
 
 function isBoxReasonable(
@@ -191,21 +146,13 @@ function isBoxReasonable(
   w: number,
   h: number,
   sceneWidth: number,
-  sceneHeight: number,
-  mode: DetectMode
+  sceneHeight: number
 ) {
   if (w < 8 || h < 8) return false;
   if (w > sceneWidth * 0.9 || h > sceneHeight * 0.6) return false;
 
   const aspect = w / Math.max(1, h);
-
-  if (mode === "LABEL") {
-    if (aspect > 9 || aspect < 0.45) return false;
-  } else if (mode === "LOGO") {
-    if (aspect > 5 || aspect < 0.3) return false;
-  } else {
-    if (aspect > 10 || aspect < 0.16) return false;
-  }
+  if (aspect > 9 || aspect < 0.45) return false;
 
   if (x < 0 || y < 0) return false;
   if (x + w > sceneWidth || y + h > sceneHeight) return false;
@@ -249,35 +196,16 @@ function borderPenalty(
   return 0;
 }
 
-function modeBonus(mode: DetectMode) {
-  if (mode === "LABEL") return 0.03;
-  if (mode === "LOGO") return 0.01;
-  return 0;
-}
-
-function prepBonus(prep: PreprocessName) {
-  if (prep === "GRAY") return 0.015;
-  if (prep === "EDGE_BASE") return 0.008;
-  return 0;
-}
-
 function aspectRatioPenalty(
   candidateW: number,
   candidateH: number,
-  sampleAspectRatio: number | undefined,
-  mode: DetectMode
+  sampleAspectRatio: number | undefined
 ) {
   if (!sampleAspectRatio || sampleAspectRatio <= 0) return 0;
 
   const candidateAspect = candidateW / Math.max(1, candidateH);
   const diff = Math.abs(Math.log(candidateAspect / sampleAspectRatio));
-
-  let weight = 0.22;
-  if (mode === "LABEL") weight = 0.28;
-  if (mode === "TEXT") weight = 0.34;
-  if (mode === "LOGO") weight = 0.2;
-
-  return diff * weight;
+  return diff * 0.28;
 }
 
 function extremeThinPenalty(
@@ -304,6 +232,11 @@ function sizeSimilarityPenalty(
   const ratio = candidateArea / baseArea;
   const diff = Math.abs(Math.log(ratio));
   return diff * 0.06;
+}
+
+function prepBonus(prep: PreprocessName) {
+  if (prep === "BIN50") return 0.01;
+  return 0;
 }
 
 function iou(a: DetectionBox, b: DetectionBox) {
@@ -361,9 +294,7 @@ function dedupeCandidates(
 
   for (const c of sorted) {
     const duplicate = kept.some((k) => isNearDuplicate(k, c));
-    if (!duplicate) {
-      kept.push(c);
-    }
+    if (!duplicate) kept.push(c);
     if (kept.length >= maxCount) break;
   }
 
@@ -379,7 +310,6 @@ function matchCandidatesFromMat(params: {
   sampleId: string;
   color: string;
   sensitivity: number;
-  mode: DetectMode;
   prep: PreprocessName;
   sampleAspectRatio?: number;
 }) {
@@ -392,13 +322,13 @@ function matchCandidatesFromMat(params: {
     sampleId,
     color,
     sensitivity,
-    mode,
     prep,
     sampleAspectRatio,
   } = params;
 
-  const scales = getModeScales(mode);
+  const scales = getScales();
   const candidates: DetectionBox[] = [];
+  const threshold = getThresholdBase(sensitivity);
 
   for (const scale of scales) {
     let tpl: any = null;
@@ -419,8 +349,6 @@ function matchCandidatesFromMat(params: {
       result = new cv.Mat();
       cv.matchTemplate(sceneMat, tpl, result, cv.TM_CCOEFF_NORMED);
 
-      const threshold = getModeThreshold(mode, sensitivity);
-
       for (let i = 0; i < MAX_LOCAL_PEAKS_PER_PREP; i++) {
         const mm = cv.minMaxLoc(result);
         const rawScore = mm.maxVal;
@@ -434,8 +362,7 @@ function matchCandidatesFromMat(params: {
             tpl.cols,
             tpl.rows,
             sceneWidth,
-            sceneHeight,
-            mode
+            sceneHeight
           )
         ) {
           const adjustedScore =
@@ -459,8 +386,7 @@ function matchCandidatesFromMat(params: {
             aspectRatioPenalty(
               tpl.cols,
               tpl.rows,
-              sampleAspectRatio,
-              mode
+              sampleAspectRatio
             ) -
             extremeThinPenalty(
               tpl.cols,
@@ -473,7 +399,6 @@ function matchCandidatesFromMat(params: {
               sampleMat.cols,
               sampleMat.rows
             ) +
-            modeBonus(mode) +
             prepBonus(prep);
 
           candidates.push({
@@ -485,7 +410,7 @@ function matchCandidatesFromMat(params: {
             sampleId,
             score: adjustedScore,
             rawScore,
-            mode,
+            mode: "LABEL",
             prep,
           });
         }
@@ -516,7 +441,7 @@ function matchCandidatesFromMat(params: {
   return candidates;
 }
 
-function runModeCandidates(params: {
+function runLabelCandidates(params: {
   cv: any;
   sceneGray: any;
   sceneWidth: number;
@@ -525,8 +450,8 @@ function runModeCandidates(params: {
   sampleId: string;
   color: string;
   sensitivity: number;
-  mode: DetectMode;
   sampleAspectRatio?: number;
+  forcedPrep?: UserSelectMode;
 }) {
   const {
     cv,
@@ -537,20 +462,30 @@ function runModeCandidates(params: {
     sampleId,
     color,
     sensitivity,
-    mode,
     sampleAspectRatio,
+    forcedPrep = "AUTO",
   } = params;
 
   const allCandidates: DetectionBox[] = [];
   const mats: any[] = [];
 
+  const usePreps: PreprocessName[] =
+    forcedPrep === "AUTO"
+      ? ["BIN20", "BIN50", "BIN80"]
+      : [forcedPrep];
+
   try {
-    const pushCandidates = (
-      sceneMat: any,
-      sampleMat: any,
-      prep: PreprocessName
-    ) => {
+    const buildPrep = (prep: PreprocessName, gray: any) => {
+      if (prep === "BIN20") return preprocessBinaryFixed(cv, gray, 20);
+      if (prep === "BIN50") return preprocessBinaryFixed(cv, gray, 50);
+      return preprocessBinaryFixed(cv, gray, 80);
+    };
+
+    for (const prep of usePreps) {
+      const sceneMat = buildPrep(prep, sceneGray);
+      const sampleMat = buildPrep(prep, sampleGray);
       mats.push(sceneMat, sampleMat);
+
       const hits = matchCandidatesFromMat({
         cv,
         sceneMat,
@@ -560,71 +495,14 @@ function runModeCandidates(params: {
         sampleId,
         color,
         sensitivity,
-        mode,
         prep,
         sampleAspectRatio,
       });
-      allCandidates.push(...hits);
-    };
 
-    if (mode === "LABEL") {
-      pushCandidates(sceneGray.clone(), sampleGray.clone(), "GRAY");
-      pushCandidates(
-        preprocessBinaryFixed(cv, sceneGray, 50),
-        preprocessBinaryFixed(cv, sampleGray, 50),
-        "BIN50"
-      );
-      pushCandidates(
-        preprocessBinaryFixed(cv, sceneGray, 80),
-        preprocessBinaryFixed(cv, sampleGray, 80),
-        "BIN80"
-      );
-      pushCandidates(
-        preprocessEdge(cv, sceneGray),
-        preprocessEdge(cv, sampleGray),
-        "EDGE_BASE"
-      );
-    } else if (mode === "LOGO") {
-      pushCandidates(
-        preprocessEdgeFromAdjusted(cv, sceneGray, 1.0, -35),
-        preprocessEdgeFromAdjusted(cv, sampleGray, 1.0, -35),
-        "EDGE_DARK"
-      );
-      pushCandidates(
-        preprocessEdge(cv, sceneGray),
-        preprocessEdge(cv, sampleGray),
-        "EDGE_BASE"
-      );
-      pushCandidates(
-        preprocessEdgeFromAdjusted(cv, sceneGray, 1.0, 35),
-        preprocessEdgeFromAdjusted(cv, sampleGray, 1.0, 35),
-        "EDGE_BRIGHT"
-      );
-      pushCandidates(sceneGray.clone(), sampleGray.clone(), "GRAY");
-    } else {
-      pushCandidates(sceneGray.clone(), sampleGray.clone(), "GRAY");
-      pushCandidates(
-        preprocessBinaryInvFixed(cv, sceneGray, 20),
-        preprocessBinaryInvFixed(cv, sampleGray, 20),
-        "BIN20"
-      );
-      pushCandidates(
-        preprocessBinaryInvFixed(cv, sceneGray, 50),
-        preprocessBinaryInvFixed(cv, sampleGray, 50),
-        "BIN50"
-      );
-      pushCandidates(
-        preprocessBinaryInvFixed(cv, sceneGray, 80),
-        preprocessBinaryInvFixed(cv, sampleGray, 80),
-        "BIN80"
-      );
-      pushCandidates(
-        preprocessEdgeFromAdjusted(cv, sceneGray, 1.0, 35),
-        preprocessEdgeFromAdjusted(cv, sampleGray, 1.0, 35),
-        "EDGE_BRIGHT"
-      );
+      allCandidates.push(...hits);
     }
 
+    allCandidates.sort((a, b) => b.score - a.score);
     return dedupeCandidates(allCandidates, MAX_FINAL_CANDIDATES_PER_SAMPLE);
   } finally {
     for (const m of mats) {
@@ -633,29 +511,6 @@ function runModeCandidates(params: {
       } catch {}
     }
   }
-}
-
-function runAutoBestMatch(params: {
-  cv: any;
-  sceneGray: any;
-  sceneWidth: number;
-  sceneHeight: number;
-  sampleGray: any;
-  sampleId: string;
-  color: string;
-  sensitivity: number;
-  sampleAspectRatio?: number;
-}) {
-  const modes: DetectMode[] = ["LABEL", "LOGO", "TEXT"];
-  let all: DetectionBox[] = [];
-
-  for (const mode of modes) {
-    const candidates = runModeCandidates({ ...params, mode });
-    all = all.concat(candidates);
-  }
-
-  all.sort((a, b) => b.score - a.score);
-  return dedupeCandidates(all, MAX_FINAL_CANDIDATES_PER_SAMPLE);
 }
 
 export default function ReviewPage() {
@@ -669,6 +524,7 @@ export default function ReviewPage() {
   const [missingOn, setMissingOn] = useState(true);
   const [showDeleteFor, setShowDeleteFor] = useState<string | null>(null);
   const [samplesLoaded, setSamplesLoaded] = useState(false);
+  const [sampleModes, setSampleModes] = useState<Record<string, UserSelectMode>>({});
 
   const [imageRect, setImageRect] = useState({
     left: 0,
@@ -725,6 +581,16 @@ export default function ReviewPage() {
       } else {
         setSamples(DEFAULT_SAMPLES);
       }
+
+      const savedModes = localStorage.getItem(SAMPLE_MODE_KEY);
+      if (savedModes) {
+        try {
+          const parsed = JSON.parse(savedModes);
+          if (parsed && typeof parsed === "object") {
+            setSampleModes(parsed);
+          }
+        } catch {}
+      }
     } finally {
       setSamplesLoaded(true);
     }
@@ -738,6 +604,15 @@ export default function ReviewPage() {
       console.error("samples save error:", e);
     }
   }, [samples, samplesLoaded]);
+
+  useEffect(() => {
+    if (!samplesLoaded) return;
+    try {
+      localStorage.setItem(SAMPLE_MODE_KEY, JSON.stringify(sampleModes));
+    } catch (e) {
+      console.error("sample mode save error:", e);
+    }
+  }, [sampleModes, samplesLoaded]);
 
   useEffect(() => {
     const stopDragging = () => setIsSliderDragging(false);
@@ -902,6 +777,23 @@ export default function ReviewPage() {
     localStorage.setItem(MISSING_KEY, String(next));
   };
 
+  const cycleSampleMode = (sampleId: string) => {
+    const current = sampleModes[sampleId] ?? "AUTO";
+    const next: UserSelectMode =
+      current === "AUTO"
+        ? "BIN20"
+        : current === "BIN20"
+          ? "BIN50"
+          : current === "BIN50"
+            ? "BIN80"
+            : "AUTO";
+
+    setSampleModes((prev) => ({
+      ...prev,
+      [sampleId]: next,
+    }));
+  };
+
   const canAdd = useMemo(() => samples.length < MAX_SAMPLES, [samples.length]);
   const visibleSamples = useMemo(() => samples.filter((s) => !!s.thumbUrl), [samples]);
 
@@ -919,7 +811,7 @@ export default function ReviewPage() {
     const sorted = [...detections].sort((a, b) => b.score - a.score);
     for (const d of sorted) {
       if (!map[d.sampleId]) {
-        map[d.sampleId] = d.mode ? `${d.mode}/${d.prep ?? "-"}` : "-";
+        map[d.sampleId] = d.prep ? `LABEL/${d.prep}` : "-";
       }
     }
     return map;
@@ -973,7 +865,7 @@ export default function ReviewPage() {
 
           const sampleGray = sampleResult.gray;
 
-          const boxes = runAutoBestMatch({
+          const boxes = runLabelCandidates({
             cv,
             sceneGray,
             sceneWidth,
@@ -983,6 +875,7 @@ export default function ReviewPage() {
             color: colorFromSample(sample),
             sensitivity: appliedSensitivity,
             sampleAspectRatio: sample.aspectRatio,
+            forcedPrep: sampleModes[sample.id] ?? "AUTO",
           });
 
           sampleGray.delete();
@@ -1012,7 +905,7 @@ export default function ReviewPage() {
     return () => {
       cancelled = true;
     };
-  }, [cvReady, capturedImage, visibleSamples, appliedSensitivity]);
+  }, [cvReady, capturedImage, visibleSamples, appliedSensitivity, sampleModes]);
 
   const overlayMuted =
     isAdjustingSensitivity || prepareDetecting || detecting || !cvReady;
@@ -1146,6 +1039,7 @@ export default function ReviewPage() {
             const ratio =
               sample.aspectRatio && sample.aspectRatio > 0 ? sample.aspectRatio : 1;
             const thumbW = Math.max(40, Math.min(72, Math.round(40 * ratio)));
+            const selectedMode = sampleModes[sample.id] ?? "AUTO";
 
             return (
               <div key={sample.id} className="relative overflow-visible isolate">
@@ -1154,7 +1048,7 @@ export default function ReviewPage() {
                   onClick={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
-                    setShowDeleteFor(showDeleteFor === sample.id ? null : sample.id);
+                    cycleSampleMode(sample.id);
                   }}
                   className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-2 py-2 flex items-center gap-2 min-w-0"
                 >
@@ -1178,14 +1072,30 @@ export default function ReviewPage() {
                       {detectedCounts[sample.id] ?? 0}
                     </div>
                     <div className="text-[10px] leading-none text-zinc-400 mt-1">
+                      {selectedMode}
+                    </div>
+                    <div className="text-[10px] leading-none text-zinc-500 mt-1">
                       {detectedModes[sample.id] || "-"}
                     </div>
                   </div>
                 </button>
 
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setShowDeleteFor(showDeleteFor === sample.id ? null : sample.id);
+                  }}
+                  className="absolute top-1 right-1 z-40 w-7 h-7 rounded-full bg-black/60 border border-white/10 text-white"
+                  aria-label="削除メニュー"
+                >
+                  …
+                </button>
+
                 {showDeleteFor === sample.id && (
                   <div
-                    className="absolute top-1 right-1 z-50"
+                    className="absolute top-10 right-1 z-50"
                     onMouseDown={(e) => e.stopPropagation()}
                     onTouchStart={(e) => e.stopPropagation()}
                     onPointerDown={(e) => e.stopPropagation()}
