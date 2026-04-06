@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "v2026-04-05-05";
+const REVIEW_VERSION = "v2026-04-05-06";
 
 const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
@@ -25,6 +25,16 @@ type SampleItem = {
   aspectRatio?: number;
 };
 
+type DetectMode = "LABEL" | "LOGO" | "TEXT";
+type PreprocessName =
+  | "GRAY"
+  | "BIN20"
+  | "BIN50"
+  | "BIN80"
+  | "EDGE_DARK"
+  | "EDGE_BASE"
+  | "EDGE_BRIGHT";
+
 type DetectionBox = {
   x: number;
   y: number;
@@ -33,7 +43,8 @@ type DetectionBox = {
   color: string;
   sampleId: string;
   score: number;
-  mode?: "LABEL" | "LOGO" | "TEXT";
+  mode?: DetectMode;
+  prep?: PreprocessName;
 };
 
 const DEFAULT_SAMPLES: SampleItem[] = [
@@ -108,20 +119,26 @@ function scaleMat(cv: any, src: any, scale: number) {
   return dst;
 }
 
-function preprocessBinary(cv: any, gray: any) {
+function adjustGray(cv: any, gray: any, alpha: number, beta: number) {
+  const dst = new cv.Mat();
+  gray.convertTo(dst, -1, alpha, beta);
+  return dst;
+}
+
+function preprocessBinaryFixed(cv: any, gray: any, thresholdValue: number) {
   const blur = new cv.Mat();
   const bin = new cv.Mat();
   cv.GaussianBlur(gray, blur, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
-  cv.threshold(blur, bin, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+  cv.threshold(blur, bin, thresholdValue, 255, cv.THRESH_BINARY);
   blur.delete();
   return bin;
 }
 
-function preprocessBinaryInv(cv: any, gray: any) {
+function preprocessBinaryInvFixed(cv: any, gray: any, thresholdValue: number) {
   const blur = new cv.Mat();
   const bin = new cv.Mat();
   cv.GaussianBlur(gray, blur, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
-  cv.threshold(blur, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+  cv.threshold(blur, bin, thresholdValue, 255, cv.THRESH_BINARY_INV);
   blur.delete();
   return bin;
 }
@@ -135,16 +152,28 @@ function preprocessEdge(cv: any, gray: any) {
   return edge;
 }
 
-function getModeThreshold(mode: "LABEL" | "LOGO" | "TEXT", sensitivity: number) {
-  const s = Math.max(0, Math.min(100, sensitivity));
-  if (mode === "LABEL") return 0.64 - s * 0.0015;
-  if (mode === "LOGO") return 0.60 - s * 0.0014;
-  return 0.54 - s * 0.0012;
+function preprocessEdgeFromAdjusted(
+  cv: any,
+  gray: any,
+  alpha: number,
+  beta: number
+) {
+  const adjusted = adjustGray(cv, gray, alpha, beta);
+  const edge = preprocessEdge(cv, adjusted);
+  adjusted.delete();
+  return edge;
 }
 
-function getModeScales(mode: "LABEL" | "LOGO" | "TEXT") {
+function getModeThreshold(mode: DetectMode, sensitivity: number) {
+  const s = Math.max(0, Math.min(100, sensitivity));
+  if (mode === "LABEL") return 0.63 - s * 0.00135;
+  if (mode === "LOGO") return 0.59 - s * 0.0013;
+  return 0.52 - s * 0.0011;
+}
+
+function getModeScales(mode: DetectMode) {
   if (mode === "LABEL") return [0.72, 0.86, 1.0, 1.14, 1.28];
-  if (mode === "LOGO") return [0.8, 0.92, 1.0, 1.08, 1.2];
+  if (mode === "LOGO") return [0.82, 0.92, 1.0, 1.08, 1.18];
   return [0.7, 0.85, 1.0, 1.15, 1.3];
 }
 
@@ -155,18 +184,18 @@ function isBoxReasonable(
   h: number,
   sceneWidth: number,
   sceneHeight: number,
-  mode: "LABEL" | "LOGO" | "TEXT"
+  mode: DetectMode
 ) {
   if (w < 8 || h < 8) return false;
   if (w > sceneWidth * 0.85 || h > sceneHeight * 0.55) return false;
 
   const aspect = w / Math.max(1, h);
   if (mode === "LABEL") {
-    if (aspect > 8.5 || aspect < 0.5) return false;
+    if (aspect > 9 || aspect < 0.45) return false;
   } else if (mode === "LOGO") {
-    if (aspect > 4.5 || aspect < 0.35) return false;
+    if (aspect > 5 || aspect < 0.3) return false;
   } else {
-    if (aspect > 10 || aspect < 0.18) return false;
+    if (aspect > 10 || aspect < 0.16) return false;
   }
 
   if (x < 0 || y < 0) return false;
@@ -190,23 +219,32 @@ function centerPenalty(
   return dx * 0.18 + dy * 0.1;
 }
 
-function modeBonus(mode: "LABEL" | "LOGO" | "TEXT") {
+function modeBonus(mode: DetectMode) {
   if (mode === "LABEL") return 0.03;
   if (mode === "LOGO") return 0.01;
   return 0;
 }
 
-function matchBestFromMatSet(params: {
-  cv: any;
-  sceneMat: any;
-  sceneWidth: number;
-  sceneHeight: number;
-  sampleMat: any;
-  sampleId: string;
-  color: string;
-  sensitivity: number;
-  mode: "LABEL" | "LOGO" | "TEXT";
-}) {
+function prepBonus(prep: PreprocessName) {
+  if (prep === "GRAY") return 0.015;
+  if (prep === "EDGE_BASE") return 0.008;
+  return 0;
+}
+
+function matchBestFromMat(
+  params: {
+    cv: any;
+    sceneMat: any;
+    sceneWidth: number;
+    sceneHeight: number;
+    sampleMat: any;
+    sampleId: string;
+    color: string;
+    sensitivity: number;
+    mode: DetectMode;
+    prep: PreprocessName;
+  }
+): DetectionBox | null {
   const {
     cv,
     sceneMat,
@@ -217,6 +255,7 @@ function matchBestFromMatSet(params: {
     color,
     sensitivity,
     mode,
+    prep,
   } = params;
 
   const scales = getModeScales(mode);
@@ -243,8 +282,8 @@ function matchBestFromMatSet(params: {
 
       const mm = cv.minMaxLoc(result);
       const rawScore = mm.maxVal;
-
       const threshold = getModeThreshold(mode, sensitivity);
+
       if (rawScore < threshold) continue;
 
       if (
@@ -263,8 +302,16 @@ function matchBestFromMatSet(params: {
 
       const adjustedScore =
         rawScore -
-        centerPenalty(mm.maxLoc.x, mm.maxLoc.y, tpl.cols, tpl.rows, sceneWidth, sceneHeight) +
-        modeBonus(mode);
+        centerPenalty(
+          mm.maxLoc.x,
+          mm.maxLoc.y,
+          tpl.cols,
+          tpl.rows,
+          sceneWidth,
+          sceneHeight
+        ) +
+        modeBonus(mode) +
+        prepBonus(prep);
 
       const box: DetectionBox = {
         x: clamp01(mm.maxLoc.x / sceneWidth),
@@ -275,13 +322,14 @@ function matchBestFromMatSet(params: {
         sampleId,
         score: adjustedScore,
         mode,
+        prep,
       };
 
       if (!best || box.score > best.score) {
         best = box;
       }
     } catch (e) {
-      console.error("matchBestFromMatSet error:", e);
+      console.error("matchBestFromMat error:", e);
     } finally {
       try {
         tpl?.delete?.();
@@ -293,17 +341,19 @@ function matchBestFromMatSet(params: {
   return best;
 }
 
-function runModeMatch(params: {
-  cv: any;
-  sceneGray: any;
-  sceneWidth: number;
-  sceneHeight: number;
-  sampleGray: any;
-  sampleId: string;
-  color: string;
-  sensitivity: number;
-  mode: "LABEL" | "LOGO" | "TEXT";
-}) {
+function runModeMatch(
+  params: {
+    cv: any;
+    sceneGray: any;
+    sceneWidth: number;
+    sceneHeight: number;
+    sampleGray: any;
+    sampleId: string;
+    color: string;
+    sensitivity: number;
+    mode: DetectMode;
+  }
+): DetectionBox | null {
   const {
     cv,
     sceneGray,
@@ -316,79 +366,115 @@ function runModeMatch(params: {
     mode,
   } = params;
 
-  let sceneA: any = null;
-  let sampleA: any = null;
-  let sceneB: any = null;
-  let sampleB: any = null;
+  const candidates: DetectionBox[] = [];
+  const mats: any[] = [];
 
   try {
+    const pushCandidate = (
+      sceneMat: any,
+      sampleMat: any,
+      prep: PreprocessName
+    ) => {
+      mats.push(sceneMat, sampleMat);
+      const hit = matchBestFromMat({
+        cv,
+        sceneMat,
+        sceneWidth,
+        sceneHeight,
+        sampleMat,
+        sampleId,
+        color,
+        sensitivity,
+        mode,
+        prep,
+      });
+      if (hit) candidates.push(hit);
+    };
+
     if (mode === "LABEL") {
-      sceneA = preprocessBinary(cv, sceneGray);
-      sampleA = preprocessBinary(cv, sampleGray);
-      sceneB = preprocessEdge(cv, sceneGray);
-      sampleB = preprocessEdge(cv, sampleGray);
+      pushCandidate(sceneGray.clone(), sampleGray.clone(), "GRAY");
+      pushCandidate(
+        preprocessBinaryFixed(cv, sceneGray, 50),
+        preprocessBinaryFixed(cv, sampleGray, 50),
+        "BIN50"
+      );
+      pushCandidate(
+        preprocessBinaryFixed(cv, sceneGray, 80),
+        preprocessBinaryFixed(cv, sampleGray, 80),
+        "BIN80"
+      );
+      pushCandidate(
+        preprocessEdge(cv, sceneGray),
+        preprocessEdge(cv, sampleGray),
+        "EDGE_BASE"
+      );
     } else if (mode === "LOGO") {
-      sceneA = preprocessEdge(cv, sceneGray);
-      sampleA = preprocessEdge(cv, sampleGray);
-      sceneB = preprocessBinaryInv(cv, sceneGray);
-      sampleB = preprocessBinaryInv(cv, sampleGray);
+      pushCandidate(
+        preprocessEdgeFromAdjusted(cv, sceneGray, 1.0, -35),
+        preprocessEdgeFromAdjusted(cv, sampleGray, 1.0, -35),
+        "EDGE_DARK"
+      );
+      pushCandidate(
+        preprocessEdge(cv, sceneGray),
+        preprocessEdge(cv, sampleGray),
+        "EDGE_BASE"
+      );
+      pushCandidate(
+        preprocessEdgeFromAdjusted(cv, sceneGray, 1.0, 35),
+        preprocessEdgeFromAdjusted(cv, sampleGray, 1.0, 35),
+        "EDGE_BRIGHT"
+      );
+      pushCandidate(sceneGray.clone(), sampleGray.clone(), "GRAY");
     } else {
-      sceneA = preprocessBinaryInv(cv, sceneGray);
-      sampleA = preprocessBinaryInv(cv, sampleGray);
-      sceneB = preprocessBinary(cv, sceneGray);
-      sampleB = preprocessBinary(cv, sampleGray);
+      pushCandidate(sceneGray.clone(), sampleGray.clone(), "GRAY");
+      pushCandidate(
+        preprocessBinaryInvFixed(cv, sceneGray, 20),
+        preprocessBinaryInvFixed(cv, sampleGray, 20),
+        "BIN20"
+      );
+      pushCandidate(
+        preprocessBinaryInvFixed(cv, sceneGray, 50),
+        preprocessBinaryInvFixed(cv, sampleGray, 50),
+        "BIN50"
+      );
+      pushCandidate(
+        preprocessBinaryInvFixed(cv, sceneGray, 80),
+        preprocessBinaryInvFixed(cv, sampleGray, 80),
+        "BIN80"
+      );
+      pushCandidate(
+        preprocessEdgeFromAdjusted(cv, sceneGray, 1.0, 35),
+        preprocessEdgeFromAdjusted(cv, sampleGray, 1.0, 35),
+        "EDGE_BRIGHT"
+      );
     }
 
-    const candidateA = matchBestFromMatSet({
-      cv,
-      sceneMat: sceneA,
-      sceneWidth,
-      sceneHeight,
-      sampleMat: sampleA,
-      sampleId,
-      color,
-      sensitivity,
-      mode,
-    });
+    if (candidates.length === 0) return null;
 
-    const candidateB = matchBestFromMatSet({
-      cv,
-      sceneMat: sceneB,
-      sceneWidth,
-      sceneHeight,
-      sampleMat: sampleB,
-      sampleId,
-      color,
-      sensitivity,
-      mode,
-    });
-
-    if (candidateA && candidateB) {
-      return candidateA.score >= candidateB.score ? candidateA : candidateB;
-    }
-
-    return candidateA ?? candidateB ?? null;
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates[0];
   } finally {
-    try {
-      sceneA?.delete?.();
-      sampleA?.delete?.();
-      sceneB?.delete?.();
-      sampleB?.delete?.();
-    } catch {}
+    for (const m of mats) {
+      try {
+        m?.delete?.();
+      } catch {}
+    }
   }
 }
 
-function runAutoBestMatch(params: {
-  cv: any;
-  sceneGray: any;
-  sceneWidth: number;
-  sceneHeight: number;
-  sampleGray: any;
-  sampleId: string;
-  color: string;
-  sensitivity: number;
-}) {
-  const modes: Array<"LABEL" | "LOGO" | "TEXT"> = ["LABEL", "LOGO", "TEXT"];
+function runAutoBestMatch(
+  params: {
+    cv: any;
+    sceneGray: any;
+    sceneWidth: number;
+    sceneHeight: number;
+    sampleGray: any;
+    sampleId: string;
+    color: string;
+    sensitivity: number;
+  }
+): DetectionBox | null {
+  const modes: DetectMode[] = ["LABEL", "LOGO", "TEXT"];
   let best: DetectionBox | null = null;
 
   for (const mode of modes) {
@@ -655,6 +741,17 @@ export default function ReviewPage() {
     return map;
   }, [samples, detections]);
 
+  const detectedModes = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const s of samples) map[s.id] = "";
+    for (const d of detections) {
+      if (!map[d.sampleId]) {
+        map[d.sampleId] = d.mode ? `${d.mode}/${d.prep ?? "-"}` : "-";
+      }
+    }
+    return map;
+  }, [samples, detections]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -902,8 +999,13 @@ export default function ReviewPage() {
                     <div className={`w-10 h-10 rounded-lg border shrink-0 ${sample.color}`} />
                   )}
 
-                  <div className="text-lg font-semibold truncate">
-                    {detectedCounts[sample.id] ?? 0}
+                  <div className="min-w-0 flex flex-col items-start">
+                    <div className="text-lg font-semibold truncate">
+                      {detectedCounts[sample.id] ?? 0}
+                    </div>
+                    <div className="text-[10px] leading-none text-zinc-400 mt-1">
+                      {detectedModes[sample.id] || "-"}
+                    </div>
                   </div>
                 </button>
 
