@@ -10,16 +10,12 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "v2026-04-05-09";
+const REVIEW_VERSION = "v2026-04-06-01";
 
 const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
 const MISSING_KEY = "inspection:missingOn";
 const SAMPLES_KEY = "inspection:samples";
-const SAMPLE_MODE_KEY = "inspection:sampleModes";
-
-const MAX_LOCAL_PEAKS_PER_PREP = 10;
-const MAX_FINAL_CANDIDATES_PER_SAMPLE = 8;
 
 type SampleItem = {
   id: string;
@@ -28,10 +24,6 @@ type SampleItem = {
   thumbUrl?: string;
   aspectRatio?: number;
 };
-
-type DetectMode = "LABEL";
-type PreprocessName = "BIN20" | "BIN50" | "BIN80";
-type UserSelectMode = "AUTO" | "BIN20" | "BIN50" | "BIN80";
 
 type DetectionBox = {
   x: number;
@@ -42,8 +34,8 @@ type DetectionBox = {
   sampleId: string;
   score: number;
   rawScore?: number;
-  mode?: DetectMode;
-  prep?: PreprocessName;
+  mode?: string;
+  prep?: string;
 };
 
 const DEFAULT_SAMPLES: SampleItem[] = [
@@ -77,6 +69,89 @@ function clamp01(v: number) {
 
 function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v));
+}
+
+function distance2D(a: { x: number; y: number }, b: { x: number; y: number }) {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return Math.hypot(dx, dy);
+}
+
+function clampBox(box: DetectionBox): DetectionBox {
+  const x = clamp01(box.x);
+  const y = clamp01(box.y);
+  const w = clamp01(box.w);
+  const h = clamp01(box.h);
+
+  return {
+    ...box,
+    x,
+    y,
+    w: Math.min(w, 1 - x),
+    h: Math.min(h, 1 - y),
+  };
+}
+
+function dedupeBoxesByCenter(boxes: DetectionBox[], centerDistRatio = 0.08) {
+  const sorted = [...boxes].sort((a, b) => b.score - a.score);
+  const kept: DetectionBox[] = [];
+
+  for (const box of sorted) {
+    const cx = box.x + box.w / 2;
+    const cy = box.y + box.h / 2;
+
+    const duplicated = kept.some((k) => {
+      const kx = k.x + k.w / 2;
+      const ky = k.y + k.h / 2;
+      return distance2D({ x: cx, y: cy }, { x: kx, y: ky }) < centerDistRatio;
+    });
+
+    if (!duplicated) kept.push(box);
+  }
+
+  return kept;
+}
+
+function clusterPredictedCenters(
+  items: Array<{
+    cx: number;
+    cy: number;
+    scale: number;
+    score: number;
+  }>,
+  mergeDistPx: number
+) {
+  const clusters: Array<{
+    items: Array<{
+      cx: number;
+      cy: number;
+      scale: number;
+      score: number;
+    }>;
+  }> = [];
+
+  for (const item of items) {
+    let found = false;
+
+    for (const cluster of clusters) {
+      const avgCx =
+        cluster.items.reduce((s, v) => s + v.cx, 0) / cluster.items.length;
+      const avgCy =
+        cluster.items.reduce((s, v) => s + v.cy, 0) / cluster.items.length;
+
+      if (distance2D({ x: item.cx, y: item.cy }, { x: avgCx, y: avgCy }) <= mergeDistPx) {
+        cluster.items.push(item);
+        found = true;
+        break;
+      }
+    }
+
+    if (!found) {
+      clusters.push({ items: [item] });
+    }
+  }
+
+  return clusters;
 }
 
 async function imageSrcToGrayMat(
@@ -114,344 +189,16 @@ async function imageSrcToGrayMat(
   }
 }
 
-function scaleMat(cv: any, src: any, scale: number) {
-  const dst = new cv.Mat();
-  const w = Math.max(1, Math.round(src.cols * scale));
-  const h = Math.max(1, Math.round(src.rows * scale));
-  cv.resize(src, dst, new cv.Size(w, h), 0, 0, cv.INTER_AREA);
-  return dst;
-}
-
-function preprocessBinaryFixed(cv: any, gray: any, thresholdValue: number) {
-  const blur = new cv.Mat();
-  const bin = new cv.Mat();
-  cv.GaussianBlur(gray, blur, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
-  cv.threshold(blur, bin, thresholdValue, 255, cv.THRESH_BINARY);
-  blur.delete();
-  return bin;
-}
-
-function getThresholdBase(sensitivity: number) {
-  const s = clamp(sensitivity, 0, 100);
-  return 0.63 - s * 0.00135;
-}
-
-function getScales() {
-  return [0.72, 0.86, 1.0, 1.14, 1.28];
-}
-
-function isBoxReasonable(
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  sceneWidth: number,
-  sceneHeight: number
-) {
-  if (w < 8 || h < 8) return false;
-  if (w > sceneWidth * 0.9 || h > sceneHeight * 0.6) return false;
-
-  const aspect = w / Math.max(1, h);
-  if (aspect > 9 || aspect < 0.45) return false;
-
-  if (x < 0 || y < 0) return false;
-  if (x + w > sceneWidth || y + h > sceneHeight) return false;
-
-  return true;
-}
-
-function centerPenalty(
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  sceneWidth: number,
-  sceneHeight: number
-) {
-  const cx = x + w / 2;
-  const cy = y + h / 2;
-  const dx = Math.abs(cx - sceneWidth / 2) / sceneWidth;
-  const dy = Math.abs(cy - sceneHeight / 2) / sceneHeight;
-  return dx * 0.18 + dy * 0.1;
-}
-
-function borderPenalty(
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  sceneWidth: number,
-  sceneHeight: number
-) {
-  const left = x / sceneWidth;
-  const top = y / sceneHeight;
-  const right = (sceneWidth - (x + w)) / sceneWidth;
-  const bottom = (sceneHeight - (y + h)) / sceneHeight;
-
-  const minMargin = Math.min(left, top, right, bottom);
-
-  if (minMargin < 0.01) return 0.12;
-  if (minMargin < 0.02) return 0.08;
-  if (minMargin < 0.04) return 0.04;
-  return 0;
-}
-
-function aspectRatioPenalty(
-  candidateW: number,
-  candidateH: number,
-  sampleAspectRatio: number | undefined
-) {
-  if (!sampleAspectRatio || sampleAspectRatio <= 0) return 0;
-
-  const candidateAspect = candidateW / Math.max(1, candidateH);
-  const diff = Math.abs(Math.log(candidateAspect / sampleAspectRatio));
-  return diff * 0.28;
-}
-
-function extremeThinPenalty(
-  candidateW: number,
-  candidateH: number,
-  sampleAspectRatio: number | undefined
-) {
-  const aspect = candidateW / Math.max(1, candidateH);
-  if (!sampleAspectRatio || sampleAspectRatio <= 0) return 0;
-
-  if (aspect > sampleAspectRatio * 1.9) return 0.08;
-  if (aspect < sampleAspectRatio * 0.45) return 0.08;
-  return 0;
-}
-
-function sizeSimilarityPenalty(
-  candidateW: number,
-  candidateH: number,
-  baseSampleW: number,
-  baseSampleH: number
-) {
-  const candidateArea = candidateW * candidateH;
-  const baseArea = Math.max(1, baseSampleW * baseSampleH);
-  const ratio = candidateArea / baseArea;
-  const diff = Math.abs(Math.log(ratio));
-  return diff * 0.06;
-}
-
-function prepBonus(prep: PreprocessName) {
-  if (prep === "BIN50") return 0.01;
-  return 0;
-}
-
-function iou(a: DetectionBox, b: DetectionBox) {
-  const ax1 = a.x;
-  const ay1 = a.y;
-  const ax2 = a.x + a.w;
-  const ay2 = a.y + a.h;
-
-  const bx1 = b.x;
-  const by1 = b.y;
-  const bx2 = b.x + b.w;
-  const by2 = b.y + b.h;
-
-  const ix1 = Math.max(ax1, bx1);
-  const iy1 = Math.max(ay1, by1);
-  const ix2 = Math.min(ax2, bx2);
-  const iy2 = Math.min(ay2, by2);
-
-  const iw = Math.max(0, ix2 - ix1);
-  const ih = Math.max(0, iy2 - iy1);
-  const inter = iw * ih;
-
-  const areaA = a.w * a.h;
-  const areaB = b.w * b.h;
-  const union = areaA + areaB - inter;
-
-  if (union <= 0) return 0;
-  return inter / union;
-}
-
-function isNearDuplicate(a: DetectionBox, b: DetectionBox) {
-  const iouValue = iou(a, b);
-  if (iouValue > 0.28) return true;
-
-  const acx = a.x + a.w / 2;
-  const acy = a.y + a.h / 2;
-  const bcx = b.x + b.w / 2;
-  const bcy = b.y + b.h / 2;
-
-  const dx = Math.abs(acx - bcx);
-  const dy = Math.abs(acy - bcy);
-
-  const minW = Math.min(a.w, b.w);
-  const minH = Math.min(a.h, b.h);
-
-  return dx < minW * 0.45 && dy < minH * 0.45;
-}
-
-function dedupeCandidates(
-  candidates: DetectionBox[],
-  maxCount: number
-): DetectionBox[] {
-  const sorted = [...candidates].sort((a, b) => b.score - a.score);
-  const kept: DetectionBox[] = [];
-
-  for (const c of sorted) {
-    const duplicate = kept.some((k) => isNearDuplicate(k, c));
-    if (!duplicate) kept.push(c);
-    if (kept.length >= maxCount) break;
-  }
-
-  return kept;
-}
-
-function matchCandidatesFromMat(params: {
-  cv: any;
-  sceneMat: any;
-  sceneWidth: number;
-  sceneHeight: number;
-  sampleMat: any;
-  sampleId: string;
-  color: string;
-  sensitivity: number;
-  prep: PreprocessName;
-  sampleAspectRatio?: number;
-}) {
-  const {
-    cv,
-    sceneMat,
-    sceneWidth,
-    sceneHeight,
-    sampleMat,
-    sampleId,
-    color,
-    sensitivity,
-    prep,
-    sampleAspectRatio,
-  } = params;
-
-  const scales = getScales();
-  const candidates: DetectionBox[] = [];
-  const threshold = getThresholdBase(sensitivity);
-
-  for (const scale of scales) {
-    let tpl: any = null;
-    let result: any = null;
-
-    try {
-      tpl = scale === 1 ? sampleMat.clone() : scaleMat(cv, sampleMat, scale);
-
-      if (
-        tpl.cols < 8 ||
-        tpl.rows < 8 ||
-        tpl.cols >= sceneMat.cols ||
-        tpl.rows >= sceneMat.rows
-      ) {
-        continue;
-      }
-
-      result = new cv.Mat();
-      cv.matchTemplate(sceneMat, tpl, result, cv.TM_CCOEFF_NORMED);
-
-      for (let i = 0; i < MAX_LOCAL_PEAKS_PER_PREP; i++) {
-        const mm = cv.minMaxLoc(result);
-        const rawScore = mm.maxVal;
-
-        if (rawScore < threshold) break;
-
-        if (
-          isBoxReasonable(
-            mm.maxLoc.x,
-            mm.maxLoc.y,
-            tpl.cols,
-            tpl.rows,
-            sceneWidth,
-            sceneHeight
-          )
-        ) {
-          const adjustedScore =
-            rawScore -
-            centerPenalty(
-              mm.maxLoc.x,
-              mm.maxLoc.y,
-              tpl.cols,
-              tpl.rows,
-              sceneWidth,
-              sceneHeight
-            ) -
-            borderPenalty(
-              mm.maxLoc.x,
-              mm.maxLoc.y,
-              tpl.cols,
-              tpl.rows,
-              sceneWidth,
-              sceneHeight
-            ) -
-            aspectRatioPenalty(
-              tpl.cols,
-              tpl.rows,
-              sampleAspectRatio
-            ) -
-            extremeThinPenalty(
-              tpl.cols,
-              tpl.rows,
-              sampleAspectRatio
-            ) -
-            sizeSimilarityPenalty(
-              tpl.cols,
-              tpl.rows,
-              sampleMat.cols,
-              sampleMat.rows
-            ) +
-            prepBonus(prep);
-
-          candidates.push({
-            x: clamp01(mm.maxLoc.x / sceneWidth),
-            y: clamp01(mm.maxLoc.y / sceneHeight),
-            w: clamp01(tpl.cols / sceneWidth),
-            h: clamp01(tpl.rows / sceneHeight),
-            color,
-            sampleId,
-            score: adjustedScore,
-            rawScore,
-            mode: "LABEL",
-            prep,
-          });
-        }
-
-        const suppressX = clamp(mm.maxLoc.x - Math.round(tpl.cols * 0.4), 0, result.cols - 1);
-        const suppressY = clamp(mm.maxLoc.y - Math.round(tpl.rows * 0.4), 0, result.rows - 1);
-        const suppressW = clamp(Math.round(tpl.cols * 0.8), 1, result.cols - suppressX);
-        const suppressH = clamp(Math.round(tpl.rows * 0.8), 1, result.rows - suppressY);
-
-        if (suppressW > 0 && suppressH > 0) {
-          const roi = result.roi(new cv.Rect(suppressX, suppressY, suppressW, suppressH));
-          roi.setTo(new cv.Scalar(-1));
-          roi.delete();
-        } else {
-          break;
-        }
-      }
-    } catch (e) {
-      console.error("matchCandidatesFromMat error:", e);
-    } finally {
-      try {
-        tpl?.delete?.();
-        result?.delete?.();
-      } catch {}
-    }
-  }
-
-  return candidates;
-}
-
-function runLabelCandidates(params: {
+async function runOrbMultiInstanceMatch(params: {
   cv: any;
   sceneGray: any;
   sceneWidth: number;
   sceneHeight: number;
   sampleGray: any;
+  sampleWidth: number;
+  sampleHeight: number;
   sampleId: string;
   color: string;
-  sensitivity: number;
-  sampleAspectRatio?: number;
-  forcedPrep?: UserSelectMode;
 }) {
   const {
     cv,
@@ -459,57 +206,183 @@ function runLabelCandidates(params: {
     sceneWidth,
     sceneHeight,
     sampleGray,
+    sampleWidth,
+    sampleHeight,
     sampleId,
     color,
-    sensitivity,
-    sampleAspectRatio,
-    forcedPrep = "AUTO",
   } = params;
 
-  const allCandidates: DetectionBox[] = [];
-  const mats: any[] = [];
-
-  const usePreps: PreprocessName[] =
-    forcedPrep === "AUTO"
-      ? ["BIN20", "BIN50", "BIN80"]
-      : [forcedPrep];
+  let orb: any = null;
+  let kp1: any = null;
+  let kp2: any = null;
+  let des1: any = null;
+  let des2: any = null;
+  let matcher: any = null;
+  let emptyMask1: any = null;
+  let emptyMask2: any = null;
 
   try {
-    const buildPrep = (prep: PreprocessName, gray: any) => {
-      if (prep === "BIN20") return preprocessBinaryFixed(cv, gray, 20);
-      if (prep === "BIN50") return preprocessBinaryFixed(cv, gray, 50);
-      return preprocessBinaryFixed(cv, gray, 80);
-    };
+    if (!cv.ORB_create) {
+      console.error("ORB_create is not available in this OpenCV.js build.");
+      return [];
+    }
 
-    for (const prep of usePreps) {
-      const sceneMat = buildPrep(prep, sceneGray);
-      const sampleMat = buildPrep(prep, sampleGray);
-      mats.push(sceneMat, sampleMat);
+    orb = cv.ORB_create(500);
 
-      const hits = matchCandidatesFromMat({
-        cv,
-        sceneMat,
-        sceneWidth,
-        sceneHeight,
-        sampleMat,
-        sampleId,
-        color,
-        sensitivity,
-        prep,
-        sampleAspectRatio,
+    kp1 = new cv.KeyPointVector();
+    kp2 = new cv.KeyPointVector();
+    des1 = new cv.Mat();
+    des2 = new cv.Mat();
+    emptyMask1 = new cv.Mat();
+    emptyMask2 = new cv.Mat();
+
+    orb.detectAndCompute(sampleGray, emptyMask1, kp1, des1);
+    orb.detectAndCompute(sceneGray, emptyMask2, kp2, des2);
+
+    if (
+      !des1 ||
+      !des2 ||
+      des1.empty() ||
+      des2.empty() ||
+      kp1.size() < 6 ||
+      kp2.size() < 20
+    ) {
+      return [];
+    }
+
+    matcher = new cv.BFMatcher(cv.NORM_HAMMING, false);
+    const knnMatches = new cv.DMatchVectorVector();
+    matcher.knnMatch(des1, des2, knnMatches, 2);
+
+    const goodMatches: Array<{
+      queryIdx: number;
+      trainIdx: number;
+      distance: number;
+    }> = [];
+
+    for (let i = 0; i < knnMatches.size(); i++) {
+      const mv = knnMatches.get(i);
+      if (mv.size() < 2) {
+        mv.delete();
+        continue;
+      }
+
+      const d0 = mv.get(0);
+      const d1 = mv.get(1);
+
+      if (d0.distance < 0.78 * d1.distance) {
+        goodMatches.push({
+          queryIdx: d0.queryIdx,
+          trainIdx: d0.trainIdx,
+          distance: d0.distance,
+        });
+      }
+
+      d0.delete();
+      d1.delete();
+      mv.delete();
+    }
+
+    knnMatches.delete();
+
+    if (goodMatches.length < 4) return [];
+
+    const sampleCx = sampleWidth / 2;
+    const sampleCy = sampleHeight / 2;
+
+    const predictedCenters: Array<{
+      cx: number;
+      cy: number;
+      scale: number;
+      score: number;
+    }> = [];
+
+    for (const gm of goodMatches) {
+      const q = kp1.get(gm.queryIdx);
+      const t = kp2.get(gm.trainIdx);
+
+      const qx = q.pt.x;
+      const qy = q.pt.y;
+      const tx = t.pt.x;
+      const ty = t.pt.y;
+
+      const qSize = Math.max(q.size || 1, 1);
+      const tSize = Math.max(t.size || 1, 1);
+      const scale = clamp(tSize / qSize, 0.5, 2.0);
+
+      const predCx = tx - (qx - sampleCx) * scale;
+      const predCy = ty - (qy - sampleCy) * scale;
+
+      predictedCenters.push({
+        cx: predCx,
+        cy: predCy,
+        scale,
+        score: 1 / (1 + gm.distance),
       });
 
-      allCandidates.push(...hits);
+      q.delete();
+      t.delete();
     }
 
-    allCandidates.sort((a, b) => b.score - a.score);
-    return dedupeCandidates(allCandidates, MAX_FINAL_CANDIDATES_PER_SAMPLE);
-  } finally {
-    for (const m of mats) {
-      try {
-        m?.delete?.();
-      } catch {}
+    const mergeDistPx = Math.max(sampleWidth, sampleHeight) * 0.35;
+    const clusters = clusterPredictedCenters(predictedCenters, mergeDistPx);
+
+    const boxes: DetectionBox[] = [];
+
+    for (const cluster of clusters) {
+      if (cluster.items.length < 4) continue;
+
+      const cx =
+        cluster.items.reduce((s, v) => s + v.cx, 0) / cluster.items.length;
+      const cy =
+        cluster.items.reduce((s, v) => s + v.cy, 0) / cluster.items.length;
+
+      const scales = cluster.items.map((v) => v.scale).sort((a, b) => a - b);
+      const mid = Math.floor(scales.length / 2);
+      const medianScale =
+        scales.length % 2 === 0
+          ? (scales[mid - 1] + scales[mid]) / 2
+          : scales[mid];
+
+      const boxW = sampleWidth * medianScale;
+      const boxH = sampleHeight * medianScale;
+
+      const avgScore =
+        cluster.items.reduce((s, v) => s + v.score, 0) / cluster.items.length;
+
+      const box = clampBox({
+        x: (cx - boxW / 2) / sceneWidth,
+        y: (cy - boxH / 2) / sceneHeight,
+        w: boxW / sceneWidth,
+        h: boxH / sceneHeight,
+        color,
+        sampleId,
+        score: avgScore + cluster.items.length * 0.02,
+        rawScore: avgScore,
+        mode: "ORB",
+        prep: "KNN",
+      });
+
+      if (box.w > 0.03 && box.h > 0.03) {
+        boxes.push(box);
+      }
     }
+
+    return dedupeBoxesByCenter(boxes, 0.06).sort((a, b) => b.score - a.score);
+  } catch (e) {
+    console.error("runOrbMultiInstanceMatch error:", e);
+    return [];
+  } finally {
+    try {
+      orb?.delete?.();
+      kp1?.delete?.();
+      kp2?.delete?.();
+      des1?.delete?.();
+      des2?.delete?.();
+      matcher?.delete?.();
+      emptyMask1?.delete?.();
+      emptyMask2?.delete?.();
+    } catch {}
   }
 }
 
@@ -524,7 +397,6 @@ export default function ReviewPage() {
   const [missingOn, setMissingOn] = useState(true);
   const [showDeleteFor, setShowDeleteFor] = useState<string | null>(null);
   const [samplesLoaded, setSamplesLoaded] = useState(false);
-  const [sampleModes, setSampleModes] = useState<Record<string, UserSelectMode>>({});
 
   const [imageRect, setImageRect] = useState({
     left: 0,
@@ -581,16 +453,6 @@ export default function ReviewPage() {
       } else {
         setSamples(DEFAULT_SAMPLES);
       }
-
-      const savedModes = localStorage.getItem(SAMPLE_MODE_KEY);
-      if (savedModes) {
-        try {
-          const parsed = JSON.parse(savedModes);
-          if (parsed && typeof parsed === "object") {
-            setSampleModes(parsed);
-          }
-        } catch {}
-      }
     } finally {
       setSamplesLoaded(true);
     }
@@ -604,15 +466,6 @@ export default function ReviewPage() {
       console.error("samples save error:", e);
     }
   }, [samples, samplesLoaded]);
-
-  useEffect(() => {
-    if (!samplesLoaded) return;
-    try {
-      localStorage.setItem(SAMPLE_MODE_KEY, JSON.stringify(sampleModes));
-    } catch (e) {
-      console.error("sample mode save error:", e);
-    }
-  }, [sampleModes, samplesLoaded]);
 
   useEffect(() => {
     const stopDragging = () => setIsSliderDragging(false);
@@ -777,23 +630,6 @@ export default function ReviewPage() {
     localStorage.setItem(MISSING_KEY, String(next));
   };
 
-  const cycleSampleMode = (sampleId: string) => {
-    const current = sampleModes[sampleId] ?? "AUTO";
-    const next: UserSelectMode =
-      current === "AUTO"
-        ? "BIN20"
-        : current === "BIN20"
-          ? "BIN50"
-          : current === "BIN50"
-            ? "BIN80"
-            : "AUTO";
-
-    setSampleModes((prev) => ({
-      ...prev,
-      [sampleId]: next,
-    }));
-  };
-
   const canAdd = useMemo(() => samples.length < MAX_SAMPLES, [samples.length]);
   const visibleSamples = useMemo(() => samples.filter((s) => !!s.thumbUrl), [samples]);
 
@@ -811,7 +647,7 @@ export default function ReviewPage() {
     const sorted = [...detections].sort((a, b) => b.score - a.score);
     for (const d of sorted) {
       if (!map[d.sampleId]) {
-        map[d.sampleId] = d.prep ? `LABEL/${d.prep}` : "-";
+        map[d.sampleId] = d.mode ? `${d.mode}/${d.prep ?? "-"}` : "-";
       }
     }
     return map;
@@ -844,7 +680,7 @@ export default function ReviewPage() {
       let sceneGray: any = null;
 
       try {
-        const sceneResult = await imageSrcToGrayMat(cv, capturedImage, 900);
+        const sceneResult = await imageSrcToGrayMat(cv, capturedImage, 1200);
         if (!sceneResult) {
           setDetections([]);
           return;
@@ -865,17 +701,16 @@ export default function ReviewPage() {
 
           const sampleGray = sampleResult.gray;
 
-          const boxes = runLabelCandidates({
+          const boxes = await runOrbMultiInstanceMatch({
             cv,
             sceneGray,
             sceneWidth,
             sceneHeight,
             sampleGray,
+            sampleWidth: sampleResult.width,
+            sampleHeight: sampleResult.height,
             sampleId: sample.id,
             color: colorFromSample(sample),
-            sensitivity: appliedSensitivity,
-            sampleAspectRatio: sample.aspectRatio,
-            forcedPrep: sampleModes[sample.id] ?? "AUTO",
           });
 
           sampleGray.delete();
@@ -887,7 +722,7 @@ export default function ReviewPage() {
 
         if (!cancelled) setDetections(nextDetections);
       } catch (e) {
-        console.error("Template detection error:", e);
+        console.error("ORB detection error:", e);
         if (!cancelled) setDetections([]);
       } finally {
         try {
@@ -905,7 +740,7 @@ export default function ReviewPage() {
     return () => {
       cancelled = true;
     };
-  }, [cvReady, capturedImage, visibleSamples, appliedSensitivity, sampleModes]);
+  }, [cvReady, capturedImage, visibleSamples]);
 
   const overlayMuted =
     isAdjustingSensitivity || prepareDetecting || detecting || !cvReady;
@@ -1039,7 +874,6 @@ export default function ReviewPage() {
             const ratio =
               sample.aspectRatio && sample.aspectRatio > 0 ? sample.aspectRatio : 1;
             const thumbW = Math.max(40, Math.min(72, Math.round(40 * ratio)));
-            const selectedMode = sampleModes[sample.id] ?? "AUTO";
 
             return (
               <div key={sample.id} className="relative overflow-visible isolate">
@@ -1048,7 +882,7 @@ export default function ReviewPage() {
                   onClick={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
-                    cycleSampleMode(sample.id);
+                    setShowDeleteFor(showDeleteFor === sample.id ? null : sample.id);
                   }}
                   className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-2 py-2 flex items-center gap-2 min-w-0"
                 >
@@ -1072,7 +906,7 @@ export default function ReviewPage() {
                       {detectedCounts[sample.id] ?? 0}
                     </div>
                     <div className="text-[10px] leading-none text-zinc-400 mt-1">
-                      {selectedMode}
+                      ORB
                     </div>
                     <div className="text-[10px] leading-none text-zinc-500 mt-1">
                       {detectedModes[sample.id] || "-"}
@@ -1080,22 +914,9 @@ export default function ReviewPage() {
                   </div>
                 </button>
 
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setShowDeleteFor(showDeleteFor === sample.id ? null : sample.id);
-                  }}
-                  className="absolute top-1 right-1 z-40 w-7 h-7 rounded-full bg-black/60 border border-white/10 text-white"
-                  aria-label="削除メニュー"
-                >
-                  …
-                </button>
-
                 {showDeleteFor === sample.id && (
                   <div
-                    className="absolute top-10 right-1 z-50"
+                    className="absolute top-1 right-1 z-50"
                     onMouseDown={(e) => e.stopPropagation()}
                     onTouchStart={(e) => e.stopPropagation()}
                     onPointerDown={(e) => e.stopPropagation()}
