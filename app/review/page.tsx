@@ -10,12 +10,15 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "v2026-04-05-07";
+const REVIEW_VERSION = "v2026-04-05-08";
 
 const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
 const MISSING_KEY = "inspection:missingOn";
 const SAMPLES_KEY = "inspection:samples";
+
+const MAX_LOCAL_PEAKS_PER_PREP = 10;
+const MAX_FINAL_CANDIDATES_PER_SAMPLE = 8;
 
 type SampleItem = {
   id: string;
@@ -43,6 +46,7 @@ type DetectionBox = {
   color: string;
   sampleId: string;
   score: number;
+  rawScore?: number;
   mode?: DetectMode;
   prep?: PreprocessName;
 };
@@ -191,7 +195,7 @@ function isBoxReasonable(
   mode: DetectMode
 ) {
   if (w < 8 || h < 8) return false;
-  if (w > sceneWidth * 0.85 || h > sceneHeight * 0.55) return false;
+  if (w > sceneWidth * 0.9 || h > sceneHeight * 0.6) return false;
 
   const aspect = w / Math.max(1, h);
 
@@ -224,6 +228,27 @@ function centerPenalty(
   return dx * 0.18 + dy * 0.1;
 }
 
+function borderPenalty(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  sceneWidth: number,
+  sceneHeight: number
+) {
+  const left = x / sceneWidth;
+  const top = y / sceneHeight;
+  const right = (sceneWidth - (x + w)) / sceneWidth;
+  const bottom = (sceneHeight - (y + h)) / sceneHeight;
+
+  const minMargin = Math.min(left, top, right, bottom);
+
+  if (minMargin < 0.01) return 0.12;
+  if (minMargin < 0.02) return 0.08;
+  if (minMargin < 0.04) return 0.04;
+  return 0;
+}
+
 function modeBonus(mode: DetectMode) {
   if (mode === "LABEL") return 0.03;
   if (mode === "LOGO") return 0.01;
@@ -249,7 +274,7 @@ function aspectRatioPenalty(
 
   let weight = 0.22;
   if (mode === "LABEL") weight = 0.28;
-  if (mode === "TEXT") weight = 0.32;
+  if (mode === "TEXT") weight = 0.34;
   if (mode === "LOGO") weight = 0.2;
 
   return diff * weight;
@@ -268,7 +293,84 @@ function extremeThinPenalty(
   return 0;
 }
 
-function matchBestFromMat(params: {
+function sizeSimilarityPenalty(
+  candidateW: number,
+  candidateH: number,
+  baseSampleW: number,
+  baseSampleH: number
+) {
+  const candidateArea = candidateW * candidateH;
+  const baseArea = Math.max(1, baseSampleW * baseSampleH);
+  const ratio = candidateArea / baseArea;
+  const diff = Math.abs(Math.log(ratio));
+  return diff * 0.06;
+}
+
+function iou(a: DetectionBox, b: DetectionBox) {
+  const ax1 = a.x;
+  const ay1 = a.y;
+  const ax2 = a.x + a.w;
+  const ay2 = a.y + a.h;
+
+  const bx1 = b.x;
+  const by1 = b.y;
+  const bx2 = b.x + b.w;
+  const by2 = b.y + b.h;
+
+  const ix1 = Math.max(ax1, bx1);
+  const iy1 = Math.max(ay1, by1);
+  const ix2 = Math.min(ax2, bx2);
+  const iy2 = Math.min(ay2, by2);
+
+  const iw = Math.max(0, ix2 - ix1);
+  const ih = Math.max(0, iy2 - iy1);
+  const inter = iw * ih;
+
+  const areaA = a.w * a.h;
+  const areaB = b.w * b.h;
+  const union = areaA + areaB - inter;
+
+  if (union <= 0) return 0;
+  return inter / union;
+}
+
+function isNearDuplicate(a: DetectionBox, b: DetectionBox) {
+  const iouValue = iou(a, b);
+  if (iouValue > 0.28) return true;
+
+  const acx = a.x + a.w / 2;
+  const acy = a.y + a.h / 2;
+  const bcx = b.x + b.w / 2;
+  const bcy = b.y + b.h / 2;
+
+  const dx = Math.abs(acx - bcx);
+  const dy = Math.abs(acy - bcy);
+
+  const minW = Math.min(a.w, b.w);
+  const minH = Math.min(a.h, b.h);
+
+  return dx < minW * 0.45 && dy < minH * 0.45;
+}
+
+function dedupeCandidates(
+  candidates: DetectionBox[],
+  maxCount: number
+): DetectionBox[] {
+  const sorted = [...candidates].sort((a, b) => b.score - a.score);
+  const kept: DetectionBox[] = [];
+
+  for (const c of sorted) {
+    const duplicate = kept.some((k) => isNearDuplicate(k, c));
+    if (!duplicate) {
+      kept.push(c);
+    }
+    if (kept.length >= maxCount) break;
+  }
+
+  return kept;
+}
+
+function matchCandidatesFromMat(params: {
   cv: any;
   sceneMat: any;
   sceneWidth: number;
@@ -296,7 +398,7 @@ function matchBestFromMat(params: {
   } = params;
 
   const scales = getModeScales(mode);
-  let best: DetectionBox | null = null;
+  const candidates: DetectionBox[] = [];
 
   for (const scale of scales) {
     let tpl: any = null;
@@ -317,71 +419,92 @@ function matchBestFromMat(params: {
       result = new cv.Mat();
       cv.matchTemplate(sceneMat, tpl, result, cv.TM_CCOEFF_NORMED);
 
-      const mm = cv.minMaxLoc(result);
-      const rawScore = mm.maxVal;
       const threshold = getModeThreshold(mode, sensitivity);
 
-      if (rawScore < threshold) continue;
+      for (let i = 0; i < MAX_LOCAL_PEAKS_PER_PREP; i++) {
+        const mm = cv.minMaxLoc(result);
+        const rawScore = mm.maxVal;
 
-      if (
-        !isBoxReasonable(
-          mm.maxLoc.x,
-          mm.maxLoc.y,
-          tpl.cols,
-          tpl.rows,
-          sceneWidth,
-          sceneHeight,
-          mode
-        )
-      ) {
-        continue;
-      }
+        if (rawScore < threshold) break;
 
-      const ratioPenalty = aspectRatioPenalty(
-        tpl.cols,
-        tpl.rows,
-        sampleAspectRatio,
-        mode
-      );
+        if (
+          isBoxReasonable(
+            mm.maxLoc.x,
+            mm.maxLoc.y,
+            tpl.cols,
+            tpl.rows,
+            sceneWidth,
+            sceneHeight,
+            mode
+          )
+        ) {
+          const adjustedScore =
+            rawScore -
+            centerPenalty(
+              mm.maxLoc.x,
+              mm.maxLoc.y,
+              tpl.cols,
+              tpl.rows,
+              sceneWidth,
+              sceneHeight
+            ) -
+            borderPenalty(
+              mm.maxLoc.x,
+              mm.maxLoc.y,
+              tpl.cols,
+              tpl.rows,
+              sceneWidth,
+              sceneHeight
+            ) -
+            aspectRatioPenalty(
+              tpl.cols,
+              tpl.rows,
+              sampleAspectRatio,
+              mode
+            ) -
+            extremeThinPenalty(
+              tpl.cols,
+              tpl.rows,
+              sampleAspectRatio
+            ) -
+            sizeSimilarityPenalty(
+              tpl.cols,
+              tpl.rows,
+              sampleMat.cols,
+              sampleMat.rows
+            ) +
+            modeBonus(mode) +
+            prepBonus(prep);
 
-      const thinPenalty = extremeThinPenalty(
-        tpl.cols,
-        tpl.rows,
-        sampleAspectRatio
-      );
+          candidates.push({
+            x: clamp01(mm.maxLoc.x / sceneWidth),
+            y: clamp01(mm.maxLoc.y / sceneHeight),
+            w: clamp01(tpl.cols / sceneWidth),
+            h: clamp01(tpl.rows / sceneHeight),
+            color,
+            sampleId,
+            score: adjustedScore,
+            rawScore,
+            mode,
+            prep,
+          });
+        }
 
-      const adjustedScore =
-        rawScore -
-        centerPenalty(
-          mm.maxLoc.x,
-          mm.maxLoc.y,
-          tpl.cols,
-          tpl.rows,
-          sceneWidth,
-          sceneHeight
-        ) -
-        ratioPenalty -
-        thinPenalty +
-        modeBonus(mode) +
-        prepBonus(prep);
+        const suppressX = clamp(mm.maxLoc.x - Math.round(tpl.cols * 0.4), 0, result.cols - 1);
+        const suppressY = clamp(mm.maxLoc.y - Math.round(tpl.rows * 0.4), 0, result.rows - 1);
+        const suppressW = clamp(Math.round(tpl.cols * 0.8), 1, result.cols - suppressX);
+        const suppressH = clamp(Math.round(tpl.rows * 0.8), 1, result.rows - suppressY);
 
-      const box: DetectionBox = {
-        x: clamp01(mm.maxLoc.x / sceneWidth),
-        y: clamp01(mm.maxLoc.y / sceneHeight),
-        w: clamp01(tpl.cols / sceneWidth),
-        h: clamp01(tpl.rows / sceneHeight),
-        color,
-        sampleId,
-        score: adjustedScore,
-        mode,
-        prep,
-      };
-
-      if (!best || box.score > best.score) {
-        best = box;
+        if (suppressW > 0 && suppressH > 0) {
+          const roi = result.roi(new cv.Rect(suppressX, suppressY, suppressW, suppressH));
+          roi.setTo(new cv.Scalar(-1));
+          roi.delete();
+        } else {
+          break;
+        }
       }
     } catch (e) {
-      console.error("matchBestFromMat error:", e);
+      console.error("matchCandidatesFromMat error:", e);
     } finally {
       try {
         tpl?.delete?.();
@@ -390,10 +513,10 @@ function matchBestFromMat(params: {
     }
   }
 
-  return best;
+  return candidates;
 }
 
-function runModeMatch(params: {
+function runModeCandidates(params: {
   cv: any;
   sceneGray: any;
   sceneWidth: number;
@@ -418,17 +541,17 @@ function runModeMatch(params: {
     sampleAspectRatio,
   } = params;
 
-  const candidates: DetectionBox[] = [];
+  const allCandidates: DetectionBox[] = [];
   const mats: any[] = [];
 
   try {
-    const pushCandidate = (
+    const pushCandidates = (
       sceneMat: any,
       sampleMat: any,
       prep: PreprocessName
     ) => {
       mats.push(sceneMat, sampleMat);
-      const hit = matchBestFromMat({
+      const hits = matchCandidatesFromMat({
         cv,
         sceneMat,
         sceneWidth,
@@ -441,71 +564,68 @@ function runModeMatch(params: {
         prep,
         sampleAspectRatio,
       });
-      if (hit) candidates.push(hit);
+      allCandidates.push(...hits);
     };
 
     if (mode === "LABEL") {
-      pushCandidate(sceneGray.clone(), sampleGray.clone(), "GRAY");
-      pushCandidate(
+      pushCandidates(sceneGray.clone(), sampleGray.clone(), "GRAY");
+      pushCandidates(
         preprocessBinaryFixed(cv, sceneGray, 50),
         preprocessBinaryFixed(cv, sampleGray, 50),
         "BIN50"
       );
-      pushCandidate(
+      pushCandidates(
         preprocessBinaryFixed(cv, sceneGray, 80),
         preprocessBinaryFixed(cv, sampleGray, 80),
         "BIN80"
       );
-      pushCandidate(
+      pushCandidates(
         preprocessEdge(cv, sceneGray),
         preprocessEdge(cv, sampleGray),
         "EDGE_BASE"
       );
     } else if (mode === "LOGO") {
-      pushCandidate(
+      pushCandidates(
         preprocessEdgeFromAdjusted(cv, sceneGray, 1.0, -35),
         preprocessEdgeFromAdjusted(cv, sampleGray, 1.0, -35),
         "EDGE_DARK"
       );
-      pushCandidate(
+      pushCandidates(
         preprocessEdge(cv, sceneGray),
         preprocessEdge(cv, sampleGray),
         "EDGE_BASE"
       );
-      pushCandidate(
+      pushCandidates(
         preprocessEdgeFromAdjusted(cv, sceneGray, 1.0, 35),
         preprocessEdgeFromAdjusted(cv, sampleGray, 1.0, 35),
         "EDGE_BRIGHT"
       );
-      pushCandidate(sceneGray.clone(), sampleGray.clone(), "GRAY");
+      pushCandidates(sceneGray.clone(), sampleGray.clone(), "GRAY");
     } else {
-      pushCandidate(sceneGray.clone(), sampleGray.clone(), "GRAY");
-      pushCandidate(
+      pushCandidates(sceneGray.clone(), sampleGray.clone(), "GRAY");
+      pushCandidates(
         preprocessBinaryInvFixed(cv, sceneGray, 20),
         preprocessBinaryInvFixed(cv, sampleGray, 20),
         "BIN20"
       );
-      pushCandidate(
+      pushCandidates(
         preprocessBinaryInvFixed(cv, sceneGray, 50),
         preprocessBinaryInvFixed(cv, sampleGray, 50),
         "BIN50"
       );
-      pushCandidate(
+      pushCandidates(
         preprocessBinaryInvFixed(cv, sceneGray, 80),
         preprocessBinaryInvFixed(cv, sampleGray, 80),
         "BIN80"
       );
-      pushCandidate(
+      pushCandidates(
         preprocessEdgeFromAdjusted(cv, sceneGray, 1.0, 35),
         preprocessEdgeFromAdjusted(cv, sampleGray, 1.0, 35),
         "EDGE_BRIGHT"
       );
     }
 
-    if (candidates.length === 0) return null;
-
-    candidates.sort((a, b) => b.score - a.score);
-    return candidates[0];
+    return dedupeCandidates(allCandidates, MAX_FINAL_CANDIDATES_PER_SAMPLE);
   } finally {
     for (const m of mats) {
       try {
@@ -527,16 +647,15 @@ function runAutoBestMatch(params: {
   sampleAspectRatio?: number;
 }) {
   const modes: DetectMode[] = ["LABEL", "LOGO", "TEXT"];
-  let best: DetectionBox | null = null;
+  let all: DetectionBox[] = [];
 
   for (const mode of modes) {
-    const candidate = runModeMatch({ ...params, mode });
-    if (candidate && (!best || candidate.score > best.score)) {
-      best = candidate;
-    }
+    const candidates = runModeCandidates({ ...params, mode });
+    all = all.concat(candidates);
   }
 
-  return best;
+  all.sort((a, b) => b.score - a.score);
+  return dedupeCandidates(all, MAX_FINAL_CANDIDATES_PER_SAMPLE);
 }
 
 export default function ReviewPage() {
@@ -796,7 +915,9 @@ export default function ReviewPage() {
   const detectedModes = useMemo(() => {
     const map: Record<string, string> = {};
     for (const s of samples) map[s.id] = "";
-    for (const d of detections) {
+
+    const sorted = [...detections].sort((a, b) => b.score - a.score);
+    for (const d of sorted) {
       if (!map[d.sampleId]) {
         map[d.sampleId] = d.mode ? `${d.mode}/${d.prep ?? "-"}` : "-";
       }
@@ -852,7 +973,7 @@ export default function ReviewPage() {
 
           const sampleGray = sampleResult.gray;
 
-          const box = runAutoBestMatch({
+          const boxes = runAutoBestMatch({
             cv,
             sceneGray,
             sceneWidth,
@@ -866,7 +987,7 @@ export default function ReviewPage() {
 
           sampleGray.delete();
 
-          if (box) nextDetections.push(box);
+          nextDetections.push(...boxes);
 
           await new Promise((resolve) => setTimeout(resolve, 0));
         }
@@ -985,7 +1106,7 @@ export default function ReviewPage() {
 
               {detections.map((box, index) => (
                 <div
-                  key={`${box.sampleId}-${index}`}
+                  key={`${box.sampleId}-${index}-${box.x}-${box.y}`}
                   className="absolute rounded-md border-[3px] transition-opacity"
                   style={{
                     left: imageRect.left + imageRect.width * box.x,
