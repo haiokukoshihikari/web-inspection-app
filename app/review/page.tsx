@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "v2026-04-06-03";
+const REVIEW_VERSION = "v2026-04-06-04";
 
 const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
@@ -34,6 +34,17 @@ type DebugViewMode =
   | "BIN80"
   | "EDGE";
 
+type MatchMethodMode = "CCOEFF" | "CCORR" | "SQDIFF";
+
+type MatchBox = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  score: number;
+  label: string;
+};
+
 const DEBUG_MODES: DebugViewMode[] = [
   "ORIGINAL",
   "GRAY",
@@ -43,6 +54,8 @@ const DEBUG_MODES: DebugViewMode[] = [
   "BIN80",
   "EDGE",
 ];
+
+const MATCH_METHODS: MatchMethodMode[] = ["CCOEFF", "CCORR", "SQDIFF"];
 
 const DEFAULT_SAMPLES: SampleItem[] = [
   { id: "1", count: 0, color: "border-sky-400 bg-sky-500/20", aspectRatio: 1 },
@@ -62,6 +75,10 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 
 function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v));
+}
+
+function clamp01(v: number) {
+  return clamp(v, 0, 1);
 }
 
 async function imageSrcToMat(
@@ -93,46 +110,35 @@ function matToDataUrl(cv: any, mat: any): string {
   return canvas.toDataURL("image/png");
 }
 
-function buildDebugImageFromSrcMat(
+function buildProcessedGrayMat(
   cv: any,
   srcMat: any,
   mode: DebugViewMode
-): string {
+): any {
   let gray: any = null;
   let work1: any = null;
   let work2: any = null;
-  let out: any = null;
 
   try {
-    if (mode === "ORIGINAL") {
-      return matToDataUrl(cv, srcMat);
-    }
-
     gray = new cv.Mat();
     cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY);
 
-    if (mode === "GRAY") {
-      out = new cv.Mat();
-      cv.cvtColor(gray, out, cv.COLOR_GRAY2RGBA);
-      return matToDataUrl(cv, out);
+    if (mode === "ORIGINAL" || mode === "GRAY") {
+      return gray.clone();
     }
 
     if (mode === "EQUALIZE") {
       work1 = new cv.Mat();
       cv.equalizeHist(gray, work1);
-      out = new cv.Mat();
-      cv.cvtColor(work1, out, cv.COLOR_GRAY2RGBA);
-      return matToDataUrl(cv, out);
+      return work1.clone();
     }
 
     if (mode === "CLAHE") {
       const clahe = new cv.CLAHE(2.0, new cv.Size(8, 8));
       work1 = new cv.Mat();
       clahe.apply(gray, work1);
-      out = new cv.Mat();
-      cv.cvtColor(work1, out, cv.COLOR_GRAY2RGBA);
       clahe.delete();
-      return matToDataUrl(cv, out);
+      return work1.clone();
     }
 
     if (mode === "BIN50" || mode === "BIN80") {
@@ -141,9 +147,7 @@ function buildDebugImageFromSrcMat(
       cv.GaussianBlur(gray, work1, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
       work2 = new cv.Mat();
       cv.threshold(work1, work2, thresholdValue, 255, cv.THRESH_BINARY);
-      out = new cv.Mat();
-      cv.cvtColor(work2, out, cv.COLOR_GRAY2RGBA);
-      return matToDataUrl(cv, out);
+      return work2.clone();
     }
 
     if (mode === "EDGE") {
@@ -151,18 +155,114 @@ function buildDebugImageFromSrcMat(
       cv.GaussianBlur(gray, work1, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
       work2 = new cv.Mat();
       cv.Canny(work1, work2, 60, 180);
-      out = new cv.Mat();
-      cv.cvtColor(work2, out, cv.COLOR_GRAY2RGBA);
-      return matToDataUrl(cv, out);
+      return work2.clone();
     }
 
-    return "";
+    return gray.clone();
   } finally {
     try {
       gray?.delete?.();
       work1?.delete?.();
       work2?.delete?.();
+    } catch {}
+  }
+}
+
+function buildDebugImageFromSrcMat(
+  cv: any,
+  srcMat: any,
+  mode: DebugViewMode
+): string {
+  let processed: any = null;
+  let out: any = null;
+
+  try {
+    if (mode === "ORIGINAL") {
+      return matToDataUrl(cv, srcMat);
+    }
+
+    processed = buildProcessedGrayMat(cv, srcMat, mode);
+    out = new cv.Mat();
+    cv.cvtColor(processed, out, cv.COLOR_GRAY2RGBA);
+    return matToDataUrl(cv, out);
+  } finally {
+    try {
+      processed?.delete?.();
       out?.delete?.();
+    } catch {}
+  }
+}
+
+function getOpenCvMatchMethod(cv: any, mode: MatchMethodMode) {
+  if (mode === "CCOEFF") return cv.TM_CCOEFF_NORMED;
+  if (mode === "CCORR") return cv.TM_CCORR_NORMED;
+  return cv.TM_SQDIFF_NORMED;
+}
+
+function runSingleBestMatch(params: {
+  cv: any;
+  sceneSrcMat: any;
+  sampleSrcMat: any;
+  sceneWidth: number;
+  sceneHeight: number;
+  debugMode: DebugViewMode;
+  matchMode: MatchMethodMode;
+}): MatchBox | null {
+  const { cv, sceneSrcMat, sampleSrcMat, sceneWidth, sceneHeight, debugMode, matchMode } = params;
+
+  let sceneGray: any = null;
+  let sampleGray: any = null;
+  let result: any = null;
+
+  try {
+    sceneGray = buildProcessedGrayMat(cv, sceneSrcMat, debugMode);
+    sampleGray = buildProcessedGrayMat(cv, sampleSrcMat, debugMode);
+
+    if (
+      sampleGray.cols < 8 ||
+      sampleGray.rows < 8 ||
+      sampleGray.cols >= sceneGray.cols ||
+      sampleGray.rows >= sceneGray.rows
+    ) {
+      return null;
+    }
+
+    result = new cv.Mat();
+    const method = getOpenCvMatchMethod(cv, matchMode);
+    cv.matchTemplate(sceneGray, sampleGray, result, method);
+
+    const mm = cv.minMaxLoc(result);
+
+    let x = 0;
+    let y = 0;
+    let score = 0;
+
+    if (matchMode === "SQDIFF") {
+      x = mm.minLoc.x;
+      y = mm.minLoc.y;
+      score = 1 - mm.minVal;
+    } else {
+      x = mm.maxLoc.x;
+      y = mm.maxLoc.y;
+      score = mm.maxVal;
+    }
+
+    const w = sampleGray.cols;
+    const h = sampleGray.rows;
+
+    return {
+      x: clamp01(x / sceneWidth),
+      y: clamp01(y / sceneHeight),
+      w: clamp01(w / sceneWidth),
+      h: clamp01(h / sceneHeight),
+      score,
+      label: `${matchMode} / ${debugMode}`,
+    };
+  } finally {
+    try {
+      sceneGray?.delete?.();
+      sampleGray?.delete?.();
+      result?.delete?.();
     } catch {}
   }
 }
@@ -186,11 +286,20 @@ export default function ReviewPage() {
   const [cvStatus, setCvStatus] = useState("OpenCV 未読込");
 
   const [debugMode, setDebugMode] = useState<DebugViewMode>("ORIGINAL");
+  const [matchMethod, setMatchMethod] = useState<MatchMethodMode>("CCOEFF");
   const [selectedSampleId, setSelectedSampleId] = useState<string | null>(null);
 
   const [mainPreviewUrl, setMainPreviewUrl] = useState("");
   const [samplePreviewUrl, setSamplePreviewUrl] = useState("");
   const [buildingPreview, setBuildingPreview] = useState(false);
+  const [matchBox, setMatchBox] = useState<MatchBox | null>(null);
+
+  const [imageRect, setImageRect] = useState({
+    left: 0,
+    top: 0,
+    width: 0,
+    height: 0,
+  });
 
   useEffect(() => {
     try {
@@ -243,24 +352,6 @@ export default function ReviewPage() {
       console.error("samples save error:", e);
     }
   }, [samples, samplesLoaded]);
-
-  useEffect(() => {
-    const stopDragging = () => {};
-
-    window.addEventListener("pointerup", stopDragging);
-    window.addEventListener("pointercancel", stopDragging);
-    window.addEventListener("mouseup", stopDragging);
-    window.addEventListener("touchend", stopDragging);
-    window.addEventListener("touchcancel", stopDragging);
-
-    return () => {
-      window.removeEventListener("pointerup", stopDragging);
-      window.removeEventListener("pointercancel", stopDragging);
-      window.removeEventListener("mouseup", stopDragging);
-      window.removeEventListener("touchend", stopDragging);
-      window.removeEventListener("touchcancel", stopDragging);
-    };
-  }, []);
 
   useEffect(() => {
     if (draftSensitivity === appliedSensitivity) return;
@@ -348,10 +439,48 @@ export default function ReviewPage() {
     };
   }, []);
 
+  const updateImageRect = () => {
+    const frame = frameRef.current;
+    const img = imgRef.current;
+    if (!frame || !img) return;
+
+    const frameWidth = frame.clientWidth;
+    const frameHeight = frame.clientHeight;
+    const naturalWidth = img.naturalWidth;
+    const naturalHeight = img.naturalHeight;
+    if (!frameWidth || !frameHeight || !naturalWidth || !naturalHeight) return;
+
+    const scale = Math.min(frameWidth / naturalWidth, frameHeight / naturalHeight);
+    const displayWidth = naturalWidth * scale;
+    const displayHeight = naturalHeight * scale;
+    const left = (frameWidth - displayWidth) / 2;
+    const top = (frameHeight - displayHeight) / 2;
+
+    setImageRect({ left, top, width: displayWidth, height: displayHeight });
+  };
+
+  useEffect(() => {
+    const onResize = () => updateImageRect();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  useEffect(() => {
+    if (!mainPreviewUrl) return;
+    const t1 = window.setTimeout(() => updateImageRect(), 0);
+    const t2 = window.setTimeout(() => updateImageRect(), 120);
+    const t3 = window.setTimeout(() => updateImageRect(), 300);
+    return () => {
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+      window.clearTimeout(t3);
+    };
+  }, [mainPreviewUrl, matchBox]);
+
   useEffect(() => {
     let cancelled = false;
 
-    async function buildPreviews() {
+    async function buildPreviewsAndMatch() {
       if (!cvReady || !capturedImage) return;
 
       const cv = window.cv;
@@ -360,45 +489,72 @@ export default function ReviewPage() {
       setBuildingPreview(true);
 
       try {
-        if (debugMode === "ORIGINAL") {
-          if (!cancelled) setMainPreviewUrl(capturedImage);
-        } else {
-          const scene = await imageSrcToMat(cv, capturedImage, 1200);
-          if (scene) {
-            const url = buildDebugImageFromSrcMat(cv, scene.srcMat, debugMode);
-            scene.srcMat.delete();
-            if (!cancelled) setMainPreviewUrl(url);
-          }
-        }
-
         const selectedSample = samples.find((s) => s.id === selectedSampleId && !!s.thumbUrl);
-        if (!selectedSample?.thumbUrl) {
-          if (!cancelled) setSamplePreviewUrl("");
-        } else {
-          if (debugMode === "ORIGINAL") {
-            if (!cancelled) setSamplePreviewUrl(selectedSample.thumbUrl);
+
+        let sceneSrc: any = null;
+        let sampleSrc: any = null;
+
+        try {
+          const scene = await imageSrcToMat(cv, capturedImage, 1200);
+          if (!scene) return;
+
+          sceneSrc = scene.srcMat;
+          const mainUrl =
+            debugMode === "ORIGINAL"
+              ? capturedImage
+              : buildDebugImageFromSrcMat(cv, sceneSrc, debugMode);
+
+          if (!cancelled) setMainPreviewUrl(mainUrl);
+
+          if (!selectedSample?.thumbUrl) {
+            if (!cancelled) {
+              setSamplePreviewUrl("");
+              setMatchBox(null);
+            }
           } else {
             const smp = await imageSrcToMat(cv, selectedSample.thumbUrl, 240);
-            if (smp) {
-              const url = buildDebugImageFromSrcMat(cv, smp.srcMat, debugMode);
-              smp.srcMat.delete();
-              if (!cancelled) setSamplePreviewUrl(url);
+            if (!smp) return;
+
+            sampleSrc = smp.srcMat;
+            const sampleUrl =
+              debugMode === "ORIGINAL"
+                ? selectedSample.thumbUrl
+                : buildDebugImageFromSrcMat(cv, sampleSrc, debugMode);
+
+            const best = runSingleBestMatch({
+              cv,
+              sceneSrcMat: sceneSrc,
+              sampleSrcMat: sampleSrc,
+              sceneWidth: scene.width,
+              sceneHeight: scene.height,
+              debugMode,
+              matchMode: matchMethod,
+            });
+
+            if (!cancelled) {
+              setSamplePreviewUrl(sampleUrl);
+              setMatchBox(best);
             }
           }
+        } finally {
+          try {
+            sceneSrc?.delete?.();
+            sampleSrc?.delete?.();
+          } catch {}
         }
       } catch (e) {
-        console.error("build preview error:", e);
+        console.error("build preview or match error:", e);
       } finally {
         if (!cancelled) setBuildingPreview(false);
       }
     }
 
-    buildPreviews();
+    buildPreviewsAndMatch();
 
     return () => {
       cancelled = true;
     };
-  }, [cvReady, capturedImage, debugMode, selectedSampleId, samples]);
+  }, [cvReady, capturedImage, debugMode, matchMethod, selectedSampleId, samples]);
 
   const handleMissingToggle = () => {
     const next = !missingOn;
@@ -460,7 +616,7 @@ export default function ReviewPage() {
         {cvError ? <div className="text-xs text-rose-400">{cvError}</div> : null}
       </div>
 
-      <div className="px-4 pt-3">
+      <div className="px-4 pt-3 space-y-2">
         <div className="flex gap-2 overflow-x-auto pb-1">
           {DEBUG_MODES.map((mode) => (
             <button
@@ -469,6 +625,22 @@ export default function ReviewPage() {
               className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
                 debugMode === mode
                   ? "bg-white text-black border-white"
+                  : "bg-zinc-900 text-zinc-300 border-zinc-700"
+              }`}
+            >
+              {mode}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          {MATCH_METHODS.map((mode) => (
+            <button
+              key={mode}
+              onClick={() => setMatchMethod(mode)}
+              className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
+                matchMethod === mode
+                  ? "bg-emerald-300 text-black border-emerald-300"
                   : "bg-zinc-900 text-zinc-300 border-zinc-700"
               }`}
             >
@@ -491,6 +663,19 @@ export default function ReviewPage() {
                 alt="撮影画像"
                 className="max-w-full max-h-full object-contain block"
               />
+
+              {matchBox ? (
+                <div
+                  className="absolute border-[3px] border-emerald-400 rounded-md pointer-events-none"
+                  style={{
+                    left: imageRect.left + imageRect.width * matchBox.x,
+                    top: imageRect.top + imageRect.height * matchBox.y,
+                    width: imageRect.width * matchBox.w,
+                    height: imageRect.height * matchBox.h,
+                  }}
+                />
+              ) : null}
+
               {buildingPreview ? (
                 <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/45">
                   <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/55 text-center">
@@ -499,9 +684,16 @@ export default function ReviewPage() {
                   </div>
                 </div>
               ) : null}
+
               <div className="absolute left-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10">
                 {`MAIN: ${debugMode}`}
               </div>
+
+              {matchBox ? (
+                <div className="absolute right-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10">
+                  {`${matchBox.label} / score ${matchBox.score.toFixed(3)}`}
+                </div>
+              ) : null}
             </>
           ) : (
             <div className="h-full flex items-center justify-center text-zinc-400">
@@ -568,7 +760,7 @@ export default function ReviewPage() {
                       />
                     </div>
                   ) : (
-                    <div className={`w-10 h-10 rounded-lg border shrink-0 ${sample.color}`} />
+                    <div className="w-10 h-10 rounded-lg border shrink-0 bg-zinc-700" />
                   )}
 
                   <div className="min-w-0 flex flex-col items-start">
@@ -611,6 +803,8 @@ export default function ReviewPage() {
                           setShowDeleteFor(null);
                           if (selectedSampleId === sample.id) {
                             setSelectedSampleId(null);
+                            setSamplePreviewUrl("");
+                            setMatchBox(null);
                           }
                         }
                       }}
