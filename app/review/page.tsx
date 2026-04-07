@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "v2026-04-06-02";
+const REVIEW_VERSION = "v2026-04-06-03";
 
 const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
@@ -25,18 +25,24 @@ type SampleItem = {
   aspectRatio?: number;
 };
 
-type DetectionBox = {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  color: string;
-  sampleId: string;
-  score: number;
-  rawScore?: number;
-  mode?: string;
-  prep?: string;
-};
+type DebugViewMode =
+  | "ORIGINAL"
+  | "GRAY"
+  | "EQUALIZE"
+  | "CLAHE"
+  | "BIN50"
+  | "BIN80"
+  | "EDGE";
+
+const DEBUG_MODES: DebugViewMode[] = [
+  "ORIGINAL",
+  "GRAY",
+  "EQUALIZE",
+  "CLAHE",
+  "BIN50",
+  "BIN80",
+  "EDGE",
+];
 
 const DEFAULT_SAMPLES: SampleItem[] = [
   { id: "1", count: 0, color: "border-sky-400 bg-sky-500/20", aspectRatio: 1 },
@@ -44,10 +50,6 @@ const DEFAULT_SAMPLES: SampleItem[] = [
   { id: "3", count: 0, color: "border-amber-400 bg-amber-500/20", aspectRatio: 1 },
   { id: "4", count: 0, color: "border-fuchsia-400 bg-fuchsia-500/20", aspectRatio: 1 },
 ];
-
-function clamp01(v: number) {
-  return Math.max(0, Math.min(1, v));
-}
 
 function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -58,22 +60,16 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
-function colorFromSample(sample: SampleItem) {
-  if (sample.color.includes("sky")) return "#38bdf8";
-  if (sample.color.includes("emerald")) return "#34d399";
-  if (sample.color.includes("amber")) return "#f59e0b";
-  if (sample.color.includes("fuchsia")) return "#d946ef";
-  if (sample.color.includes("cyan")) return "#06b6d4";
-  return "#f43f5e";
+function clamp(v: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, v));
 }
 
-async function imageSrcToGrayMat(
+async function imageSrcToMat(
   cv: any,
   src: string,
   maxWidth: number
-): Promise<{ gray: any; width: number; height: number } | null> {
+): Promise<{ srcMat: any; width: number; height: number } | null> {
   const img = await loadImage(src);
-
   const scale = Math.min(1, maxWidth / img.naturalWidth);
   const width = Math.max(1, Math.round(img.naturalWidth * scale));
   const height = Math.max(1, Math.round(img.naturalHeight * scale));
@@ -87,163 +83,86 @@ async function imageSrcToGrayMat(
 
   ctx.drawImage(img, 0, 0, width, height);
 
-  let srcMat: any = null;
+  const srcMat = cv.imread(canvas);
+  return { srcMat, width, height };
+}
+
+function matToDataUrl(cv: any, mat: any): string {
+  const canvas = document.createElement("canvas");
+  cv.imshow(canvas, mat);
+  return canvas.toDataURL("image/png");
+}
+
+function buildDebugImageFromSrcMat(
+  cv: any,
+  srcMat: any,
+  mode: DebugViewMode
+): string {
   let gray: any = null;
+  let work1: any = null;
+  let work2: any = null;
+  let out: any = null;
 
   try {
-    srcMat = cv.imread(canvas);
-    gray = new cv.Mat();
-    cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY);
-    return { gray, width, height };
-  } finally {
-    try {
-      srcMat?.delete?.();
-    } catch {}
-  }
-}
-
-function iou(a: DetectionBox, b: DetectionBox) {
-  const ax1 = a.x;
-  const ay1 = a.y;
-  const ax2 = a.x + a.w;
-  const ay2 = a.y + a.h;
-
-  const bx1 = b.x;
-  const by1 = b.y;
-  const bx2 = b.x + b.w;
-  const by2 = b.y + b.h;
-
-  const ix1 = Math.max(ax1, bx1);
-  const iy1 = Math.max(ay1, by1);
-  const ix2 = Math.min(ax2, bx2);
-  const iy2 = Math.min(ay2, by2);
-
-  const iw = Math.max(0, ix2 - ix1);
-  const ih = Math.max(0, iy2 - iy1);
-  const inter = iw * ih;
-
-  const areaA = a.w * a.h;
-  const areaB = b.w * b.h;
-  const union = areaA + areaB - inter;
-
-  if (union <= 0) return 0;
-  return inter / union;
-}
-
-function dedupeCandidates(boxes: DetectionBox[]) {
-  const sorted = [...boxes].sort((a, b) => b.score - a.score);
-  const kept: DetectionBox[] = [];
-
-  for (const box of sorted) {
-    const duplicated = kept.some((k) => iou(k, box) > 0.35);
-    if (!duplicated) kept.push(box);
-  }
-
-  return kept;
-}
-
-function runRegionProposalDetection(params: {
-  cv: any;
-  sceneGray: any;
-  sceneWidth: number;
-  sceneHeight: number;
-  samples: SampleItem[];
-}) {
-  const { cv, sceneGray, sceneWidth, sceneHeight, samples } = params;
-
-  let blur: any = null;
-  let edge: any = null;
-  let kernel: any = null;
-  let morphed: any = null;
-  let contours: any = null;
-  let hierarchy: any = null;
-
-  try {
-    blur = new cv.Mat();
-    edge = new cv.Mat();
-    morphed = new cv.Mat();
-    contours = new cv.MatVector();
-    hierarchy = new cv.Mat();
-
-    cv.GaussianBlur(
-      sceneGray,
-      blur,
-      new cv.Size(5, 5),
-      0,
-      0,
-      cv.BORDER_DEFAULT
-    );
-
-    cv.Canny(blur, edge, 50, 150);
-
-    kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(9, 5));
-    cv.dilate(edge, morphed, kernel);
-    cv.morphologyEx(morphed, morphed, cv.MORPH_CLOSE, kernel);
-    cv.erode(morphed, morphed, kernel);
-
-    cv.findContours(
-      morphed,
-      contours,
-      hierarchy,
-      cv.RETR_EXTERNAL,
-      cv.CHAIN_APPROX_SIMPLE
-    );
-
-    const boxes: DetectionBox[] = [];
-    const palette =
-      samples.length > 0
-        ? samples.map((s) => colorFromSample(s))
-        : ["#38bdf8", "#34d399", "#f59e0b", "#d946ef"];
-
-    for (let i = 0; i < contours.size(); i++) {
-      const cnt = contours.get(i);
-      const rect = cv.boundingRect(cnt);
-
-      cnt.delete();
-
-      if (rect.width < 20 || rect.height < 12) continue;
-      if (rect.width > sceneWidth * 0.95 || rect.height > sceneHeight * 0.8)
-        continue;
-
-      const area = rect.width * rect.height;
-      if (area < sceneWidth * sceneHeight * 0.00035) continue;
-
-      const aspect = rect.width / Math.max(1, rect.height);
-      if (aspect < 0.4 || aspect > 12) continue;
-
-      const borderMarginX = Math.min(rect.x, sceneWidth - (rect.x + rect.width));
-      const borderMarginY = Math.min(rect.y, sceneHeight - (rect.y + rect.height));
-      const minBorderMargin = Math.min(borderMarginX, borderMarginY);
-
-      let score = area / (sceneWidth * sceneHeight);
-
-      if (aspect >= 1.5 && aspect <= 8) score += 0.08;
-      if (minBorderMargin < 3) score -= 0.08;
-      if (minBorderMargin < 8) score -= 0.04;
-
-      boxes.push({
-        x: clamp01(rect.x / sceneWidth),
-        y: clamp01(rect.y / sceneHeight),
-        w: clamp01(rect.width / sceneWidth),
-        h: clamp01(rect.height / sceneHeight),
-        color: palette[boxes.length % palette.length],
-        sampleId: samples.length > 0 ? samples[boxes.length % samples.length].id : "proposal",
-        score,
-        rawScore: score,
-        mode: "REGION",
-        prep: "EDGE+CLOSE",
-      });
+    if (mode === "ORIGINAL") {
+      return matToDataUrl(cv, srcMat);
     }
 
-    return dedupeCandidates(boxes).sort((a, b) => b.score - a.score);
+    gray = new cv.Mat();
+    cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY);
+
+    if (mode === "GRAY") {
+      out = new cv.Mat();
+      cv.cvtColor(gray, out, cv.COLOR_GRAY2RGBA);
+      return matToDataUrl(cv, out);
+    }
+
+    if (mode === "EQUALIZE") {
+      work1 = new cv.Mat();
+      cv.equalizeHist(gray, work1);
+      out = new cv.Mat();
+      cv.cvtColor(work1, out, cv.COLOR_GRAY2RGBA);
+      return matToDataUrl(cv, out);
+    }
+
+    if (mode === "CLAHE") {
+      const clahe = new cv.CLAHE(2.0, new cv.Size(8, 8));
+      work1 = new cv.Mat();
+      clahe.apply(gray, work1);
+      out = new cv.Mat();
+      cv.cvtColor(work1, out, cv.COLOR_GRAY2RGBA);
+      clahe.delete();
+      return matToDataUrl(cv, out);
+    }
+
+    if (mode === "BIN50" || mode === "BIN80") {
+      const thresholdValue = mode === "BIN50" ? 50 : 80;
+      work1 = new cv.Mat();
+      cv.GaussianBlur(gray, work1, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
+      work2 = new cv.Mat();
+      cv.threshold(work1, work2, thresholdValue, 255, cv.THRESH_BINARY);
+      out = new cv.Mat();
+      cv.cvtColor(work2, out, cv.COLOR_GRAY2RGBA);
+      return matToDataUrl(cv, out);
+    }
+
+    if (mode === "EDGE") {
+      work1 = new cv.Mat();
+      cv.GaussianBlur(gray, work1, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
+      work2 = new cv.Mat();
+      cv.Canny(work1, work2, 60, 180);
+      out = new cv.Mat();
+      cv.cvtColor(work2, out, cv.COLOR_GRAY2RGBA);
+      return matToDataUrl(cv, out);
+    }
+
+    return "";
   } finally {
     try {
-      blur?.delete?.();
-      edge?.delete?.();
-      kernel?.delete?.();
-      morphed?.delete?.();
-      contours?.delete?.();
-      hierarchy?.delete?.();
+      gray?.delete?.();
+      work1?.delete?.();
+      work2?.delete?.();
+      out?.delete?.();
     } catch {}
   }
 }
@@ -260,29 +179,25 @@ export default function ReviewPage() {
   const [showDeleteFor, setShowDeleteFor] = useState<string | null>(null);
   const [samplesLoaded, setSamplesLoaded] = useState(false);
 
-  const [imageRect, setImageRect] = useState({
-    left: 0,
-    top: 0,
-    width: 0,
-    height: 0,
-  });
-
   const [samples, setSamples] = useState<SampleItem[]>(DEFAULT_SAMPLES);
-  const [detections, setDetections] = useState<DetectionBox[]>([]);
-  const [detecting, setDetecting] = useState(false);
-  const [prepareDetecting, setPrepareDetecting] = useState(false);
-  const [isAdjustingSensitivity, setIsAdjustingSensitivity] = useState(false);
-  const [isSliderDragging, setIsSliderDragging] = useState(false);
 
   const [cvReady, setCvReady] = useState(false);
   const [cvError, setCvError] = useState("");
   const [cvStatus, setCvStatus] = useState("OpenCV 未読込");
+
+  const [debugMode, setDebugMode] = useState<DebugViewMode>("ORIGINAL");
+  const [selectedSampleId, setSelectedSampleId] = useState<string | null>(null);
+
+  const [mainPreviewUrl, setMainPreviewUrl] = useState("");
+  const [samplePreviewUrl, setSamplePreviewUrl] = useState("");
+  const [buildingPreview, setBuildingPreview] = useState(false);
 
   useEffect(() => {
     try {
       const storedImage = sessionStorage.getItem("capturedImage");
       if (storedImage && storedImage.startsWith("data:image/")) {
         setCapturedImage(storedImage);
+        setMainPreviewUrl(storedImage);
       }
     } catch (e) {
       console.error("sessionStorage load error:", e);
@@ -330,7 +245,7 @@ export default function ReviewPage() {
   }, [samples, samplesLoaded]);
 
   useEffect(() => {
-    const stopDragging = () => setIsSliderDragging(false);
+    const stopDragging = () => {};
 
     window.addEventListener("pointerup", stopDragging);
     window.addEventListener("pointercancel", stopDragging);
@@ -348,26 +263,15 @@ export default function ReviewPage() {
   }, []);
 
   useEffect(() => {
-    if (isSliderDragging) {
-      setIsAdjustingSensitivity(true);
-      return;
-    }
-
-    if (draftSensitivity === appliedSensitivity) {
-      setIsAdjustingSensitivity(false);
-      return;
-    }
-
-    setIsAdjustingSensitivity(true);
+    if (draftSensitivity === appliedSensitivity) return;
 
     const timer = window.setTimeout(() => {
       setAppliedSensitivity(draftSensitivity);
       localStorage.setItem(SENSITIVITY_KEY, String(draftSensitivity));
-      setIsAdjustingSensitivity(false);
     }, 120);
 
     return () => window.clearTimeout(timer);
-  }, [draftSensitivity, appliedSensitivity, isSliderDragging]);
+  }, [draftSensitivity, appliedSensitivity]);
 
   useEffect(() => {
     let cancelled = false;
@@ -444,47 +348,57 @@ export default function ReviewPage() {
     };
   }, []);
 
-  const updateImageRect = () => {
-    const frame = frameRef.current;
-    const img = imgRef.current;
-    if (!frame || !img) return;
-
-    const frameWidth = frame.clientWidth;
-    const frameHeight = frame.clientHeight;
-    const naturalWidth = img.naturalWidth;
-    const naturalHeight = img.naturalHeight;
-    if (!frameWidth || !frameHeight || !naturalWidth || !naturalHeight) return;
-
-    const scale = Math.min(frameWidth / naturalWidth, frameHeight / naturalHeight);
-    const displayWidth = naturalWidth * scale;
-    const displayHeight = naturalHeight * scale;
-    const left = (frameWidth - displayWidth) / 2;
-    const top = (frameHeight - displayHeight) / 2;
-
-    setImageRect({ left, top, width: displayWidth, height: displayHeight });
-  };
-
   useEffect(() => {
-    const onResize = () => updateImageRect();
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
+    let cancelled = false;
 
-  useEffect(() => {
-    if (!capturedImage) return;
-    const t1 = window.setTimeout(() => updateImageRect(), 0);
-    const t2 = window.setTimeout(() => updateImageRect(), 120);
-    const t3 = window.setTimeout(() => updateImageRect(), 300);
+    async function buildPreviews() {
+      if (!cvReady || !capturedImage) return;
+
+      const cv = window.cv;
+      if (!cv) return;
+
+      setBuildingPreview(true);
+
+      try {
+        if (debugMode === "ORIGINAL") {
+          if (!cancelled) setMainPreviewUrl(capturedImage);
+        } else {
+          const scene = await imageSrcToMat(cv, capturedImage, 1200);
+          if (scene) {
+            const url = buildDebugImageFromSrcMat(cv, scene.srcMat, debugMode);
+            scene.srcMat.delete();
+            if (!cancelled) setMainPreviewUrl(url);
+          }
+        }
+
+        const selectedSample = samples.find((s) => s.id === selectedSampleId && !!s.thumbUrl);
+        if (!selectedSample?.thumbUrl) {
+          if (!cancelled) setSamplePreviewUrl("");
+        } else {
+          if (debugMode === "ORIGINAL") {
+            if (!cancelled) setSamplePreviewUrl(selectedSample.thumbUrl);
+          } else {
+            const smp = await imageSrcToMat(cv, selectedSample.thumbUrl, 240);
+            if (smp) {
+              const url = buildDebugImageFromSrcMat(cv, smp.srcMat, debugMode);
+              smp.srcMat.delete();
+              if (!cancelled) setSamplePreviewUrl(url);
+            }
+          }
+        }
+      } catch (e) {
+        console.error("build preview error:", e);
+      } finally {
+        if (!cancelled) setBuildingPreview(false);
+      }
+    }
+
+    buildPreviews();
+
     return () => {
-      window.clearTimeout(t1);
-      window.clearTimeout(t2);
-      window.clearTimeout(t3);
+      cancelled = true;
     };
-  }, [capturedImage, detections.length]);
-
-  const handleSensitivityChange = (value: number) => {
-    setDraftSensitivity(value);
-  };
+  }, [cvReady, capturedImage, debugMode, selectedSampleId, samples]);
 
   const handleMissingToggle = () => {
     const next = !missingOn;
@@ -493,92 +407,6 @@ export default function ReviewPage() {
   };
 
   const canAdd = useMemo(() => samples.length < MAX_SAMPLES, [samples.length]);
-
-  const detectedCounts = useMemo(() => {
-    const map: Record<string, number> = {};
-    for (const s of samples) map[s.id] = 0;
-    for (const d of detections) {
-      map[d.sampleId] = (map[d.sampleId] || 0) + 1;
-    }
-    return map;
-  }, [samples, detections]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function runDetection() {
-      if (!cvReady || !capturedImage) {
-        setDetections([]);
-        return;
-      }
-
-      const cv = window.cv;
-      if (!cv) {
-        setDetections([]);
-        return;
-      }
-
-      setDetections([]);
-      setPrepareDetecting(true);
-
-      await new Promise((resolve) => setTimeout(resolve, 180));
-      if (cancelled) return;
-
-      setPrepareDetecting(false);
-      setDetecting(true);
-
-      let sceneGray: any = null;
-
-      try {
-        const sceneResult = await imageSrcToGrayMat(cv, capturedImage, 1200);
-        if (!sceneResult) {
-          setDetections([]);
-          return;
-        }
-
-        sceneGray = sceneResult.gray;
-
-        const boxes = runRegionProposalDetection({
-          cv,
-          sceneGray,
-          sceneWidth: sceneResult.width,
-          sceneHeight: sceneResult.height,
-          samples,
-        });
-
-        if (!cancelled) setDetections(boxes);
-      } catch (e) {
-        console.error("Region proposal detection error:", e);
-        if (!cancelled) setDetections([]);
-      } finally {
-        try {
-          sceneGray?.delete?.();
-        } catch {}
-        if (!cancelled) {
-          setDetecting(false);
-          setPrepareDetecting(false);
-        }
-      }
-    }
-
-    runDetection();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [cvReady, capturedImage, samples, appliedSensitivity]);
-
-  const overlayMuted =
-    isAdjustingSensitivity || prepareDetecting || detecting || !cvReady;
-  const overlayMessage = !cvReady
-    ? "OpenCV 読込中..."
-    : isAdjustingSensitivity
-      ? "調整中..."
-      : prepareDetecting
-        ? "準備中..."
-        : detecting
-          ? "候補領域抽出中..."
-          : "";
 
   return (
     <main className="min-h-screen bg-black text-white flex flex-col">
@@ -607,19 +435,11 @@ export default function ReviewPage() {
             min={0}
             max={100}
             value={draftSensitivity}
-            onChange={(e) => handleSensitivityChange(Number(e.target.value))}
-            onInput={(e) =>
-              handleSensitivityChange(Number((e.target as HTMLInputElement).value))
-            }
-            onPointerDown={() => setIsSliderDragging(true)}
-            onTouchStart={() => setIsSliderDragging(true)}
-            onMouseDown={() => setIsSliderDragging(true)}
-            disabled={detecting || prepareDetecting || !cvReady}
-            className={`flex-1 ${(detecting || prepareDetecting || !cvReady) ? "opacity-50 cursor-not-allowed" : ""}`}
+            onChange={(e) => setDraftSensitivity(Number(e.target.value))}
+            className={`flex-1 ${!cvReady ? "opacity-50 cursor-not-allowed" : ""}`}
+            disabled={!cvReady}
           />
-          <div
-            className={`text-sm w-9 text-right ${(detecting || prepareDetecting || !cvReady) ? "text-zinc-500" : "text-zinc-300"}`}
-          >
+          <div className={`text-sm w-9 text-right ${!cvReady ? "text-zinc-500" : "text-zinc-300"}`}>
             {draftSensitivity}
           </div>
         </div>
@@ -640,50 +460,47 @@ export default function ReviewPage() {
         {cvError ? <div className="text-xs text-rose-400">{cvError}</div> : null}
       </div>
 
-      <div className="flex-1 p-4">
+      <div className="px-4 pt-3">
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          {DEBUG_MODES.map((mode) => (
+            <button
+              key={mode}
+              onClick={() => setDebugMode(mode)}
+              className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
+                debugMode === mode
+                  ? "bg-white text-black border-white"
+                  : "bg-zinc-900 text-zinc-300 border-zinc-700"
+              }`}
+            >
+              {mode}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex-1 p-4 space-y-4">
         <div
           ref={frameRef}
-          className="w-full max-h-[52vh] rounded-[1.5rem] border border-zinc-800 bg-zinc-900 relative overflow-hidden aspect-[3/4] mx-auto flex items-center justify-center"
+          className="w-full max-h-[46vh] rounded-[1.5rem] border border-zinc-800 bg-zinc-900 relative overflow-hidden aspect-[3/4] mx-auto flex items-center justify-center"
         >
-          {capturedImage ? (
+          {mainPreviewUrl ? (
             <>
               <img
                 ref={imgRef}
-                src={capturedImage}
+                src={mainPreviewUrl}
                 alt="撮影画像"
                 className="max-w-full max-h-full object-contain block"
-                onLoad={() => {
-                  updateImageRect();
-                  window.setTimeout(() => updateImageRect(), 120);
-                }}
               />
-
-              {detections.map((box, index) => (
-                <div
-                  key={`${index}-${box.x}-${box.y}-${box.w}-${box.h}`}
-                  className="absolute rounded-md border-[3px] transition-opacity"
-                  style={{
-                    left: imageRect.left + imageRect.width * box.x,
-                    top: imageRect.top + imageRect.height * box.y,
-                    width: imageRect.width * box.w,
-                    height: imageRect.height * box.h,
-                    borderColor: box.color,
-                    opacity: overlayMuted ? 0.35 : 1,
-                  }}
-                />
-              ))}
-
-              {overlayMessage ? (
+              {buildingPreview ? (
                 <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/45">
-                  <div className="px-6 py-4 rounded-2xl border border-white/15 bg-black/55 text-center shadow-xl">
-                    <div className="text-2xl font-semibold tracking-wide">{overlayMessage}</div>
-                    <div className="mt-1 text-sm text-zinc-300">少しお待ちください</div>
+                  <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/55 text-center">
+                    <div className="text-lg font-semibold">{debugMode}</div>
+                    <div className="mt-1 text-sm text-zinc-300">変換中...</div>
                   </div>
                 </div>
               ) : null}
-
               <div className="absolute left-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10">
-                {`候補数: ${detections.length}`}
+                {`MAIN: ${debugMode}`}
               </div>
             </>
           ) : (
@@ -691,6 +508,28 @@ export default function ReviewPage() {
               まだ撮影画像がありません
             </div>
           )}
+        </div>
+
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-3">
+          <div className="text-sm text-zinc-300 mb-2">
+            選択中の見本: {selectedSampleId ? selectedSampleId : "なし"}
+          </div>
+          <div className="w-full h-36 rounded-xl border border-zinc-800 bg-zinc-900 flex items-center justify-center overflow-hidden">
+            {samplePreviewUrl ? (
+              <img
+                src={samplePreviewUrl}
+                alt="見本プレビュー"
+                className="max-w-full max-h-full object-contain block"
+              />
+            ) : (
+              <div className="text-zinc-500 text-sm">
+                見本サムネイルをタップするとここに表示
+              </div>
+            )}
+          </div>
+          <div className="mt-2 text-[11px] text-zinc-400">
+            SAMPLE: {debugMode}
+          </div>
         </div>
       </div>
 
@@ -700,6 +539,7 @@ export default function ReviewPage() {
             const ratio =
               sample.aspectRatio && sample.aspectRatio > 0 ? sample.aspectRatio : 1;
             const thumbW = Math.max(40, Math.min(72, Math.round(40 * ratio)));
+            const selected = selectedSampleId === sample.id;
 
             return (
               <div key={sample.id} className="relative overflow-visible isolate">
@@ -708,9 +548,13 @@ export default function ReviewPage() {
                   onClick={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
-                    setShowDeleteFor(showDeleteFor === sample.id ? null : sample.id);
+                    setSelectedSampleId((prev) => (prev === sample.id ? null : sample.id));
                   }}
-                  className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-2 py-2 flex items-center gap-2 min-w-0"
+                  className={`w-full rounded-2xl border px-2 py-2 flex items-center gap-2 min-w-0 ${
+                    selected
+                      ? "border-white bg-zinc-800"
+                      : "border-zinc-800 bg-zinc-900"
+                  }`}
                 >
                   {sample.thumbUrl ? (
                     <div
@@ -728,21 +572,31 @@ export default function ReviewPage() {
                   )}
 
                   <div className="min-w-0 flex flex-col items-start">
-                    <div className="text-lg font-semibold truncate">
-                      {detectedCounts[sample.id] ?? 0}
+                    <div className="text-sm font-semibold truncate">
+                      {selected ? "SELECTED" : "SAMPLE"}
                     </div>
                     <div className="text-[10px] leading-none text-zinc-400 mt-1">
-                      REGION
-                    </div>
-                    <div className="text-[10px] leading-none text-zinc-500 mt-1">
-                      EDGE+CLOSE
+                      TAP TO PREVIEW
                     </div>
                   </div>
                 </button>
 
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setShowDeleteFor(showDeleteFor === sample.id ? null : sample.id);
+                  }}
+                  className="absolute top-1 right-1 z-40 w-7 h-7 rounded-full bg-black/60 border border-white/10 text-white"
+                  aria-label="削除メニュー"
+                >
+                  …
+                </button>
+
                 {showDeleteFor === sample.id && (
                   <div
-                    className="absolute top-1 right-1 z-50"
+                    className="absolute top-10 right-1 z-50"
                     onMouseDown={(e) => e.stopPropagation()}
                     onTouchStart={(e) => e.stopPropagation()}
                     onPointerDown={(e) => e.stopPropagation()}
@@ -755,6 +609,9 @@ export default function ReviewPage() {
                         if (window.confirm("削除しますか？")) {
                           setSamples((prev) => prev.filter((s) => s.id !== sample.id));
                           setShowDeleteFor(null);
+                          if (selectedSampleId === sample.id) {
+                            setSelectedSampleId(null);
+                          }
                         }
                       }}
                       className="w-10 h-10 rounded-full bg-rose-500 text-white shadow-lg flex items-center justify-center"
