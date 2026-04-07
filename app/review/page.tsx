@@ -10,13 +10,15 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "v2026-04-06-05";
+const REVIEW_VERSION = "v2026-04-06-06";
 
 const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
 const MISSING_KEY = "inspection:missingOn";
 const SAMPLES_KEY = "inspection:samples";
 const MATCH_THRESHOLD_KEY = "inspection:matchThreshold";
+const ROTATION_RANGE_KEY = "inspection:rotationRange";
+const SCALE_RANGE_KEY = "inspection:scaleRange";
 
 type SampleItem = {
   id: string;
@@ -38,6 +40,9 @@ type DebugViewMode =
 
 type MatchMethodMode = "CCOEFF" | "CCORR" | "SQDIFF";
 
+type RotationRangeMode = 0 | 3 | 6 | 9;
+type ScaleRangeMode = 0 | 5 | 10;
+
 type MatchBox = {
   x: number;
   y: number;
@@ -45,6 +50,8 @@ type MatchBox = {
   h: number;
   score: number;
   label: string;
+  rotationDeg: number;
+  scaleFactor: number;
 };
 
 const DEBUG_MODES: DebugViewMode[] = [
@@ -58,6 +65,8 @@ const DEBUG_MODES: DebugViewMode[] = [
 ];
 
 const MATCH_METHODS: MatchMethodMode[] = ["CCOEFF", "CCORR", "SQDIFF"];
+const ROTATION_RANGE_OPTIONS: RotationRangeMode[] = [0, 3, 6, 9];
+const SCALE_RANGE_OPTIONS: ScaleRangeMode[] = [0, 5, 10];
 
 const DEFAULT_SAMPLES: SampleItem[] = [
   { id: "1", count: 0, color: "border-sky-400 bg-sky-500/20", aspectRatio: 1 },
@@ -206,6 +215,74 @@ function getOpenCvMatchMethod(cv: any, mode: MatchMethodMode) {
   return cv.TM_SQDIFF_NORMED;
 }
 
+function getRotationValues(range: RotationRangeMode): number[] {
+  if (range === 0) return [0];
+  if (range === 3) return [-3, 0, 3];
+  if (range === 6) return [-6, -3, 0, 3, 6];
+  return [-9, -6, -3, 0, 3, 6, 9];
+}
+
+function getScaleValues(range: ScaleRangeMode): number[] {
+  if (range === 0) return [1];
+  if (range === 5) return [0.95, 1.0, 1.05];
+  return [0.9, 0.95, 1.0, 1.05, 1.1];
+}
+
+function transformTemplateGray(
+  cv: any,
+  grayMat: any,
+  rotationDeg: number,
+  scaleFactor: number
+): any | null {
+  let scaled: any = null;
+  let rotated: any = null;
+  let M: any = null;
+
+  try {
+    const srcW = grayMat.cols;
+    const srcH = grayMat.rows;
+    const newW = Math.max(1, Math.round(srcW * scaleFactor));
+    const newH = Math.max(1, Math.round(srcH * scaleFactor));
+
+    scaled = new cv.Mat();
+    cv.resize(grayMat, scaled, new cv.Size(newW, newH), 0, 0, cv.INTER_LINEAR);
+
+    if (rotationDeg === 0) {
+      return scaled.clone();
+    }
+
+    const center = new cv.Point(newW / 2, newH / 2);
+    M = cv.getRotationMatrix2D(center, rotationDeg, 1);
+
+    const cos = Math.abs(M.doubleAt(0, 0));
+    const sin = Math.abs(M.doubleAt(0, 1));
+    const boundW = Math.max(1, Math.round(newH * sin + newW * cos));
+    const boundH = Math.max(1, Math.round(newH * cos + newW * sin));
+
+    M.doublePtr(0, 2)[0] += boundW / 2 - center.x;
+    M.doublePtr(1, 2)[0] += boundH / 2 - center.y;
+
+    rotated = new cv.Mat();
+    cv.warpAffine(
+      scaled,
+      rotated,
+      M,
+      new cv.Size(boundW, boundH),
+      cv.INTER_LINEAR,
+      cv.BORDER_CONSTANT,
+      new cv.Scalar(0)
+    );
+
+    return rotated.clone();
+  } finally {
+    try {
+      scaled?.delete?.();
+      rotated?.delete?.();
+      M?.delete?.();
+    } catch {}
+  }
+}
+
 function runMultiMatch(params: {
   cv: any;
   sceneSrcMat: any;
@@ -215,6 +292,8 @@ function runMultiMatch(params: {
   debugMode: DebugViewMode;
   matchMode: MatchMethodMode;
   threshold: number;
+  rotationRange: RotationRangeMode;
+  scaleRange: ScaleRangeMode;
 }): MatchBox[] {
   const {
     cv,
@@ -225,85 +304,130 @@ function runMultiMatch(params: {
     debugMode,
     matchMode,
     threshold,
+    rotationRange,
+    scaleRange,
   } = params;
 
   let sceneGray: any = null;
   let sampleGray: any = null;
-  let result: any = null;
 
   try {
     sceneGray = buildProcessedGrayMat(cv, sceneSrcMat, debugMode);
     sampleGray = buildProcessedGrayMat(cv, sampleSrcMat, debugMode);
 
-    if (
-      sampleGray.cols < 8 ||
-      sampleGray.rows < 8 ||
-      sampleGray.cols >= sceneGray.cols ||
-      sampleGray.rows >= sceneGray.rows
-    ) {
-      return [];
+    const boxes: MatchBox[] = [];
+    const rotationValues = getRotationValues(rotationRange);
+    const scaleValues = getScaleValues(scaleRange);
+
+    for (const rotationDeg of rotationValues) {
+      for (const scaleFactor of scaleValues) {
+        let template: any = null;
+        let result: any = null;
+
+        try {
+          template = transformTemplateGray(cv, sampleGray, rotationDeg, scaleFactor);
+          if (!template) continue;
+
+          if (
+            template.cols < 8 ||
+            template.rows < 8 ||
+            template.cols >= sceneGray.cols ||
+            template.rows >= sceneGray.rows
+          ) {
+            continue;
+          }
+
+          result = new cv.Mat();
+          const method = getOpenCvMatchMethod(cv, matchMode);
+          cv.matchTemplate(sceneGray, template, result, method);
+
+          const localMaxCount = 12;
+
+          for (let i = 0; i < localMaxCount; i++) {
+            const mm = cv.minMaxLoc(result);
+
+            let x = 0;
+            let y = 0;
+            let score = 0;
+
+            if (matchMode === "SQDIFF") {
+              x = mm.minLoc.x;
+              y = mm.minLoc.y;
+              score = 1 - mm.minVal;
+            } else {
+              x = mm.maxLoc.x;
+              y = mm.maxLoc.y;
+              score = mm.maxVal;
+            }
+
+            if (score < threshold) break;
+
+            const w = template.cols;
+            const h = template.rows;
+
+            boxes.push({
+              x: clamp01(x / sceneWidth),
+              y: clamp01(y / sceneHeight),
+              w: clamp01(w / sceneWidth),
+              h: clamp01(h / sceneHeight),
+              score,
+              label: `${matchMode} / ${debugMode} / rot ${rotationDeg >= 0 ? "+" : ""}${rotationDeg} / scale ${scaleFactor.toFixed(2)}`,
+              rotationDeg,
+              scaleFactor,
+            });
+
+            const suppressX = clamp(x - Math.round(w * 0.35), 0, result.cols - 1);
+            const suppressY = clamp(y - Math.round(h * 0.35), 0, result.rows - 1);
+            const suppressW = clamp(Math.round(w * 0.7), 1, result.cols - suppressX);
+            const suppressH = clamp(Math.round(h * 0.7), 1, result.rows - suppressY);
+
+            if (suppressW <= 0 || suppressH <= 0) break;
+
+            const roi = result.roi(new cv.Rect(suppressX, suppressY, suppressW, suppressH));
+            if (matchMode === "SQDIFF") {
+              roi.setTo(new cv.Scalar(1));
+            } else {
+              roi.setTo(new cv.Scalar(-1));
+            }
+            roi.delete();
+          }
+        } finally {
+          try {
+            template?.delete?.();
+            result?.delete?.();
+          } catch {}
+        }
+      }
     }
 
-    result = new cv.Mat();
-    const method = getOpenCvMatchMethod(cv, matchMode);
-    cv.matchTemplate(sceneGray, sampleGray, result, method);
+    boxes.sort((a, b) => b.score - a.score);
 
-    const boxes: MatchBox[] = [];
-    const maxCount = 30;
+    const deduped: MatchBox[] = [];
+    for (const box of boxes) {
+      const cx = box.x + box.w / 2;
+      const cy = box.y + box.h / 2;
 
-    for (let i = 0; i < maxCount; i++) {
-      const mm = cv.minMaxLoc(result);
-
-      let x = 0;
-      let y = 0;
-      let score = 0;
-
-      if (matchMode === "SQDIFF") {
-        x = mm.minLoc.x;
-        y = mm.minLoc.y;
-        score = 1 - mm.minVal;
-      } else {
-        x = mm.maxLoc.x;
-        y = mm.maxLoc.y;
-        score = mm.maxVal;
-      }
-
-      if (score < threshold) break;
-
-      const w = sampleGray.cols;
-      const h = sampleGray.rows;
-
-      boxes.push({
-        x: clamp01(x / sceneWidth),
-        y: clamp01(y / sceneHeight),
-        w: clamp01(w / sceneWidth),
-        h: clamp01(h / sceneHeight),
-        score,
-        label: `${matchMode} / ${debugMode}`,
+      const exists = deduped.some((d) => {
+        const dcx = d.x + d.w / 2;
+        const dcy = d.y + d.h / 2;
+        const dx = cx - dcx;
+        const dy = cy - dcy;
+        const dist = Math.hypot(dx, dy);
+        const ref = Math.max(box.w, box.h, d.w, d.h) * 0.45;
+        return dist < ref;
       });
 
-      const suppressX = clamp(x - Math.round(w * 0.35), 0, result.cols - 1);
-      const suppressY = clamp(y - Math.round(h * 0.35), 0, result.rows - 1);
-      const suppressW = clamp(Math.round(w * 0.7), 1, result.cols - suppressX);
-      const suppressH = clamp(Math.round(h * 0.7), 1, result.rows - suppressY);
-
-      if (suppressW <= 0 || suppressH <= 0) break;
-
-      const roi = result.roi(new cv.Rect(suppressX, suppressY, suppressW, suppressH));
-      if (matchMode === "SQDIFF") {
-        roi.setTo(new cv.Scalar(1));
-      } else {
-        roi.setTo(new cv.Scalar(-1));
+      if (!exists) {
+        deduped.push(box);
       }
-      roi.delete();
+      if (deduped.length >= 30) break;
     }
 
-    return boxes;
+    return deduped;
   } finally {
     try {
       sceneGray?.delete?.();
       sampleGray?.delete?.();
-      result?.delete?.();
     } catch {}
   }
 }
@@ -335,6 +459,8 @@ export default function ReviewPage() {
   const [buildingPreview, setBuildingPreview] = useState(false);
   const [matchBoxes, setMatchBoxes] = useState<MatchBox[]>([]);
   const [matchThreshold, setMatchThreshold] = useState(0.8);
+  const [rotationRange, setRotationRange] = useState<RotationRangeMode>(0);
+  const [scaleRange, setScaleRange] = useState<ScaleRangeMode>(0);
 
   const [imageRect, setImageRect] = useState({
     left: 0,
@@ -387,6 +513,18 @@ export default function ReviewPage() {
         const n = Number(savedThreshold);
         if (Number.isFinite(n)) setMatchThreshold(n);
       }
+
+      const savedRotationRange = localStorage.getItem(ROTATION_RANGE_KEY);
+      if (savedRotationRange !== null) {
+        const n = Number(savedRotationRange) as RotationRangeMode;
+        if ([0, 3, 6, 9].includes(n)) setRotationRange(n);
+      }
+
+      const savedScaleRange = localStorage.getItem(SCALE_RANGE_KEY);
+      if (savedScaleRange !== null) {
+        const n = Number(savedScaleRange) as ScaleRangeMode;
+        if ([0, 5, 10].includes(n)) setScaleRange(n);
+      }
     } finally {
       setSamplesLoaded(true);
     }
@@ -415,6 +553,14 @@ export default function ReviewPage() {
   useEffect(() => {
     localStorage.setItem(MATCH_THRESHOLD_KEY, String(matchThreshold));
   }, [matchThreshold]);
+
+  useEffect(() => {
+    localStorage.setItem(ROTATION_RANGE_KEY, String(rotationRange));
+  }, [rotationRange]);
+
+  useEffect(() => {
+    localStorage.setItem(SCALE_RANGE_KEY, String(scaleRange));
+  }, [scaleRange]);
 
   useEffect(() => {
     let cancelled = false;
@@ -586,6 +732,8 @@ export default function ReviewPage() {
               debugMode,
               matchMode: matchMethod,
               threshold: matchThreshold,
+              rotationRange,
+              scaleRange,
             });
 
             if (!cancelled) {
@@ -611,7 +759,17 @@ export default function ReviewPage() {
     return () => {
       cancelled = true;
     };
-  }, [cvReady, capturedImage, debugMode, matchMethod, matchThreshold, selectedSampleId, samples]);
+  }, [
+    cvReady,
+    capturedImage,
+    debugMode,
+    matchMethod,
+    matchThreshold,
+    rotationRange,
+    scaleRange,
+    selectedSampleId,
+    samples,
+  ]);
 
   const handleMissingToggle = () => {
     const next = !missingOn;
@@ -724,6 +882,38 @@ export default function ReviewPage() {
             </button>
           ))}
         </div>
+
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          {ROTATION_RANGE_OPTIONS.map((v) => (
+            <button
+              key={v}
+              onClick={() => setRotationRange(v)}
+              className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
+                rotationRange === v
+                  ? "bg-sky-300 text-black border-sky-300"
+                  : "bg-zinc-900 text-zinc-300 border-zinc-700"
+              }`}
+            >
+              {v === 0 ? "ROT 0°" : `ROT ±${v}°`}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          {SCALE_RANGE_OPTIONS.map((v) => (
+            <button
+              key={v}
+              onClick={() => setScaleRange(v)}
+              className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
+                scaleRange === v
+                  ? "bg-amber-300 text-black border-amber-300"
+                  : "bg-zinc-900 text-zinc-300 border-zinc-700"
+              }`}
+            >
+              {v === 0 ? "SCALE 0%" : `SCALE ±${v}%`}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="flex-1 p-4 space-y-4">
@@ -742,7 +932,7 @@ export default function ReviewPage() {
 
               {matchBoxes.map((box, i) => (
                 <div
-                  key={`${i}-${box.x}-${box.y}-${box.score}`}
+                  key={`${i}-${box.x}-${box.y}-${box.score}-${box.rotationDeg}-${box.scaleFactor}`}
                   className="absolute border-[3px] rounded-md pointer-events-none"
                   style={{
                     left: imageRect.left + imageRect.width * box.x,
@@ -751,6 +941,7 @@ export default function ReviewPage() {
                     height: imageRect.height * box.h,
                     borderColor: colorFromIndex(i),
                   }}
+                  title={box.label}
                 />
               ))}
 
@@ -798,6 +989,22 @@ export default function ReviewPage() {
           <div className="mt-2 text-[11px] text-zinc-400">
             SAMPLE: {debugMode}
           </div>
+
+          {matchBoxes.length > 0 ? (
+            <div className="mt-3 max-h-32 overflow-auto text-[11px] space-y-1 text-zinc-300">
+              {matchBoxes.slice(0, 8).map((box, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <span
+                    className="inline-block w-3 h-3 rounded-full shrink-0"
+                    style={{ backgroundColor: colorFromIndex(i) }}
+                  />
+                  <span className="truncate">
+                    {box.label} / score {box.score.toFixed(3)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : null}
         </div>
       </div>
 
