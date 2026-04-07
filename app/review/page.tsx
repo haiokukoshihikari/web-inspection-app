@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "v2026-04-06-06";
+const REVIEW_VERSION = "v2026-04-06-07";
 
 const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
@@ -435,7 +435,6 @@ function runMultiMatch(params: {
 export default function ReviewPage() {
   const router = useRouter();
   const frameRef = useRef<HTMLDivElement | null>(null);
-  const imgRef = useRef<HTMLImageElement | null>(null);
 
   const [capturedImage, setCapturedImage] = useState("");
   const [draftSensitivity, setDraftSensitivity] = useState(58);
@@ -461,6 +460,11 @@ export default function ReviewPage() {
   const [matchThreshold, setMatchThreshold] = useState(0.8);
   const [rotationRange, setRotationRange] = useState<RotationRangeMode>(0);
   const [scaleRange, setScaleRange] = useState<ScaleRangeMode>(0);
+
+  const [displayBasis, setDisplayBasis] = useState({
+    width: 0,
+    height: 0,
+  });
 
   const [imageRect, setImageRect] = useState({
     left: 0,
@@ -639,18 +643,18 @@ export default function ReviewPage() {
 
   const updateImageRect = () => {
     const frame = frameRef.current;
-    const img = imgRef.current;
-    if (!frame || !img) return;
+    if (!frame) return;
 
     const frameWidth = frame.clientWidth;
     const frameHeight = frame.clientHeight;
-    const naturalWidth = img.naturalWidth;
-    const naturalHeight = img.naturalHeight;
-    if (!frameWidth || !frameHeight || !naturalWidth || !naturalHeight) return;
+    const basisWidth = displayBasis.width;
+    const basisHeight = displayBasis.height;
 
-    const scale = Math.min(frameWidth / naturalWidth, frameHeight / naturalHeight);
-    const displayWidth = naturalWidth * scale;
-    const displayHeight = naturalHeight * scale;
+    if (!frameWidth || !frameHeight || !basisWidth || !basisHeight) return;
+
+    const scale = Math.min(frameWidth / basisWidth, frameHeight / basisHeight);
+    const displayWidth = basisWidth * scale;
+    const displayHeight = basisHeight * scale;
     const left = (frameWidth - displayWidth) / 2;
     const top = (frameHeight - displayHeight) / 2;
 
@@ -661,10 +665,10 @@ export default function ReviewPage() {
     const onResize = () => updateImageRect();
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
-  }, []);
+  }, [displayBasis]);
 
   useEffect(() => {
-    if (!mainPreviewUrl) return;
+    if (!mainPreviewUrl || !displayBasis.width || !displayBasis.height) return;
     const t1 = window.setTimeout(() => updateImageRect(), 0);
     const t2 = window.setTimeout(() => updateImageRect(), 120);
     const t3 = window.setTimeout(() => updateImageRect(), 300);
@@ -673,7 +677,7 @@ export default function ReviewPage() {
       window.clearTimeout(t2);
       window.clearTimeout(t3);
     };
-  }, [mainPreviewUrl, matchBoxes]);
+  }, [mainPreviewUrl, matchBoxes, displayBasis]);
 
   useEffect(() => {
     let cancelled = false;
@@ -701,6 +705,14 @@ export default function ReviewPage() {
           if (!scene) return;
 
           sceneSrc = scene.srcMat;
+
+          if (!cancelled) {
+            setDisplayBasis({
+              width: scene.width,
+              height: scene.height,
+            });
+          }
+
           const mainUrl =
             debugMode === "ORIGINAL"
               ? capturedImage
@@ -919,15 +931,24 @@ export default function ReviewPage() {
       <div className="flex-1 p-4 space-y-4">
         <div
           ref={frameRef}
-          className="w-full max-h-[46vh] rounded-[1.5rem] border border-zinc-800 bg-zinc-900 relative overflow-hidden aspect-[3/4] mx-auto flex items-center justify-center"
+          className="w-full rounded-[1.5rem] border border-zinc-800 bg-zinc-900 relative overflow-hidden mx-auto flex items-center justify-center"
+          style={{
+            height: "min(64vh, 72vw, 760px)",
+          }}
         >
           {mainPreviewUrl ? (
             <>
               <img
-                ref={imgRef}
                 src={mainPreviewUrl}
                 alt="撮影画像"
-                className="max-w-full max-h-full object-contain block"
+                className="absolute block"
+                style={{
+                  left: imageRect.left,
+                  top: imageRect.top,
+                  width: imageRect.width,
+                  height: imageRect.height,
+                  objectFit: "fill",
+                }}
               />
 
               {matchBoxes.map((box, i) => (
