@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 const SAMPLES_KEY = "inspection:samples";
 const MAX_SAMPLES = 6;
 
-const REVIEW_VERSION = "add-sample-fix-01";
+const REVIEW_VERSION = "add-sample-fix-02";
 
 const MIN_BOX_W = 0.12;
 const MAX_BOX_W = 0.8;
@@ -18,6 +18,7 @@ type SampleItem = {
   count: number;
   color: string;
   thumbUrl?: string;
+  masterUrl?: string;
   aspectRatio?: number;
 };
 
@@ -106,15 +107,25 @@ export default function AddSamplePage() {
   const updateBaseRect = () => {
     if (!frameRef.current || !imgRef.current) return;
 
-    const frame = frameRef.current.getBoundingClientRect();
-    const img = imgRef.current.getBoundingClientRect();
+    const frame = frameRef.current;
+    const img = imgRef.current;
 
-    const width = Math.max(0, img.width);
-    const height = Math.max(0, img.height);
+    const frameWidth = frame.clientWidth;
+    const frameHeight = frame.clientHeight;
+    const naturalWidth = img.naturalWidth;
+    const naturalHeight = img.naturalHeight;
+
+    if (!frameWidth || !frameHeight || !naturalWidth || !naturalHeight) return;
+
+    const fitScale = Math.min(frameWidth / naturalWidth, frameHeight / naturalHeight);
+    const width = naturalWidth * fitScale;
+    const height = naturalHeight * fitScale;
+    const left = (frameWidth - width) / 2;
+    const top = (frameHeight - height) / 2;
 
     setBaseRect({
-      left: img.left - frame.left,
-      top: img.top - frame.top,
+      left,
+      top,
       width,
       height,
     });
@@ -297,20 +308,6 @@ export default function AddSamplePage() {
 
     const sourceImg = new Image();
     sourceImg.onload = () => {
-      const cropCanvas = document.createElement("canvas");
-      const thumbBase = 140;
-      const thumbW = Math.max(1, Math.round(thumbBase * safeBoxWidthRatio * 2.2));
-      const thumbH = Math.max(1, Math.round(thumbBase * safeBoxHeightRatio * 2.2));
-
-      cropCanvas.width = thumbW;
-      cropCanvas.height = thumbH;
-
-      const cropCtx = cropCanvas.getContext("2d");
-      if (!cropCtx) return;
-
-      cropCtx.fillStyle = "#111";
-      cropCtx.fillRect(0, 0, thumbW, thumbH);
-
       const scaledWidth = baseRect.width * imageScale;
       const scaledHeight = baseRect.height * imageScale;
 
@@ -342,9 +339,21 @@ export default function AddSamplePage() {
         srcH = naturalHeight - srcY;
       }
 
+      srcX = Math.round(srcX);
+      srcY = Math.round(srcY);
+      srcW = Math.round(srcW);
+      srcH = Math.round(srcH);
+
       if (srcW <= 1 || srcH <= 1) return;
 
-      cropCtx.drawImage(
+      const masterCanvas = document.createElement("canvas");
+      masterCanvas.width = srcW;
+      masterCanvas.height = srcH;
+
+      const masterCtx = masterCanvas.getContext("2d");
+      if (!masterCtx) return;
+
+      masterCtx.drawImage(
         sourceImg,
         srcX,
         srcY,
@@ -352,11 +361,27 @@ export default function AddSamplePage() {
         srcH,
         0,
         0,
-        thumbW,
-        thumbH
+        srcW,
+        srcH
       );
 
-      const thumbUrl = cropCanvas.toDataURL("image/jpeg", 0.9);
+      const masterUrl = masterCanvas.toDataURL("image/png");
+
+      const thumbCanvas = document.createElement("canvas");
+      const thumbBase = 140;
+      const thumbW = Math.max(1, Math.round(thumbBase * safeBoxWidthRatio * 2.2));
+      const thumbH = Math.max(1, Math.round(thumbBase * safeBoxHeightRatio * 2.2));
+      thumbCanvas.width = thumbW;
+      thumbCanvas.height = thumbH;
+
+      const thumbCtx = thumbCanvas.getContext("2d");
+      if (!thumbCtx) return;
+
+      thumbCtx.fillStyle = "#111";
+      thumbCtx.fillRect(0, 0, thumbW, thumbH);
+      thumbCtx.drawImage(masterCanvas, 0, 0, srcW, srcH, 0, 0, thumbW, thumbH);
+
+      const thumbUrl = thumbCanvas.toDataURL("image/jpeg", 0.9);
 
       let existing: SampleItem[] = [];
       try {
@@ -381,7 +406,8 @@ export default function AddSamplePage() {
         count: 0,
         color: nextColor,
         thumbUrl,
-        aspectRatio: thumbW / thumbH,
+        masterUrl,
+        aspectRatio: srcW / srcH,
       };
 
       const nextSamples = [...existing, nextItem];
