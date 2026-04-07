@@ -6,19 +6,22 @@ import { useRouter } from "next/navigation";
 const SAMPLES_KEY = "inspection:samples";
 const MAX_SAMPLES = 6;
 
-const REVIEW_VERSION = "add-sample-fix-02";
+const REVIEW_VERSION = "add-sample-fix-03";
 
 const MIN_BOX_W = 0.12;
 const MAX_BOX_W = 0.8;
 const MIN_BOX_H = 0.1;
 const MAX_BOX_H = 0.6;
 
+// review 側で比較に使う基準幅
+const COMPARE_BASE_WIDTH = 1200;
+
 type SampleItem = {
   id: string;
   count: number;
   color: string;
   thumbUrl?: string;
-  masterUrl?: string;
+  compareUrl?: string;
   aspectRatio?: number;
 };
 
@@ -296,7 +299,7 @@ export default function AddSamplePage() {
   };
 
   const handleSave = () => {
-    if (!capturedImage || !imgRef.current || !frameRef.current) return;
+    if (!capturedImage || !imgRef.current) return;
 
     const imgEl = imgRef.current;
     const naturalWidth = imgEl.naturalWidth;
@@ -308,21 +311,36 @@ export default function AddSamplePage() {
 
     const sourceImg = new Image();
     sourceImg.onload = () => {
-      const scaledWidth = baseRect.width * imageScale;
-      const scaledHeight = baseRect.height * imageScale;
+      // 1) まず比較用の縮小画像を作る
+      const compareScale = Math.min(1, COMPARE_BASE_WIDTH / naturalWidth);
+      const compareWidth = Math.max(1, Math.round(naturalWidth * compareScale));
+      const compareHeight = Math.max(1, Math.round(naturalHeight * compareScale));
+
+      const compareCanvas = document.createElement("canvas");
+      compareCanvas.width = compareWidth;
+      compareCanvas.height = compareHeight;
+
+      const compareCtx = compareCanvas.getContext("2d");
+      if (!compareCtx) return;
+
+      compareCtx.drawImage(sourceImg, 0, 0, compareWidth, compareHeight);
+
+      // 2) 画面上の選択枠を、元画像座標ではなく compareCanvas 座標へ変換
+      const scaledWidthOnScreen = baseRect.width * imageScale;
+      const scaledHeightOnScreen = baseRect.height * imageScale;
 
       const imageLeft =
-        baseRect.left + imagePanX - (scaledWidth - baseRect.width) / 2;
+        baseRect.left + imagePanX - (scaledWidthOnScreen - baseRect.width) / 2;
       const imageTop =
-        baseRect.top + imagePanY - (scaledHeight - baseRect.height) / 2;
+        baseRect.top + imagePanY - (scaledHeightOnScreen - baseRect.height) / 2;
 
       const cropLeftOnScreen = displayBox.left - imageLeft;
       const cropTopOnScreen = displayBox.top - imageTop;
 
-      let srcX = (cropLeftOnScreen / scaledWidth) * naturalWidth;
-      let srcY = (cropTopOnScreen / scaledHeight) * naturalHeight;
-      let srcW = (displayBox.width / scaledWidth) * naturalWidth;
-      let srcH = (displayBox.height / scaledHeight) * naturalHeight;
+      let srcX = (cropLeftOnScreen / scaledWidthOnScreen) * compareWidth;
+      let srcY = (cropTopOnScreen / scaledHeightOnScreen) * compareHeight;
+      let srcW = (displayBox.width / scaledWidthOnScreen) * compareWidth;
+      let srcH = (displayBox.height / scaledHeightOnScreen) * compareHeight;
 
       if (srcX < 0) {
         srcW += srcX;
@@ -332,11 +350,11 @@ export default function AddSamplePage() {
         srcH += srcY;
         srcY = 0;
       }
-      if (srcX + srcW > naturalWidth) {
-        srcW = naturalWidth - srcX;
+      if (srcX + srcW > compareWidth) {
+        srcW = compareWidth - srcX;
       }
-      if (srcY + srcH > naturalHeight) {
-        srcH = naturalHeight - srcY;
+      if (srcY + srcH > compareHeight) {
+        srcH = compareHeight - srcY;
       }
 
       srcX = Math.round(srcX);
@@ -346,15 +364,16 @@ export default function AddSamplePage() {
 
       if (srcW <= 1 || srcH <= 1) return;
 
-      const masterCanvas = document.createElement("canvas");
-      masterCanvas.width = srcW;
-      masterCanvas.height = srcH;
+      // 3) 比較用見本は compareCanvas からそのまま切り出す
+      const compareCropCanvas = document.createElement("canvas");
+      compareCropCanvas.width = srcW;
+      compareCropCanvas.height = srcH;
 
-      const masterCtx = masterCanvas.getContext("2d");
-      if (!masterCtx) return;
+      const compareCropCtx = compareCropCanvas.getContext("2d");
+      if (!compareCropCtx) return;
 
-      masterCtx.drawImage(
-        sourceImg,
+      compareCropCtx.drawImage(
+        compareCanvas,
         srcX,
         srcY,
         srcW,
@@ -365,8 +384,9 @@ export default function AddSamplePage() {
         srcH
       );
 
-      const masterUrl = masterCanvas.toDataURL("image/png");
+      const compareUrl = compareCropCanvas.toDataURL("image/png");
 
+      // 4) 表示用サムネイルを作る
       const thumbCanvas = document.createElement("canvas");
       const thumbBase = 140;
       const thumbW = Math.max(1, Math.round(thumbBase * safeBoxWidthRatio * 2.2));
@@ -379,7 +399,7 @@ export default function AddSamplePage() {
 
       thumbCtx.fillStyle = "#111";
       thumbCtx.fillRect(0, 0, thumbW, thumbH);
-      thumbCtx.drawImage(masterCanvas, 0, 0, srcW, srcH, 0, 0, thumbW, thumbH);
+      thumbCtx.drawImage(compareCropCanvas, 0, 0, srcW, srcH, 0, 0, thumbW, thumbH);
 
       const thumbUrl = thumbCanvas.toDataURL("image/jpeg", 0.9);
 
@@ -406,7 +426,7 @@ export default function AddSamplePage() {
         count: 0,
         color: nextColor,
         thumbUrl,
-        masterUrl,
+        compareUrl,
         aspectRatio: srcW / srcH,
       };
 

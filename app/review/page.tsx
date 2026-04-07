@@ -10,19 +10,20 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "v2026-04-06-04b";
+const REVIEW_VERSION = "v2026-04-06-05";
 
 const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
 const MISSING_KEY = "inspection:missingOn";
 const SAMPLES_KEY = "inspection:samples";
+const MATCH_THRESHOLD_KEY = "inspection:matchThreshold";
 
 type SampleItem = {
   id: string;
   count: number;
   color: string;
   thumbUrl?: string;
-  masterUrl?: string;
+  compareUrl?: string;
   aspectRatio?: number;
 };
 
@@ -80,6 +81,11 @@ function clamp(v: number, min: number, max: number) {
 
 function clamp01(v: number) {
   return clamp(v, 0, 1);
+}
+
+function colorFromIndex(index: number) {
+  const colors = ["#38bdf8", "#34d399", "#f59e0b", "#d946ef", "#06b6d4", "#fb7185"];
+  return colors[index % colors.length];
 }
 
 async function imageSrcToMat(
@@ -200,7 +206,7 @@ function getOpenCvMatchMethod(cv: any, mode: MatchMethodMode) {
   return cv.TM_SQDIFF_NORMED;
 }
 
-function runSingleBestMatch(params: {
+function runMultiMatch(params: {
   cv: any;
   sceneSrcMat: any;
   sampleSrcMat: any;
@@ -208,7 +214,8 @@ function runSingleBestMatch(params: {
   sceneHeight: number;
   debugMode: DebugViewMode;
   matchMode: MatchMethodMode;
-}): MatchBox | null {
+  threshold: number;
+}): MatchBox[] {
   const {
     cv,
     sceneSrcMat,
@@ -217,6 +224,7 @@ function runSingleBestMatch(params: {
     sceneHeight,
     debugMode,
     matchMode,
+    threshold,
   } = params;
 
   let sceneGray: any = null;
@@ -233,40 +241,64 @@ function runSingleBestMatch(params: {
       sampleGray.cols >= sceneGray.cols ||
       sampleGray.rows >= sceneGray.rows
     ) {
-      return null;
+      return [];
     }
 
     result = new cv.Mat();
     const method = getOpenCvMatchMethod(cv, matchMode);
     cv.matchTemplate(sceneGray, sampleGray, result, method);
 
-    const mm = cv.minMaxLoc(result);
+    const boxes: MatchBox[] = [];
+    const maxCount = 30;
 
-    let x = 0;
-    let y = 0;
-    let score = 0;
+    for (let i = 0; i < maxCount; i++) {
+      const mm = cv.minMaxLoc(result);
 
-    if (matchMode === "SQDIFF") {
-      x = mm.minLoc.x;
-      y = mm.minLoc.y;
-      score = 1 - mm.minVal;
-    } else {
-      x = mm.maxLoc.x;
-      y = mm.maxLoc.y;
-      score = mm.maxVal;
+      let x = 0;
+      let y = 0;
+      let score = 0;
+
+      if (matchMode === "SQDIFF") {
+        x = mm.minLoc.x;
+        y = mm.minLoc.y;
+        score = 1 - mm.minVal;
+      } else {
+        x = mm.maxLoc.x;
+        y = mm.maxLoc.y;
+        score = mm.maxVal;
+      }
+
+      if (score < threshold) break;
+
+      const w = sampleGray.cols;
+      const h = sampleGray.rows;
+
+      boxes.push({
+        x: clamp01(x / sceneWidth),
+        y: clamp01(y / sceneHeight),
+        w: clamp01(w / sceneWidth),
+        h: clamp01(h / sceneHeight),
+        score,
+        label: `${matchMode} / ${debugMode}`,
+      });
+
+      const suppressX = clamp(x - Math.round(w * 0.35), 0, result.cols - 1);
+      const suppressY = clamp(y - Math.round(h * 0.35), 0, result.rows - 1);
+      const suppressW = clamp(Math.round(w * 0.7), 1, result.cols - suppressX);
+      const suppressH = clamp(Math.round(h * 0.7), 1, result.rows - suppressY);
+
+      if (suppressW <= 0 || suppressH <= 0) break;
+
+      const roi = result.roi(new cv.Rect(suppressX, suppressY, suppressW, suppressH));
+      if (matchMode === "SQDIFF") {
+        roi.setTo(new cv.Scalar(1));
+      } else {
+        roi.setTo(new cv.Scalar(-1));
+      }
+      roi.delete();
     }
 
-    const w = sampleGray.cols;
-    const h = sampleGray.rows;
-
-    return {
-      x: clamp01(x / sceneWidth),
-      y: clamp01(y / sceneHeight),
-      w: clamp01(w / sceneWidth),
-      h: clamp01(h / sceneHeight),
-      score,
-      label: `${matchMode} / ${debugMode}`,
-    };
+    return boxes;
   } finally {
     try {
       sceneGray?.delete?.();
@@ -301,7 +333,8 @@ export default function ReviewPage() {
   const [mainPreviewUrl, setMainPreviewUrl] = useState("");
   const [samplePreviewUrl, setSamplePreviewUrl] = useState("");
   const [buildingPreview, setBuildingPreview] = useState(false);
-  const [matchBox, setMatchBox] = useState<MatchBox | null>(null);
+  const [matchBoxes, setMatchBoxes] = useState<MatchBox[]>([]);
+  const [matchThreshold, setMatchThreshold] = useState(0.8);
 
   const [imageRect, setImageRect] = useState({
     left: 0,
@@ -348,6 +381,12 @@ export default function ReviewPage() {
       } else {
         setSamples(DEFAULT_SAMPLES);
       }
+
+      const savedThreshold = localStorage.getItem(MATCH_THRESHOLD_KEY);
+      if (savedThreshold !== null) {
+        const n = Number(savedThreshold);
+        if (Number.isFinite(n)) setMatchThreshold(n);
+      }
     } finally {
       setSamplesLoaded(true);
     }
@@ -372,6 +411,10 @@ export default function ReviewPage() {
 
     return () => window.clearTimeout(timer);
   }, [draftSensitivity, appliedSensitivity]);
+
+  useEffect(() => {
+    localStorage.setItem(MATCH_THRESHOLD_KEY, String(matchThreshold));
+  }, [matchThreshold]);
 
   useEffect(() => {
     let cancelled = false;
@@ -484,7 +527,7 @@ export default function ReviewPage() {
       window.clearTimeout(t2);
       window.clearTimeout(t3);
     };
-  }, [mainPreviewUrl, matchBox]);
+  }, [mainPreviewUrl, matchBoxes]);
 
   useEffect(() => {
     let cancelled = false;
@@ -499,10 +542,10 @@ export default function ReviewPage() {
 
       try {
         const selectedSample = samples.find(
-          (s) => s.id === selectedSampleId && (!!s.masterUrl || !!s.thumbUrl)
+          (s) => s.id === selectedSampleId && (!!s.compareUrl || !!s.thumbUrl)
         );
         const selectedSampleSrc =
-          selectedSample?.masterUrl || selectedSample?.thumbUrl || "";
+          selectedSample?.compareUrl || selectedSample?.thumbUrl || "";
 
         let sceneSrc: any = null;
         let sampleSrc: any = null;
@@ -522,10 +565,10 @@ export default function ReviewPage() {
           if (!selectedSampleSrc) {
             if (!cancelled) {
               setSamplePreviewUrl("");
-              setMatchBox(null);
+              setMatchBoxes([]);
             }
           } else {
-            const smp = await imageSrcToMat(cv, selectedSampleSrc, 600);
+            const smp = await imageSrcToMat(cv, selectedSampleSrc, 1200);
             if (!smp) return;
 
             sampleSrc = smp.srcMat;
@@ -534,7 +577,7 @@ export default function ReviewPage() {
                 ? selectedSampleSrc
                 : buildDebugImageFromSrcMat(cv, sampleSrc, debugMode);
 
-            const best = runSingleBestMatch({
+            const hits = runMultiMatch({
               cv,
               sceneSrcMat: sceneSrc,
               sampleSrcMat: sampleSrc,
@@ -542,11 +585,12 @@ export default function ReviewPage() {
               sceneHeight: scene.height,
               debugMode,
               matchMode: matchMethod,
+              threshold: matchThreshold,
             });
 
             if (!cancelled) {
               setSamplePreviewUrl(sampleUrl);
-              setMatchBox(best);
+              setMatchBoxes(hits);
             }
           }
         } finally {
@@ -567,7 +611,7 @@ export default function ReviewPage() {
     return () => {
       cancelled = true;
     };
-  }, [cvReady, capturedImage, debugMode, matchMethod, selectedSampleId, samples]);
+  }, [cvReady, capturedImage, debugMode, matchMethod, matchThreshold, selectedSampleId, samples]);
 
   const handleMissingToggle = () => {
     const next = !missingOn;
@@ -610,6 +654,23 @@ export default function ReviewPage() {
           />
           <div className={`text-sm w-9 text-right ${!cvReady ? "text-zinc-500" : "text-zinc-300"}`}>
             {draftSensitivity}
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="text-sm text-zinc-300 shrink-0">しきい値</div>
+          <input
+            type="range"
+            min={0.3}
+            max={0.99}
+            step={0.01}
+            value={matchThreshold}
+            onChange={(e) => setMatchThreshold(Number(e.target.value))}
+            className={`flex-1 ${!cvReady ? "opacity-50 cursor-not-allowed" : ""}`}
+            disabled={!cvReady}
+          />
+          <div className={`text-sm w-12 text-right ${!cvReady ? "text-zinc-500" : "text-zinc-300"}`}>
+            {matchThreshold.toFixed(2)}
           </div>
         </div>
 
@@ -679,17 +740,19 @@ export default function ReviewPage() {
                 className="max-w-full max-h-full object-contain block"
               />
 
-              {matchBox ? (
+              {matchBoxes.map((box, i) => (
                 <div
-                  className="absolute border-[3px] border-emerald-400 rounded-md pointer-events-none"
+                  key={`${i}-${box.x}-${box.y}-${box.score}`}
+                  className="absolute border-[3px] rounded-md pointer-events-none"
                   style={{
-                    left: imageRect.left + imageRect.width * matchBox.x,
-                    top: imageRect.top + imageRect.height * matchBox.y,
-                    width: imageRect.width * matchBox.w,
-                    height: imageRect.height * matchBox.h,
+                    left: imageRect.left + imageRect.width * box.x,
+                    top: imageRect.top + imageRect.height * box.y,
+                    width: imageRect.width * box.w,
+                    height: imageRect.height * box.h,
+                    borderColor: colorFromIndex(i),
                   }}
                 />
-              ) : null}
+              ))}
 
               {buildingPreview ? (
                 <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/45">
@@ -704,11 +767,9 @@ export default function ReviewPage() {
                 {`MAIN: ${debugMode}`}
               </div>
 
-              {matchBox ? (
-                <div className="absolute right-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10">
-                  {`${matchBox.label} / score ${matchBox.score.toFixed(3)}`}
-                </div>
-              ) : null}
+              <div className="absolute right-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10">
+                {`${matchMethod} / hits ${matchBoxes.length}`}
+              </div>
             </>
           ) : (
             <div className="h-full flex items-center justify-center text-zinc-400">
@@ -817,7 +878,7 @@ export default function ReviewPage() {
                           if (selectedSampleId === sample.id) {
                             setSelectedSampleId(null);
                             setSamplePreviewUrl("");
-                            setMatchBox(null);
+                            setMatchBoxes([]);
                           }
                         }
                       }}
