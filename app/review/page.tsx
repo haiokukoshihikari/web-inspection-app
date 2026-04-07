@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "v2026-04-06-04";
+const REVIEW_VERSION = "v2026-04-06-04b";
 
 const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
@@ -22,6 +22,7 @@ type SampleItem = {
   count: number;
   color: string;
   thumbUrl?: string;
+  masterUrl?: string;
   aspectRatio?: number;
 };
 
@@ -208,7 +209,15 @@ function runSingleBestMatch(params: {
   debugMode: DebugViewMode;
   matchMode: MatchMethodMode;
 }): MatchBox | null {
-  const { cv, sceneSrcMat, sampleSrcMat, sceneWidth, sceneHeight, debugMode, matchMode } = params;
+  const {
+    cv,
+    sceneSrcMat,
+    sampleSrcMat,
+    sceneWidth,
+    sceneHeight,
+    debugMode,
+    matchMode,
+  } = params;
 
   let sceneGray: any = null;
   let sampleGray: any = null;
@@ -489,7 +498,11 @@ export default function ReviewPage() {
       setBuildingPreview(true);
 
       try {
-        const selectedSample = samples.find((s) => s.id === selectedSampleId && !!s.thumbUrl);
+        const selectedSample = samples.find(
+          (s) => s.id === selectedSampleId && (!!s.masterUrl || !!s.thumbUrl)
+        );
+        const selectedSampleSrc =
+          selectedSample?.masterUrl || selectedSample?.thumbUrl || "";
 
         let sceneSrc: any = null;
         let sampleSrc: any = null;
@@ -506,19 +519,19 @@ export default function ReviewPage() {
 
           if (!cancelled) setMainPreviewUrl(mainUrl);
 
-          if (!selectedSample?.thumbUrl) {
+          if (!selectedSampleSrc) {
             if (!cancelled) {
               setSamplePreviewUrl("");
               setMatchBox(null);
             }
           } else {
-            const smp = await imageSrcToMat(cv, selectedSample.thumbUrl, 240);
+            const smp = await imageSrcToMat(cv, selectedSampleSrc, 600);
             if (!smp) return;
 
             sampleSrc = smp.srcMat;
             const sampleUrl =
               debugMode === "ORIGINAL"
-                ? selectedSample.thumbUrl
+                ? selectedSampleSrc
                 : buildDebugImageFromSrcMat(cv, sampleSrc, debugMode);
 
             const best = runSingleBestMatch({
@@ -607,7 +620,9 @@ export default function ReviewPage() {
             className={`w-14 h-8 rounded-full transition ${missingOn ? "bg-rose-500" : "bg-zinc-700"}`}
           >
             <span
-              className={`block w-6 h-6 bg-white rounded-full transition translate-y-1 ${missingOn ? "translate-x-7" : "translate-x-1"}`}
+              className={`block w-6 h-6 bg-white rounded-full transition translate-y-1 ${
+                missingOn ? "translate-x-7" : "translate-x-1"
+              }`}
             />
           </button>
         </div>
@@ -743,9 +758,7 @@ export default function ReviewPage() {
                     setSelectedSampleId((prev) => (prev === sample.id ? null : sample.id));
                   }}
                   className={`w-full rounded-2xl border px-2 py-2 flex items-center gap-2 min-w-0 ${
-                    selected
-                      ? "border-white bg-zinc-800"
-                      : "border-zinc-800 bg-zinc-900"
+                    selected ? "border-white bg-zinc-800" : "border-zinc-800 bg-zinc-900"
                   }`}
                 >
                   {sample.thumbUrl ? (
