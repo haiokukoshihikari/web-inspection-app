@@ -1,20 +1,36 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Script from "next/script";
 import { useRouter } from "next/navigation";
 
-const SAMPLES_KEY = "inspection:samples";
-const MAX_SAMPLES = 6;
+declare global {
+  interface Window {
+    cv?: any;
+  }
+}
 
-const REVIEW_VERSION = "add-sample-fix-03";
+const SAMPLES_KEY = "inspection:samples";
+const RESOLUTION_KEY = "inspection:compareResolution";
+const RECTIFY_KEY = "inspection:rectifyMode";
+
+const MAX_SAMPLES = 6;
+const REVIEW_VERSION = "add-sample-fix-04";
 
 const MIN_BOX_W = 0.12;
 const MAX_BOX_W = 0.8;
 const MIN_BOX_H = 0.1;
 const MAX_BOX_H = 0.6;
 
-// review 側で比較に使う基準幅
-const COMPARE_BASE_WIDTH = 1200;
+type RectifyMode = "OFF" | "ON";
+type CompareResolutionMode = 1200 | 1600 | 2000 | 2400;
+
+type CropNorm = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
 
 type SampleItem = {
   id: string;
@@ -23,6 +39,9 @@ type SampleItem = {
   thumbUrl?: string;
   compareUrl?: string;
   aspectRatio?: number;
+  sourceImageUrl?: string;
+  cropNorm?: CropNorm;
+  savedRectifyMode?: RectifyMode;
 };
 
 const SAMPLE_COLORS = [
@@ -38,6 +57,209 @@ type PointerMap = Record<number, { x: number; y: number }>;
 
 function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v));
+}
+
+function matToDataUrl(cv: any, mat: any): string {
+  const canvas = document.createElement("canvas");
+  cv.imshow(canvas, mat);
+  return canvas.toDataURL("image/png");
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+async function imageSrcToMat(
+  cv: any,
+  src: string,
+  maxWidth: number
+): Promise<{ srcMat: any; width: number; height: number } | null> {
+  const img = await loadImage(src);
+  const scale = Math.min(1, maxWidth / img.naturalWidth);
+  const width = Math.max(1, Math.round(img.naturalWidth * scale));
+  const height = Math.max(1, Math.round(img.naturalHeight * scale));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+
+  ctx.drawImage(img, 0, 0, width, height);
+
+  const srcMat = cv.imread(canvas);
+  return { srcMat, width, height };
+}
+
+function orderQuadPoints(points: { x: number; y: number }[]) {
+  const sorted = [...points].sort((a, b) => a.y - b.y);
+  const top = sorted.slice(0, 2).sort((a, b) => a.x - b.x);
+  const bottom = sorted.slice(2, 4).sort((a, b) => a.x - b.x);
+  return [top[0], top[1], bottom[1], bottom[0]];
+}
+
+function rectifySceneApprox(cv: any, srcMat: any): any {
+  let gray: any = null;
+  let blur: any = null;
+  let edges: any = null;
+  let contours: any = null;
+  let hierarchy: any = null;
+  let bestContour: any = null;
+  let bestHull: any = null;
+  let approx: any = null;
+  let dst: any = null;
+  let M: any = null;
+
+  try {
+    gray = new cv.Mat();
+    cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY);
+
+    blur = new cv.Mat();
+    cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
+
+    edges = new cv.Mat();
+    cv.Canny(blur, edges, 40, 140);
+
+    const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
+    cv.dilate(edges, edges, kernel);
+    cv.morphologyEx(edges, edges, cv.MORPH_CLOSE, kernel);
+    kernel.delete();
+
+    contours = new cv.MatVector();
+    hierarchy = new cv.Mat();
+    cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    let bestArea = 0;
+
+    for (let i = 0; i < contours.size(); i++) {
+      const cnt = contours.get(i);
+      const area = cv.contourArea(cnt);
+      const rect = cv.boundingRect(cnt);
+
+      const largeEnough =
+        rect.width > srcMat.cols * 0.35 &&
+        rect.height > srcMat.rows * 0.35;
+
+      if (largeEnough && area > bestArea) {
+        bestArea = area;
+        bestContour?.delete?.();
+        bestContour = cnt.clone();
+      }
+      cnt.delete();
+    }
+
+    if (!bestContour) {
+      return srcMat.clone();
+    }
+
+    bestHull = new cv.Mat();
+    cv.convexHull(bestContour, bestHull, false, true);
+
+    const peri = cv.arcLength(bestHull, true);
+    approx = new cv.Mat();
+    cv.approxPolyDP(bestHull, approx, 0.02 * peri, true);
+
+    let quad: { x: number; y: number }[] | null = null;
+
+    if (approx.rows === 4) {
+      quad = [];
+      for (let i = 0; i < 4; i++) {
+        quad.push({
+          x: approx.intPtr(i, 0)[0],
+          y: approx.intPtr(i, 0)[1],
+        });
+      }
+    } else {
+      const pts: { x: number; y: number }[] = [];
+      for (let i = 0; i < bestHull.rows; i++) {
+        pts.push({
+          x: bestHull.intPtr(i, 0)[0],
+          y: bestHull.intPtr(i, 0)[1],
+        });
+      }
+
+      if (pts.length >= 4) {
+        const minY = Math.min(...pts.map((p) => p.y));
+        const maxY = Math.max(...pts.map((p) => p.y));
+        const band = Math.max(10, Math.round((maxY - minY) * 0.15));
+
+        const topBand = pts.filter((p) => p.y <= minY + band);
+        const bottomBand = pts.filter((p) => p.y >= maxY - band);
+
+        if (topBand.length >= 2 && bottomBand.length >= 2) {
+          quad = [
+            topBand.reduce((a, b) => (a.x < b.x ? a : b)),
+            topBand.reduce((a, b) => (a.x > b.x ? a : b)),
+            bottomBand.reduce((a, b) => (a.x > b.x ? a : b)),
+            bottomBand.reduce((a, b) => (a.x < b.x ? a : b)),
+          ];
+        }
+      }
+    }
+
+    if (!quad) {
+      return srcMat.clone();
+    }
+
+    const [tl, tr, br, bl] = orderQuadPoints(quad);
+
+    const widthTop = Math.hypot(tr.x - tl.x, tr.y - tl.y);
+    const widthBottom = Math.hypot(br.x - bl.x, br.y - bl.y);
+    const heightLeft = Math.hypot(bl.x - tl.x, bl.y - tl.y);
+    const heightRight = Math.hypot(br.x - tr.x, br.y - tr.y);
+
+    const dstW = Math.max(1, Math.round(Math.max(widthTop, widthBottom)));
+    const dstH = Math.max(1, Math.round(Math.max(heightLeft, heightRight)));
+
+    const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
+      tl.x, tl.y,
+      tr.x, tr.y,
+      br.x, br.y,
+      bl.x, bl.y,
+    ]);
+    const dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
+      0, 0,
+      dstW - 1, 0,
+      dstW - 1, dstH - 1,
+      0, dstH - 1,
+    ]);
+
+    M = cv.getPerspectiveTransform(srcTri, dstTri);
+    dst = new cv.Mat();
+    cv.warpPerspective(
+      srcMat,
+      dst,
+      M,
+      new cv.Size(dstW, dstH),
+      cv.INTER_LINEAR,
+      cv.BORDER_CONSTANT,
+      new cv.Scalar(0, 0, 0, 255)
+    );
+
+    srcTri.delete();
+    dstTri.delete();
+
+    return dst.clone();
+  } finally {
+    try {
+      gray?.delete?.();
+      blur?.delete?.();
+      edges?.delete?.();
+      contours?.delete?.();
+      hierarchy?.delete?.();
+      bestContour?.delete?.();
+      bestHull?.delete?.();
+      approx?.delete?.();
+      dst?.delete?.();
+      M?.delete?.();
+    } catch {}
+  }
 }
 
 export default function AddSamplePage() {
@@ -67,6 +289,14 @@ export default function AddSamplePage() {
   });
 
   const [capturedImage, setCapturedImage] = useState("");
+  const [processedPreviewUrl, setProcessedPreviewUrl] = useState("");
+  const [processingBasis, setProcessingBasis] = useState({ width: 0, height: 0 });
+  const [compareResolution, setCompareResolution] =
+    useState<CompareResolutionMode>(1200);
+  const [rectifyMode, setRectifyMode] = useState<RectifyMode>("OFF");
+
+  const [cvReady, setCvReady] = useState(false);
+
   const [baseRect, setBaseRect] = useState({
     left: 0,
     top: 0,
@@ -87,25 +317,59 @@ export default function AddSamplePage() {
       if (stored && stored.startsWith("data:image/")) {
         setCapturedImage(stored);
       }
-    } catch (e) {
-      console.error("capturedImage load error:", e);
-    }
+      const savedRes = localStorage.getItem(RESOLUTION_KEY);
+      if (savedRes) {
+        const n = Number(savedRes) as CompareResolutionMode;
+        if ([1200, 1600, 2000, 2400].includes(n)) setCompareResolution(n);
+      }
+      const savedRect = localStorage.getItem(RECTIFY_KEY);
+      if (savedRect === "OFF" || savedRect === "ON") {
+        setRectifyMode(savedRect);
+      }
+    } catch {}
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function buildPreview() {
+      if (!capturedImage || !cvReady) return;
+      const cv = window.cv;
+      if (!cv) return;
+
+      let src: any = null;
+      let work: any = null;
+
+      try {
+        const loaded = await imageSrcToMat(cv, capturedImage, compareResolution);
+        if (!loaded) return;
+
+        src = loaded.srcMat;
+        work = rectifyMode === "ON" ? rectifySceneApprox(cv, src) : src.clone();
+
+        if (!cancelled) {
+          setProcessedPreviewUrl(matToDataUrl(cv, work));
+          setProcessingBasis({ width: work.cols, height: work.rows });
+          setImageScale(1);
+          setImagePanX(0);
+          setImagePanY(0);
+        }
+      } finally {
+        try {
+          src?.delete?.();
+          work?.delete?.();
+        } catch {}
+      }
+    }
+
+    buildPreview();
+    return () => {
+      cancelled = true;
+    };
+  }, [capturedImage, cvReady, compareResolution, rectifyMode]);
 
   const safeBoxWidthRatio = clamp(boxWidthRatio, MIN_BOX_W, MAX_BOX_W);
   const safeBoxHeightRatio = clamp(boxHeightRatio, MIN_BOX_H, MAX_BOX_H);
-
-  useEffect(() => {
-    if (boxWidthRatio !== safeBoxWidthRatio) {
-      setBoxWidthRatio(safeBoxWidthRatio);
-    }
-  }, [boxWidthRatio, safeBoxWidthRatio]);
-
-  useEffect(() => {
-    if (boxHeightRatio !== safeBoxHeightRatio) {
-      setBoxHeightRatio(safeBoxHeightRatio);
-    }
-  }, [boxHeightRatio, safeBoxHeightRatio]);
 
   const updateBaseRect = () => {
     if (!frameRef.current || !imgRef.current) return;
@@ -126,12 +390,7 @@ export default function AddSamplePage() {
     const left = (frameWidth - width) / 2;
     const top = (frameHeight - height) / 2;
 
-    setBaseRect({
-      left,
-      top,
-      width,
-      height,
-    });
+    setBaseRect({ left, top, width, height });
   };
 
   useEffect(() => {
@@ -192,10 +451,7 @@ export default function AddSamplePage() {
     if (imageTop > boxTop) correctedPanY -= imageTop - boxTop;
     if (imageBottom < boxBottom) correctedPanY += boxBottom - imageBottom;
 
-    return {
-      x: correctedPanX,
-      y: correctedPanY,
-    };
+    return { x: correctedPanX, y: correctedPanY };
   };
 
   const onFramePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -273,7 +529,6 @@ export default function AddSamplePage() {
 
   const onFramePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
     delete pointersRef.current[e.pointerId];
-
     try {
       e.currentTarget.releasePointerCapture(e.pointerId);
     } catch {}
@@ -298,149 +553,126 @@ export default function AddSamplePage() {
     }
   };
 
-  const handleSave = () => {
-    if (!capturedImage || !imgRef.current) return;
+  const handleSave = async () => {
+    if (!processedPreviewUrl || !processingBasis.width || !processingBasis.height) return;
 
-    const imgEl = imgRef.current;
-    const naturalWidth = imgEl.naturalWidth;
-    const naturalHeight = imgEl.naturalHeight;
+    const processedImg = await loadImage(processedPreviewUrl);
 
-    if (!naturalWidth || !naturalHeight || !baseRect.width || !baseRect.height) {
+    const scaledWidthOnScreen = baseRect.width * imageScale;
+    const scaledHeightOnScreen = baseRect.height * imageScale;
+
+    const imageLeft =
+      baseRect.left + imagePanX - (scaledWidthOnScreen - baseRect.width) / 2;
+    const imageTop =
+      baseRect.top + imagePanY - (scaledHeightOnScreen - baseRect.height) / 2;
+
+    const cropLeftOnScreen = displayBox.left - imageLeft;
+    const cropTopOnScreen = displayBox.top - imageTop;
+
+    let srcX = (cropLeftOnScreen / scaledWidthOnScreen) * processingBasis.width;
+    let srcY = (cropTopOnScreen / scaledHeightOnScreen) * processingBasis.height;
+    let srcW = (displayBox.width / scaledWidthOnScreen) * processingBasis.width;
+    let srcH = (displayBox.height / scaledHeightOnScreen) * processingBasis.height;
+
+    if (srcX < 0) {
+      srcW += srcX;
+      srcX = 0;
+    }
+    if (srcY < 0) {
+      srcH += srcY;
+      srcY = 0;
+    }
+    if (srcX + srcW > processingBasis.width) {
+      srcW = processingBasis.width - srcX;
+    }
+    if (srcY + srcH > processingBasis.height) {
+      srcH = processingBasis.height - srcY;
+    }
+
+    srcX = Math.round(srcX);
+    srcY = Math.round(srcY);
+    srcW = Math.round(srcW);
+    srcH = Math.round(srcH);
+
+    if (srcW <= 1 || srcH <= 1) return;
+
+    const cropNorm: CropNorm = {
+      x: srcX / processingBasis.width,
+      y: srcY / processingBasis.height,
+      w: srcW / processingBasis.width,
+      h: srcH / processingBasis.height,
+    };
+
+    const compareCanvas = document.createElement("canvas");
+    compareCanvas.width = srcW;
+    compareCanvas.height = srcH;
+    const compareCtx = compareCanvas.getContext("2d");
+    if (!compareCtx) return;
+
+    compareCtx.drawImage(
+      processedImg,
+      srcX,
+      srcY,
+      srcW,
+      srcH,
+      0,
+      0,
+      srcW,
+      srcH
+    );
+
+    const compareUrl = compareCanvas.toDataURL("image/png");
+
+    const thumbCanvas = document.createElement("canvas");
+    const thumbBase = 140;
+    const thumbW = Math.max(1, Math.round(thumbBase * safeBoxWidthRatio * 2.2));
+    const thumbH = Math.max(1, Math.round(thumbBase * safeBoxHeightRatio * 2.2));
+    thumbCanvas.width = thumbW;
+    thumbCanvas.height = thumbH;
+
+    const thumbCtx = thumbCanvas.getContext("2d");
+    if (!thumbCtx) return;
+    thumbCtx.fillStyle = "#111";
+    thumbCtx.fillRect(0, 0, thumbW, thumbH);
+    thumbCtx.drawImage(compareCanvas, 0, 0, srcW, srcH, 0, 0, thumbW, thumbH);
+    const thumbUrl = thumbCanvas.toDataURL("image/jpeg", 0.92);
+
+    let existing: SampleItem[] = [];
+    try {
+      const raw = localStorage.getItem(SAMPLES_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) existing = parsed;
+      }
+    } catch {}
+
+    if (existing.length >= MAX_SAMPLES) {
+      alert("見本は最大6件までです。");
       return;
     }
 
-    const sourceImg = new Image();
-    sourceImg.onload = () => {
-      // 1) まず比較用の縮小画像を作る
-      const compareScale = Math.min(1, COMPARE_BASE_WIDTH / naturalWidth);
-      const compareWidth = Math.max(1, Math.round(naturalWidth * compareScale));
-      const compareHeight = Math.max(1, Math.round(naturalHeight * compareScale));
+    const nextColor = SAMPLE_COLORS[existing.length % SAMPLE_COLORS.length];
 
-      const compareCanvas = document.createElement("canvas");
-      compareCanvas.width = compareWidth;
-      compareCanvas.height = compareHeight;
-
-      const compareCtx = compareCanvas.getContext("2d");
-      if (!compareCtx) return;
-
-      compareCtx.drawImage(sourceImg, 0, 0, compareWidth, compareHeight);
-
-      // 2) 画面上の選択枠を、元画像座標ではなく compareCanvas 座標へ変換
-      const scaledWidthOnScreen = baseRect.width * imageScale;
-      const scaledHeightOnScreen = baseRect.height * imageScale;
-
-      const imageLeft =
-        baseRect.left + imagePanX - (scaledWidthOnScreen - baseRect.width) / 2;
-      const imageTop =
-        baseRect.top + imagePanY - (scaledHeightOnScreen - baseRect.height) / 2;
-
-      const cropLeftOnScreen = displayBox.left - imageLeft;
-      const cropTopOnScreen = displayBox.top - imageTop;
-
-      let srcX = (cropLeftOnScreen / scaledWidthOnScreen) * compareWidth;
-      let srcY = (cropTopOnScreen / scaledHeightOnScreen) * compareHeight;
-      let srcW = (displayBox.width / scaledWidthOnScreen) * compareWidth;
-      let srcH = (displayBox.height / scaledHeightOnScreen) * compareHeight;
-
-      if (srcX < 0) {
-        srcW += srcX;
-        srcX = 0;
-      }
-      if (srcY < 0) {
-        srcH += srcY;
-        srcY = 0;
-      }
-      if (srcX + srcW > compareWidth) {
-        srcW = compareWidth - srcX;
-      }
-      if (srcY + srcH > compareHeight) {
-        srcH = compareHeight - srcY;
-      }
-
-      srcX = Math.round(srcX);
-      srcY = Math.round(srcY);
-      srcW = Math.round(srcW);
-      srcH = Math.round(srcH);
-
-      if (srcW <= 1 || srcH <= 1) return;
-
-      // 3) 比較用見本は compareCanvas からそのまま切り出す
-      const compareCropCanvas = document.createElement("canvas");
-      compareCropCanvas.width = srcW;
-      compareCropCanvas.height = srcH;
-
-      const compareCropCtx = compareCropCanvas.getContext("2d");
-      if (!compareCropCtx) return;
-
-      compareCropCtx.drawImage(
-        compareCanvas,
-        srcX,
-        srcY,
-        srcW,
-        srcH,
-        0,
-        0,
-        srcW,
-        srcH
-      );
-
-      const compareUrl = compareCropCanvas.toDataURL("image/png");
-
-      // 4) 表示用サムネイルを作る
-      const thumbCanvas = document.createElement("canvas");
-      const thumbBase = 140;
-      const thumbW = Math.max(1, Math.round(thumbBase * safeBoxWidthRatio * 2.2));
-      const thumbH = Math.max(1, Math.round(thumbBase * safeBoxHeightRatio * 2.2));
-      thumbCanvas.width = thumbW;
-      thumbCanvas.height = thumbH;
-
-      const thumbCtx = thumbCanvas.getContext("2d");
-      if (!thumbCtx) return;
-
-      thumbCtx.fillStyle = "#111";
-      thumbCtx.fillRect(0, 0, thumbW, thumbH);
-      thumbCtx.drawImage(compareCropCanvas, 0, 0, srcW, srcH, 0, 0, thumbW, thumbH);
-
-      const thumbUrl = thumbCanvas.toDataURL("image/jpeg", 0.9);
-
-      let existing: SampleItem[] = [];
-      try {
-        const raw = localStorage.getItem(SAMPLES_KEY);
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) existing = parsed;
-        }
-      } catch (e) {
-        console.error("sample load error:", e);
-      }
-
-      if (existing.length >= MAX_SAMPLES) {
-        alert("見本は最大6件までです。");
-        return;
-      }
-
-      const nextColor = SAMPLE_COLORS[existing.length % SAMPLE_COLORS.length];
-
-      const nextItem: SampleItem = {
-        id: String(Date.now()),
-        count: 0,
-        color: nextColor,
-        thumbUrl,
-        compareUrl,
-        aspectRatio: srcW / srcH,
-      };
-
-      const nextSamples = [...existing, nextItem];
-      localStorage.setItem(SAMPLES_KEY, JSON.stringify(nextSamples));
-
-      router.push("/review");
+    const nextItem: SampleItem = {
+      id: String(Date.now()),
+      count: 0,
+      color: nextColor,
+      thumbUrl,
+      compareUrl,
+      aspectRatio: srcW / srcH,
+      sourceImageUrl: capturedImage,
+      cropNorm,
+      savedRectifyMode: rectifyMode,
     };
 
-    sourceImg.src = capturedImage;
+    localStorage.setItem(SAMPLES_KEY, JSON.stringify([...existing, nextItem]));
+    router.push("/review");
   };
 
   return (
     <main className="min-h-screen bg-black text-white flex flex-col">
+      <Script src="/opencv/opencv.js" strategy="afterInteractive" onLoad={() => setCvReady(true)} />
+
       <div className="fixed right-2 bottom-2 z-[9999] text-[10px] px-2 py-1 rounded bg-black/70 text-zinc-300 border border-white/10 pointer-events-none">
         {REVIEW_VERSION}
       </div>
@@ -455,6 +687,10 @@ export default function AddSamplePage() {
         </button>
       </div>
 
+      <div className="px-4 pt-3 text-xs text-zinc-400">
+        {`解像度 ${compareResolution} / RECT ${rectifyMode}`}
+      </div>
+
       <div className="flex-1 p-4">
         <div
           ref={frameRef}
@@ -465,11 +701,11 @@ export default function AddSamplePage() {
           onPointerUp={onFramePointerUp}
           onPointerCancel={onFramePointerUp}
         >
-          {capturedImage ? (
+          {processedPreviewUrl ? (
             <>
               <img
                 ref={imgRef}
-                src={capturedImage}
+                src={processedPreviewUrl}
                 alt="撮影画像"
                 className="max-w-full max-h-full object-contain block select-none"
                 style={{
@@ -494,7 +730,7 @@ export default function AddSamplePage() {
               />
             </>
           ) : (
-            <div className="text-zinc-400">撮影画像がありません</div>
+            <div className="text-zinc-400">準備中...</div>
           )}
         </div>
       </div>
@@ -513,7 +749,7 @@ export default function AddSamplePage() {
               }
               className="flex-1"
             />
-            <div className="w-10 text-right text-sm text-zinc-400 select-none">
+            <div className="w-10 text-right text-sm text-zinc-400">
               {Math.round(safeBoxWidthRatio * 100)}
             </div>
           </div>
@@ -530,7 +766,7 @@ export default function AddSamplePage() {
               }
               className="flex-1"
             />
-            <div className="w-10 text-right text-sm text-zinc-400 select-none">
+            <div className="w-10 text-right text-sm text-zinc-400">
               {Math.round(safeBoxHeightRatio * 100)}
             </div>
           </div>

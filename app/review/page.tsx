@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "v2026-04-06-08";
+const REVIEW_VERSION = "v2026-04-08-02";
 
 const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
@@ -23,15 +23,6 @@ const SHEAR_RANGE_KEY = "inspection:shearRange";
 const RESOLUTION_KEY = "inspection:compareResolution";
 const HIT_LIMIT_KEY = "inspection:hitLimit";
 const RECTIFY_KEY = "inspection:rectifyMode";
-
-type SampleItem = {
-  id: string;
-  count: number;
-  color: string;
-  thumbUrl?: string;
-  compareUrl?: string;
-  aspectRatio?: number;
-};
 
 type DebugViewMode =
   | "ORIGINAL"
@@ -49,6 +40,25 @@ type ShearRangeMode = 0 | 5 | 10;
 type CompareResolutionMode = 1200 | 1600 | 2000 | 2400;
 type HitLimitMode = 30 | 60 | 100 | 300 | 9999;
 type RectifyMode = "OFF" | "ON";
+
+type CropNorm = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
+
+type SampleItem = {
+  id: string;
+  count: number;
+  color: string;
+  thumbUrl?: string;
+  compareUrl?: string;
+  aspectRatio?: number;
+  sourceImageUrl?: string;
+  cropNorm?: CropNorm;
+  savedRectifyMode?: RectifyMode;
+};
 
 type MatchBox = {
   x: number;
@@ -80,21 +90,7 @@ const RESOLUTION_OPTIONS: CompareResolutionMode[] = [1200, 1600, 2000, 2400];
 const HIT_LIMIT_OPTIONS: HitLimitMode[] = [30, 60, 100, 300, 9999];
 const RECTIFY_OPTIONS: RectifyMode[] = ["OFF", "ON"];
 
-const DEFAULT_SAMPLES: SampleItem[] = [
-  { id: "1", count: 0, color: "border-sky-400 bg-sky-500/20", aspectRatio: 1 },
-  { id: "2", count: 0, color: "border-emerald-400 bg-emerald-500/20", aspectRatio: 1 },
-  { id: "3", count: 0, color: "border-amber-400 bg-amber-500/20", aspectRatio: 1 },
-  { id: "4", count: 0, color: "border-fuchsia-400 bg-fuchsia-500/20", aspectRatio: 1 },
-];
-
-function loadImage(src: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = src;
-  });
-}
+const DEFAULT_SAMPLES: SampleItem[] = [];
 
 function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v));
@@ -107,6 +103,15 @@ function clamp01(v: number) {
 function colorFromIndex(index: number) {
   const colors = ["#38bdf8", "#34d399", "#f59e0b", "#d946ef", "#06b6d4", "#fb7185"];
   return colors[index % colors.length];
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
 }
 
 async function imageSrcToMat(
@@ -196,11 +201,7 @@ function buildProcessedGrayMat(
   }
 }
 
-function buildDebugImageFromSrcMat(
-  cv: any,
-  srcMat: any,
-  mode: DebugViewMode
-): string {
+function buildDebugImageFromSrcMat(cv: any, srcMat: any, mode: DebugViewMode): string {
   let processed: any = null;
   let out: any = null;
 
@@ -244,6 +245,171 @@ function getShearValues(range: ShearRangeMode): number[] {
   if (range === 0) return [0];
   if (range === 5) return [-0.05, 0, 0.05];
   return [-0.1, -0.05, 0, 0.05, 0.1];
+}
+
+function orderQuadPoints(points: { x: number; y: number }[]) {
+  const sorted = [...points].sort((a, b) => a.y - b.y);
+  const top = sorted.slice(0, 2).sort((a, b) => a.x - b.x);
+  const bottom = sorted.slice(2, 4).sort((a, b) => a.x - b.x);
+  return [top[0], top[1], bottom[1], bottom[0]];
+}
+
+function rectifySceneApprox(cv: any, srcMat: any): any {
+  let gray: any = null;
+  let blur: any = null;
+  let edges: any = null;
+  let contours: any = null;
+  let hierarchy: any = null;
+  let bestContour: any = null;
+  let bestHull: any = null;
+  let approx: any = null;
+  let dst: any = null;
+  let M: any = null;
+
+  try {
+    gray = new cv.Mat();
+    cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY);
+
+    blur = new cv.Mat();
+    cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
+
+    edges = new cv.Mat();
+    cv.Canny(blur, edges, 40, 140);
+
+    const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
+    cv.dilate(edges, edges, kernel);
+    cv.morphologyEx(edges, edges, cv.MORPH_CLOSE, kernel);
+    kernel.delete();
+
+    contours = new cv.MatVector();
+    hierarchy = new cv.Mat();
+    cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    let bestArea = 0;
+
+    for (let i = 0; i < contours.size(); i++) {
+      const cnt = contours.get(i);
+      const area = cv.contourArea(cnt);
+      const rect = cv.boundingRect(cnt);
+
+      const largeEnough =
+        rect.width > srcMat.cols * 0.35 &&
+        rect.height > srcMat.rows * 0.35;
+
+      if (largeEnough && area > bestArea) {
+        bestArea = area;
+        bestContour?.delete?.();
+        bestContour = cnt.clone();
+      }
+      cnt.delete();
+    }
+
+    if (!bestContour) {
+      return srcMat.clone();
+    }
+
+    bestHull = new cv.Mat();
+    cv.convexHull(bestContour, bestHull, false, true);
+
+    const peri = cv.arcLength(bestHull, true);
+    approx = new cv.Mat();
+    cv.approxPolyDP(bestHull, approx, 0.02 * peri, true);
+
+    let quad: { x: number; y: number }[] | null = null;
+
+    if (approx.rows === 4) {
+      quad = [];
+      for (let i = 0; i < 4; i++) {
+        quad.push({
+          x: approx.intPtr(i, 0)[0],
+          y: approx.intPtr(i, 0)[1],
+        });
+      }
+    } else {
+      const pts: { x: number; y: number }[] = [];
+      for (let i = 0; i < bestHull.rows; i++) {
+        pts.push({
+          x: bestHull.intPtr(i, 0)[0],
+          y: bestHull.intPtr(i, 0)[1],
+        });
+      }
+
+      if (pts.length >= 4) {
+        const minY = Math.min(...pts.map((p) => p.y));
+        const maxY = Math.max(...pts.map((p) => p.y));
+        const band = Math.max(10, Math.round((maxY - minY) * 0.15));
+
+        const topBand = pts.filter((p) => p.y <= minY + band);
+        const bottomBand = pts.filter((p) => p.y >= maxY - band);
+
+        if (topBand.length >= 2 && bottomBand.length >= 2) {
+          quad = [
+            topBand.reduce((a, b) => (a.x < b.x ? a : b)),
+            topBand.reduce((a, b) => (a.x > b.x ? a : b)),
+            bottomBand.reduce((a, b) => (a.x > b.x ? a : b)),
+            bottomBand.reduce((a, b) => (a.x < b.x ? a : b)),
+          ];
+        }
+      }
+    }
+
+    if (!quad) {
+      return srcMat.clone();
+    }
+
+    const [tl, tr, br, bl] = orderQuadPoints(quad);
+
+    const widthTop = Math.hypot(tr.x - tl.x, tr.y - tl.y);
+    const widthBottom = Math.hypot(br.x - bl.x, br.y - bl.y);
+    const heightLeft = Math.hypot(bl.x - tl.x, bl.y - tl.y);
+    const heightRight = Math.hypot(br.x - tr.x, br.y - tr.y);
+
+    const dstW = Math.max(1, Math.round(Math.max(widthTop, widthBottom)));
+    const dstH = Math.max(1, Math.round(Math.max(heightLeft, heightRight)));
+
+    const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
+      tl.x, tl.y,
+      tr.x, tr.y,
+      br.x, br.y,
+      bl.x, bl.y,
+    ]);
+    const dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
+      0, 0,
+      dstW - 1, 0,
+      dstW - 1, dstH - 1,
+      0, dstH - 1,
+    ]);
+
+    M = cv.getPerspectiveTransform(srcTri, dstTri);
+    dst = new cv.Mat();
+    cv.warpPerspective(
+      srcMat,
+      dst,
+      M,
+      new cv.Size(dstW, dstH),
+      cv.INTER_LINEAR,
+      cv.BORDER_CONSTANT,
+      new cv.Scalar(0, 0, 0, 255)
+    );
+
+    srcTri.delete();
+    dstTri.delete();
+
+    return dst.clone();
+  } finally {
+    try {
+      gray?.delete?.();
+      blur?.delete?.();
+      edges?.delete?.();
+      contours?.delete?.();
+      hierarchy?.delete?.();
+      bestContour?.delete?.();
+      bestHull?.delete?.();
+      approx?.delete?.();
+      dst?.delete?.();
+      M?.delete?.();
+    } catch {}
+  }
 }
 
 function transformTemplateGray(
@@ -330,79 +496,53 @@ function transformTemplateGray(
   }
 }
 
-function rectifySceneApprox(cv: any, srcMat: any): any {
-  let gray: any = null;
-  let blur: any = null;
-  let edges: any = null;
-  let contours: any = null;
-  let hierarchy: any = null;
-  let best: any = null;
-  let dst: any = null;
+async function rebuildSampleMat(params: {
+  cv: any;
+  sample: SampleItem;
+  compareResolution: CompareResolutionMode;
+  rectifyMode: RectifyMode;
+}): Promise<{ mat: any; previewUrl: string; aspectRatio: number } | null> {
+  const { cv, sample, compareResolution, rectifyMode } = params;
+
+  if (!sample.sourceImageUrl || !sample.cropNorm) {
+    if (!sample.compareUrl) return null;
+    const loaded = await imageSrcToMat(cv, sample.compareUrl, compareResolution);
+    if (!loaded) return null;
+    return {
+      mat: loaded.srcMat.clone(),
+      previewUrl: sample.compareUrl,
+      aspectRatio: loaded.width / loaded.height,
+    };
+  }
+
+  let src: any = null;
+  let work: any = null;
+  let crop: any = null;
 
   try {
-    gray = new cv.Mat();
-    cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY);
+    const loaded = await imageSrcToMat(cv, sample.sourceImageUrl, compareResolution);
+    if (!loaded) return null;
 
-    blur = new cv.Mat();
-    cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
+    src = loaded.srcMat;
+    work = rectifyMode === "ON" ? rectifySceneApprox(cv, src) : src.clone();
 
-    edges = new cv.Mat();
-    cv.Canny(blur, edges, 50, 150);
+    const x = clamp(Math.round(sample.cropNorm.x * work.cols), 0, work.cols - 1);
+    const y = clamp(Math.round(sample.cropNorm.y * work.rows), 0, work.rows - 1);
+    const w = clamp(Math.round(sample.cropNorm.w * work.cols), 1, work.cols - x);
+    const h = clamp(Math.round(sample.cropNorm.h * work.rows), 1, work.rows - y);
 
-    contours = new cv.MatVector();
-    hierarchy = new cv.Mat();
-    cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    crop = work.roi(new cv.Rect(x, y, w, h)).clone();
 
-    let bestArea = 0;
-    let bestRect: { x: number; y: number; width: number; height: number } | null = null;
-
-    for (let i = 0; i < contours.size(); i++) {
-      const cnt = contours.get(i);
-      const rect = cv.boundingRect(cnt);
-      const area = rect.width * rect.height;
-      const ratio = rect.width / Math.max(1, rect.height);
-
-      const coversEnough =
-        rect.width > srcMat.cols * 0.35 &&
-        rect.height > srcMat.rows * 0.35;
-
-      const ratioOk = ratio > 0.6 && ratio < 4.5;
-
-      if (coversEnough && ratioOk && area > bestArea) {
-        bestArea = area;
-        bestRect = rect;
-      }
-      cnt.delete();
-    }
-
-    if (!bestRect) {
-      return srcMat.clone();
-    }
-
-    // 簡易補正:
-    // まず大きな領域でトリムして、表示と比較の基準を安定させる
-    const padX = Math.round(bestRect.width * 0.03);
-    const padY = Math.round(bestRect.height * 0.03);
-
-    const x = clamp(bestRect.x - padX, 0, srcMat.cols - 1);
-    const y = clamp(bestRect.y - padY, 0, srcMat.rows - 1);
-    const w = clamp(bestRect.width + padX * 2, 1, srcMat.cols - x);
-    const h = clamp(bestRect.height + padY * 2, 1, srcMat.rows - y);
-
-    const roi = srcMat.roi(new cv.Rect(x, y, w, h));
-    dst = roi.clone();
-    roi.delete();
-
-    return dst;
+    return {
+      mat: crop.clone(),
+      previewUrl: matToDataUrl(cv, crop),
+      aspectRatio: w / h,
+    };
   } finally {
     try {
-      gray?.delete?.();
-      blur?.delete?.();
-      edges?.delete?.();
-      contours?.delete?.();
-      hierarchy?.delete?.();
-      best?.delete?.();
-      dst?.delete?.();
+      src?.delete?.();
+      work?.delete?.();
+      crop?.delete?.();
     } catch {}
   }
 }
@@ -448,7 +588,7 @@ function runMultiMatch(params: {
     const scaleValues = getScaleValues(scaleRange);
     const shearValues = getShearValues(shearRange);
 
-    const localMaxCount = hitLimit === 9999 ? 200 : Math.max(20, Math.min(hitLimit, 80));
+    const localMaxCount = hitLimit === 9999 ? 300 : Math.max(20, Math.min(hitLimit, 120));
 
     for (const rotationDeg of rotationValues) {
       for (const scaleFactor of scaleValues) {
@@ -470,8 +610,7 @@ function runMultiMatch(params: {
             }
 
             result = new cv.Mat();
-            const method = getOpenCvMatchMethod(cv, matchMode);
-            cv.matchTemplate(sceneGray, template, result, method);
+            cv.matchTemplate(sceneGray, template, result, getOpenCvMatchMethod(cv, matchMode));
 
             for (let i = 0; i < localMaxCount; i++) {
               const mm = cv.minMaxLoc(result);
@@ -511,15 +650,11 @@ function runMultiMatch(params: {
               const suppressY = clamp(y - Math.round(h * 0.35), 0, result.rows - 1);
               const suppressW = clamp(Math.round(w * 0.7), 1, result.cols - suppressX);
               const suppressH = clamp(Math.round(h * 0.7), 1, result.rows - suppressY);
-
               if (suppressW <= 0 || suppressH <= 0) break;
 
               const roi = result.roi(new cv.Rect(suppressX, suppressY, suppressW, suppressH));
-              if (matchMode === "SQDIFF") {
-                roi.setTo(new cv.Scalar(1));
-              } else {
-                roi.setTo(new cv.Scalar(-1));
-              }
+              if (matchMode === "SQDIFF") roi.setTo(new cv.Scalar(1));
+              else roi.setTo(new cv.Scalar(-1));
               roi.delete();
             }
           } finally {
@@ -549,9 +684,7 @@ function runMultiMatch(params: {
         return dist < ref;
       });
 
-      if (!exists) {
-        deduped.push(box);
-      }
+      if (!exists) deduped.push(box);
       if (deduped.length >= hitLimit) break;
     }
 
@@ -567,6 +700,7 @@ function runMultiMatch(params: {
 export default function ReviewPage() {
   const router = useRouter();
   const frameRef = useRef<HTMLDivElement | null>(null);
+  const prevRectifyRef = useRef<RectifyMode | null>(null);
 
   const [capturedImage, setCapturedImage] = useState("");
   const [draftSensitivity, setDraftSensitivity] = useState(58);
@@ -593,15 +727,12 @@ export default function ReviewPage() {
   const [rotationRange, setRotationRange] = useState<RotationRangeMode>(0);
   const [scaleRange, setScaleRange] = useState<ScaleRangeMode>(0);
   const [shearRange, setShearRange] = useState<ShearRangeMode>(0);
-  const [compareResolution, setCompareResolution] = useState<CompareResolutionMode>(1200);
+  const [compareResolution, setCompareResolution] =
+    useState<CompareResolutionMode>(1200);
   const [hitLimit, setHitLimit] = useState<HitLimitMode>(30);
   const [rectifyMode, setRectifyMode] = useState<RectifyMode>("OFF");
 
-  const [displayBasis, setDisplayBasis] = useState({
-    width: 0,
-    height: 0,
-  });
-
+  const [displayBasis, setDisplayBasis] = useState({ width: 0, height: 0 });
   const [imageRect, setImageRect] = useState({
     left: 0,
     top: 0,
@@ -616,11 +747,7 @@ export default function ReviewPage() {
         setCapturedImage(storedImage);
         setMainPreviewUrl(storedImage);
       }
-    } catch (e) {
-      console.error("sessionStorage load error:", e);
-    }
 
-    try {
       const savedSensitivity = localStorage.getItem(SENSITIVITY_KEY);
       if (savedSensitivity !== null) {
         const n = Number(savedSensitivity);
@@ -631,21 +758,12 @@ export default function ReviewPage() {
       }
 
       const savedMissing = localStorage.getItem(MISSING_KEY);
-      if (savedMissing !== null) {
-        setMissingOn(savedMissing === "true");
-      }
+      if (savedMissing !== null) setMissingOn(savedMissing === "true");
 
       const savedSamples = localStorage.getItem(SAMPLES_KEY);
       if (savedSamples) {
-        try {
-          const parsed = JSON.parse(savedSamples);
-          if (Array.isArray(parsed)) setSamples(parsed);
-          else setSamples(DEFAULT_SAMPLES);
-        } catch {
-          setSamples(DEFAULT_SAMPLES);
-        }
-      } else {
-        setSamples(DEFAULT_SAMPLES);
+        const parsed = JSON.parse(savedSamples);
+        if (Array.isArray(parsed)) setSamples(parsed);
       }
 
       const savedThreshold = localStorage.getItem(MATCH_THRESHOLD_KEY);
@@ -687,29 +805,42 @@ export default function ReviewPage() {
       const savedRectify = localStorage.getItem(RECTIFY_KEY);
       if (savedRectify === "OFF" || savedRectify === "ON") {
         setRectifyMode(savedRectify);
+        prevRectifyRef.current = savedRectify;
+      } else {
+        prevRectifyRef.current = "OFF";
       }
-    } finally {
-      setSamplesLoaded(true);
-    }
+    } catch {}
+
+    setSamplesLoaded(true);
   }, []);
 
   useEffect(() => {
     if (!samplesLoaded) return;
-    try {
-      localStorage.setItem(SAMPLES_KEY, JSON.stringify(samples));
-    } catch (e) {
-      console.error("samples save error:", e);
-    }
+    localStorage.setItem(SAMPLES_KEY, JSON.stringify(samples));
   }, [samples, samplesLoaded]);
 
   useEffect(() => {
-    if (draftSensitivity === appliedSensitivity) return;
+    if (!samplesLoaded) return;
+    if (prevRectifyRef.current === null) {
+      prevRectifyRef.current = rectifyMode;
+      return;
+    }
+    if (prevRectifyRef.current !== rectifyMode) {
+      setSamples([]);
+      setSelectedSampleId(null);
+      setSamplePreviewUrl("");
+      setMatchBoxes([]);
+      localStorage.removeItem(SAMPLES_KEY);
+      prevRectifyRef.current = rectifyMode;
+    }
+  }, [rectifyMode, samplesLoaded]);
 
+  useEffect(() => {
+    if (draftSensitivity === appliedSensitivity) return;
     const timer = window.setTimeout(() => {
       setAppliedSensitivity(draftSensitivity);
       localStorage.setItem(SENSITIVITY_KEY, String(draftSensitivity));
     }, 120);
-
     return () => window.clearTimeout(timer);
   }, [draftSensitivity, appliedSensitivity]);
 
@@ -771,44 +902,27 @@ export default function ReviewPage() {
     const tryResolve = async () => {
       try {
         let cvObj = window.cv;
-
         if (!cvObj) {
           setCvStatus("cv 未生成");
           return;
         }
-
         if (cvObj instanceof Promise) {
-          setCvStatus("cv は Promise / await 開始");
           cvObj = await cvObj;
           if (cancelled) return;
           window.cv = cvObj;
-          setCvStatus("cv Promise 解決完了");
         }
-
         if (cvObj && typeof cvObj.getBuildInformation === "function") {
           markReady(cvObj);
           return;
         }
-
-        setCvStatus("cv あり / getBuildInformation待ち");
       } catch (e: any) {
         markError(`失敗: ${String(e?.message ?? e)}`);
       }
     };
 
-    setCvReady(false);
-    setCvError("");
-    setCvStatus("OpenCV 読込確認開始");
-
-    timeoutId = window.setTimeout(() => {
-      markError("OpenCV load timeout");
-    }, 20000);
-
-    pollId = window.setInterval(() => {
-      tryResolve();
-    }, 300);
-
-    tryResolve();
+    timeoutId = window.setTimeout(() => markError("OpenCV load timeout"), 20000);
+    pollId = window.setInterval(() => void tryResolve(), 300);
+    void tryResolve();
 
     return () => {
       cancelled = true;
@@ -824,7 +938,6 @@ export default function ReviewPage() {
     const frameHeight = frame.clientHeight;
     const basisWidth = displayBasis.width;
     const basisHeight = displayBasis.height;
-
     if (!frameWidth || !frameHeight || !basisWidth || !basisHeight) return;
 
     const scale = Math.min(frameWidth / basisWidth, frameHeight / basisHeight);
@@ -845,113 +958,105 @@ export default function ReviewPage() {
   useEffect(() => {
     if (!mainPreviewUrl || !displayBasis.width || !displayBasis.height) return;
     const t1 = window.setTimeout(() => updateImageRect(), 0);
-    const t2 = window.setTimeout(() => updateImageRect(), 120);
-    const t3 = window.setTimeout(() => updateImageRect(), 300);
+    const t2 = window.setTimeout(() => updateImageRect(), 100);
     return () => {
       window.clearTimeout(t1);
       window.clearTimeout(t2);
-      window.clearTimeout(t3);
     };
-  }, [mainPreviewUrl, matchBoxes, displayBasis]);
+  }, [mainPreviewUrl, displayBasis, matchBoxes]);
 
   useEffect(() => {
     let cancelled = false;
 
     async function buildPreviewsAndMatch() {
       if (!cvReady || !capturedImage) return;
-
       const cv = window.cv;
       if (!cv) return;
 
       setBuildingPreview(true);
 
+      let sceneOriginal: any = null;
+      let sceneWork: any = null;
+      let sampleMat: any = null;
+
       try {
-        const selectedSample = samples.find(
-          (s) => s.id === selectedSampleId && (!!s.compareUrl || !!s.thumbUrl)
+        const loadedScene = await imageSrcToMat(cv, capturedImage, compareResolution);
+        if (!loadedScene) return;
+
+        sceneOriginal = loadedScene.srcMat;
+        sceneWork =
+          rectifyMode === "ON" ? rectifySceneApprox(cv, sceneOriginal) : sceneOriginal.clone();
+
+        if (cancelled) return;
+
+        setDisplayBasis({ width: sceneWork.cols, height: sceneWork.rows });
+        setMainPreviewUrl(
+          debugMode === "ORIGINAL"
+            ? matToDataUrl(cv, sceneWork)
+            : buildDebugImageFromSrcMat(cv, sceneWork, debugMode)
         );
-        const selectedSampleSrc =
-          selectedSample?.compareUrl || selectedSample?.thumbUrl || "";
 
-        let sceneSrcOriginal: any = null;
-        let sceneSrc: any = null;
-        let sampleSrc: any = null;
+        const sample = samples.find(
+          (s) => s.id === selectedSampleId && (s.sourceImageUrl || s.compareUrl)
+        );
 
-        try {
-          const sceneOriginal = await imageSrcToMat(cv, capturedImage, compareResolution);
-          if (!sceneOriginal) return;
+        if (!sample) {
+          setSamplePreviewUrl("");
+          setMatchBoxes([]);
+          return;
+        }
 
-          sceneSrcOriginal = sceneOriginal.srcMat;
+        const rebuilt = await rebuildSampleMat({
+          cv,
+          sample,
+          compareResolution,
+          rectifyMode,
+        });
+        if (!rebuilt) {
+          setSamplePreviewUrl("");
+          setMatchBoxes([]);
+          return;
+        }
 
-          if (rectifyMode === "ON") {
-            sceneSrc = rectifySceneApprox(cv, sceneSrcOriginal);
-          } else {
-            sceneSrc = sceneSrcOriginal.clone();
-          }
+        sampleMat = rebuilt.mat;
 
-          if (!cancelled) {
-            setDisplayBasis({
-              width: sceneSrc.cols,
-              height: sceneSrc.rows,
-            });
-          }
+        setSamplePreviewUrl(
+          debugMode === "ORIGINAL"
+            ? rebuilt.previewUrl
+            : buildDebugImageFromSrcMat(cv, sampleMat, debugMode)
+        );
 
-          const mainUrl =
-            debugMode === "ORIGINAL"
-              ? matToDataUrl(cv, sceneSrc)
-              : buildDebugImageFromSrcMat(cv, sceneSrc, debugMode);
+        const hits = runMultiMatch({
+          cv,
+          sceneSrcMat: sceneWork,
+          sampleSrcMat: sampleMat,
+          sceneWidth: sceneWork.cols,
+          sceneHeight: sceneWork.rows,
+          debugMode,
+          matchMode,
+          threshold: matchThreshold,
+          rotationRange,
+          scaleRange,
+          shearRange,
+          hitLimit,
+        });
 
-          if (!cancelled) setMainPreviewUrl(mainUrl);
-
-          if (!selectedSampleSrc) {
-            if (!cancelled) {
-              setSamplePreviewUrl("");
-              setMatchBoxes([]);
-            }
-          } else {
-            const smp = await imageSrcToMat(cv, selectedSampleSrc, compareResolution);
-            if (!smp) return;
-
-            sampleSrc = smp.srcMat;
-            const sampleUrl =
-              debugMode === "ORIGINAL"
-                ? selectedSampleSrc
-                : buildDebugImageFromSrcMat(cv, sampleSrc, debugMode);
-
-            const hits = runMultiMatch({
-              cv,
-              sceneSrcMat: sceneSrc,
-              sampleSrcMat: sampleSrc,
-              sceneWidth: sceneSrc.cols,
-              sceneHeight: sceneSrc.rows,
-              debugMode,
-              matchMode: matchMethod,
-              threshold: matchThreshold,
-              rotationRange,
-              scaleRange,
-              shearRange,
-              hitLimit,
-            });
-
-            if (!cancelled) {
-              setSamplePreviewUrl(sampleUrl);
-              setMatchBoxes(hits);
-            }
-          }
-        } finally {
-          try {
-            sceneSrcOriginal?.delete?.();
-            sceneSrc?.delete?.();
-            sampleSrc?.delete?.();
-          } catch {}
+        if (!cancelled) {
+          setMatchBoxes(hits);
         }
       } catch (e) {
-        console.error("build preview or match error:", e);
+        console.error(e);
       } finally {
+        try {
+          sceneOriginal?.delete?.();
+          sceneWork?.delete?.();
+          sampleMat?.delete?.();
+        } catch {}
         if (!cancelled) setBuildingPreview(false);
       }
     }
 
-    buildPreviewsAndMatch();
+    void buildPreviewsAndMatch();
 
     return () => {
       cancelled = true;
@@ -985,13 +1090,10 @@ export default function ReviewPage() {
       <Script
         src="/opencv/opencv.js"
         strategy="afterInteractive"
-        onLoad={() => {
-          setCvStatus("script.onload 発火");
-        }}
+        onLoad={() => setCvStatus("script.onload 発火")}
         onError={() => {
           setCvReady(false);
           setCvError("OpenCVの読み込みに失敗しました");
-          setCvStatus("script.onerror 発火");
         }}
       />
 
@@ -1008,12 +1110,9 @@ export default function ReviewPage() {
             max={100}
             value={draftSensitivity}
             onChange={(e) => setDraftSensitivity(Number(e.target.value))}
-            className={`flex-1 ${!cvReady ? "opacity-50 cursor-not-allowed" : ""}`}
-            disabled={!cvReady}
+            className="flex-1"
           />
-          <div className={`text-sm w-9 text-right ${!cvReady ? "text-zinc-500" : "text-zinc-300"}`}>
-            {draftSensitivity}
-          </div>
+          <div className="text-sm w-9 text-right text-zinc-300">{draftSensitivity}</div>
         </div>
 
         <div className="flex items-center gap-3">
@@ -1025,10 +1124,9 @@ export default function ReviewPage() {
             step={0.01}
             value={matchThreshold}
             onChange={(e) => setMatchThreshold(Number(e.target.value))}
-            className={`flex-1 ${!cvReady ? "opacity-50 cursor-not-allowed" : ""}`}
-            disabled={!cvReady}
+            className="flex-1"
           />
-          <div className={`text-sm w-12 text-right ${!cvReady ? "text-zinc-500" : "text-zinc-300"}`}>
+          <div className="text-sm w-12 text-right text-zinc-300">
             {matchThreshold.toFixed(2)}
           </div>
         </div>
@@ -1185,9 +1283,7 @@ export default function ReviewPage() {
         <div
           ref={frameRef}
           className="w-full rounded-[1.5rem] border border-zinc-800 bg-zinc-900 relative overflow-hidden mx-auto flex items-center justify-center"
-          style={{
-            height: "min(64vh, 72vw, 760px)",
-          }}
+          style={{ height: "min(64vh, 72vw, 760px)" }}
         >
           {mainPreviewUrl ? (
             <>
@@ -1237,9 +1333,7 @@ export default function ReviewPage() {
               </div>
             </>
           ) : (
-            <div className="h-full flex items-center justify-center text-zinc-400">
-              まだ撮影画像がありません
-            </div>
+            <div className="text-zinc-400">まだ撮影画像がありません</div>
           )}
         </div>
 
@@ -1342,12 +1436,7 @@ export default function ReviewPage() {
                 </button>
 
                 {showDeleteFor === sample.id && (
-                  <div
-                    className="absolute top-10 right-1 z-50"
-                    onMouseDown={(e) => e.stopPropagation()}
-                    onTouchStart={(e) => e.stopPropagation()}
-                    onPointerDown={(e) => e.stopPropagation()}
-                  >
+                  <div className="absolute top-10 right-1 z-50">
                     <button
                       type="button"
                       onClick={(e) => {
