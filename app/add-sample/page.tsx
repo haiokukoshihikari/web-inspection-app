@@ -1,20 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import Script from "next/script";
 import { useRouter } from "next/navigation";
-
-declare global {
-  interface Window {
-    cv?: any;
-  }
-}
 
 const SAMPLES_KEY = "inspection:samples";
 const RESOLUTION_KEY = "inspection:compareResolution";
 
 const MAX_SAMPLES = 6;
-const PAGE_VERSION = "add-sample-stable-01";
+const PAGE_VERSION = "add-sample-stable-02";
 
 const MIN_BOX_W = 0.12;
 const MAX_BOX_W = 0.8;
@@ -48,12 +41,6 @@ function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v));
 }
 
-function matToDataUrl(cv: any, mat: any): string {
-  const canvas = document.createElement("canvas");
-  cv.imshow(canvas, mat);
-  return canvas.toDataURL("image/png");
-}
-
 function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -61,29 +48,6 @@ function loadImage(src: string): Promise<HTMLImageElement> {
     img.onerror = reject;
     img.src = src;
   });
-}
-
-async function imageSrcToMat(
-  cv: any,
-  src: string,
-  maxWidth: number
-): Promise<{ srcMat: any; width: number; height: number } | null> {
-  const img = await loadImage(src);
-  const scale = Math.min(1, maxWidth / img.naturalWidth);
-  const width = Math.max(1, Math.round(img.naturalWidth * scale));
-  const height = Math.max(1, Math.round(img.naturalHeight * scale));
-
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return null;
-
-  ctx.drawImage(img, 0, 0, width, height);
-
-  const srcMat = cv.imread(canvas);
-  return { srcMat, width, height };
 }
 
 export default function AddSamplePage() {
@@ -113,12 +77,8 @@ export default function AddSamplePage() {
   });
 
   const [capturedImage, setCapturedImage] = useState("");
-  const [processedPreviewUrl, setProcessedPreviewUrl] = useState("");
-  const [processingBasis, setProcessingBasis] = useState({ width: 0, height: 0 });
   const [compareResolution, setCompareResolution] =
     useState<CompareResolutionMode>(1200);
-
-  const [cvReady, setCvReady] = useState(false);
 
   const [baseRect, setBaseRect] = useState({
     left: 0,
@@ -150,43 +110,6 @@ export default function AddSamplePage() {
       }
     } catch {}
   }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function buildPreview() {
-      if (!capturedImage || !cvReady) return;
-      const cv = window.cv;
-      if (!cv) return;
-
-      let src: any = null;
-
-      try {
-        const loaded = await imageSrcToMat(cv, capturedImage, compareResolution);
-        if (!loaded) return;
-
-        src = loaded.srcMat;
-
-        if (!cancelled) {
-          setProcessedPreviewUrl(matToDataUrl(cv, src));
-          setProcessingBasis({ width: src.cols, height: src.rows });
-          setImageScale(1);
-          setImagePanX(0);
-          setImagePanY(0);
-        }
-      } finally {
-        try {
-          src?.delete?.();
-        } catch {}
-      }
-    }
-
-    buildPreview();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [capturedImage, cvReady, compareResolution]);
 
   const safeBoxWidthRatio = clamp(boxWidthRatio, MIN_BOX_W, MAX_BOX_W);
   const safeBoxHeightRatio = clamp(boxHeightRatio, MIN_BOX_H, MAX_BOX_H);
@@ -374,9 +297,24 @@ export default function AddSamplePage() {
   };
 
   const handleSave = async () => {
-    if (!processedPreviewUrl || !processingBasis.width || !processingBasis.height) return;
+    if (!capturedImage || !imgRef.current || !baseRect.width || !baseRect.height) return;
 
-    const processedImg = await loadImage(processedPreviewUrl);
+    const sourceImg = await loadImage(capturedImage);
+    const naturalWidth = sourceImg.naturalWidth;
+    const naturalHeight = sourceImg.naturalHeight;
+    if (!naturalWidth || !naturalHeight) return;
+
+    const compareScale = Math.min(1, compareResolution / naturalWidth);
+    const compareWidth = Math.max(1, Math.round(naturalWidth * compareScale));
+    const compareHeight = Math.max(1, Math.round(naturalHeight * compareScale));
+
+    const compareCanvas = document.createElement("canvas");
+    compareCanvas.width = compareWidth;
+    compareCanvas.height = compareHeight;
+    const compareCtx = compareCanvas.getContext("2d");
+    if (!compareCtx) return;
+
+    compareCtx.drawImage(sourceImg, 0, 0, compareWidth, compareHeight);
 
     const scaledWidthOnScreen = baseRect.width * imageScale;
     const scaledHeightOnScreen = baseRect.height * imageScale;
@@ -389,10 +327,10 @@ export default function AddSamplePage() {
     const cropLeftOnScreen = displayBox.left - imageLeft;
     const cropTopOnScreen = displayBox.top - imageTop;
 
-    let srcX = (cropLeftOnScreen / scaledWidthOnScreen) * processingBasis.width;
-    let srcY = (cropTopOnScreen / scaledHeightOnScreen) * processingBasis.height;
-    let srcW = (displayBox.width / scaledWidthOnScreen) * processingBasis.width;
-    let srcH = (displayBox.height / scaledHeightOnScreen) * processingBasis.height;
+    let srcX = (cropLeftOnScreen / scaledWidthOnScreen) * compareWidth;
+    let srcY = (cropTopOnScreen / scaledHeightOnScreen) * compareHeight;
+    let srcW = (displayBox.width / scaledWidthOnScreen) * compareWidth;
+    let srcH = (displayBox.height / scaledHeightOnScreen) * compareHeight;
 
     if (srcX < 0) {
       srcW += srcX;
@@ -402,11 +340,11 @@ export default function AddSamplePage() {
       srcH += srcY;
       srcY = 0;
     }
-    if (srcX + srcW > processingBasis.width) {
-      srcW = processingBasis.width - srcX;
+    if (srcX + srcW > compareWidth) {
+      srcW = compareWidth - srcX;
     }
-    if (srcY + srcH > processingBasis.height) {
-      srcH = processingBasis.height - srcY;
+    if (srcY + srcH > compareHeight) {
+      srcH = compareHeight - srcY;
     }
 
     srcX = Math.round(srcX);
@@ -416,14 +354,14 @@ export default function AddSamplePage() {
 
     if (srcW <= 1 || srcH <= 1) return;
 
-    const compareCanvas = document.createElement("canvas");
-    compareCanvas.width = srcW;
-    compareCanvas.height = srcH;
-    const compareCtx = compareCanvas.getContext("2d");
-    if (!compareCtx) return;
+    const cropCanvas = document.createElement("canvas");
+    cropCanvas.width = srcW;
+    cropCanvas.height = srcH;
+    const cropCtx = cropCanvas.getContext("2d");
+    if (!cropCtx) return;
 
-    compareCtx.drawImage(
-      processedImg,
+    cropCtx.drawImage(
+      compareCanvas,
       srcX,
       srcY,
       srcW,
@@ -434,7 +372,7 @@ export default function AddSamplePage() {
       srcH
     );
 
-    const compareUrl = compareCanvas.toDataURL("image/png");
+    const compareUrl = cropCanvas.toDataURL("image/png");
 
     const thumbCanvas = document.createElement("canvas");
     const thumbBase = 140;
@@ -442,13 +380,12 @@ export default function AddSamplePage() {
     const thumbH = Math.max(1, Math.round(thumbBase * safeBoxHeightRatio * 2.2));
     thumbCanvas.width = thumbW;
     thumbCanvas.height = thumbH;
-
     const thumbCtx = thumbCanvas.getContext("2d");
     if (!thumbCtx) return;
 
     thumbCtx.fillStyle = "#111";
     thumbCtx.fillRect(0, 0, thumbW, thumbH);
-    thumbCtx.drawImage(compareCanvas, 0, 0, srcW, srcH, 0, 0, thumbW, thumbH);
+    thumbCtx.drawImage(cropCanvas, 0, 0, srcW, srcH, 0, 0, thumbW, thumbH);
 
     const thumbUrl = thumbCanvas.toDataURL("image/jpeg", 0.92);
 
@@ -484,8 +421,6 @@ export default function AddSamplePage() {
 
   return (
     <main className="min-h-screen bg-black text-white flex flex-col">
-      <Script src="/opencv/opencv.js" strategy="afterInteractive" onLoad={() => setCvReady(true)} />
-
       <div className="fixed right-2 bottom-2 z-[9999] text-[10px] px-2 py-1 rounded bg-black/70 text-zinc-300 border border-white/10 pointer-events-none">
         {PAGE_VERSION}
       </div>
@@ -514,11 +449,11 @@ export default function AddSamplePage() {
           onPointerUp={onFramePointerUp}
           onPointerCancel={onFramePointerUp}
         >
-          {processedPreviewUrl ? (
+          {capturedImage ? (
             <>
               <img
                 ref={imgRef}
-                src={processedPreviewUrl}
+                src={capturedImage}
                 alt="撮影画像"
                 className="max-w-full max-h-full object-contain block select-none"
                 style={{
@@ -543,7 +478,7 @@ export default function AddSamplePage() {
               />
             </>
           ) : (
-            <div className="text-zinc-400">準備中...</div>
+            <div className="text-zinc-400">撮影画像がありません</div>
           )}
         </div>
       </div>
