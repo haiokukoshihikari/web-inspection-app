@@ -7,12 +7,15 @@ const SAMPLES_KEY = "inspection:samples";
 const RESOLUTION_KEY = "inspection:compareResolution";
 
 const MAX_SAMPLES = 6;
-const PAGE_VERSION = "add-sample-stable-02";
+const PAGE_VERSION = "add-sample-stable-03";
 
 const MIN_BOX_W = 0.12;
 const MAX_BOX_W = 0.8;
 const MIN_BOX_H = 0.1;
 const MAX_BOX_H = 0.6;
+
+// 画面が飛びにくい安全側の上限
+const MAX_IMAGE_SCALE = 2.5;
 
 type CompareResolutionMode = 1200 | 1600 | 2000 | 2400;
 
@@ -261,7 +264,8 @@ export default function AddSamplePage() {
 
       const rawScale =
         dragRef.current.startScale * (dist / dragRef.current.startDistance);
-      const nextScale = clamp(rawScale, 1, 4);
+
+      const nextScale = clamp(rawScale, 1, MAX_IMAGE_SCALE);
       setImageScale(nextScale);
 
       const next = clampPan(imagePanX, imagePanY, nextScale);

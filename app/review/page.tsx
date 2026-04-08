@@ -10,10 +10,9 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "review-stable-01";
+const REVIEW_VERSION = "review-stable-02";
 
 const MAX_SAMPLES = 6;
-const SENSITIVITY_KEY = "inspection:sensitivity";
 const MISSING_KEY = "inspection:missingOn";
 const SAMPLES_KEY = "inspection:samples";
 const MATCH_THRESHOLD_KEY = "inspection:matchThreshold";
@@ -71,7 +70,6 @@ const DEBUG_MODES: DebugViewMode[] = [
   "EDGE",
 ];
 
-const MATCH_METHODS: MatchMethodMode[] = ["CCOEFF", "CCORR", "SQDIFF"];
 const ROTATION_RANGE_OPTIONS: RotationRangeMode[] = [0, 3, 6, 9];
 const SCALE_RANGE_OPTIONS: ScaleRangeMode[] = [0, 5, 10];
 const SHEAR_RANGE_OPTIONS: ShearRangeMode[] = [0, 5, 10];
@@ -474,8 +472,6 @@ export default function ReviewPage() {
   const prevResolutionRef = useRef<CompareResolutionMode | null>(null);
 
   const [capturedImage, setCapturedImage] = useState("");
-  const [draftSensitivity, setDraftSensitivity] = useState(58);
-  const [appliedSensitivity, setAppliedSensitivity] = useState(58);
   const [missingOn, setMissingOn] = useState(true);
   const [showDeleteFor, setShowDeleteFor] = useState<string | null>(null);
   const [samplesLoaded, setSamplesLoaded] = useState(false);
@@ -487,14 +483,17 @@ export default function ReviewPage() {
   const [cvStatus, setCvStatus] = useState("OpenCV 未読込");
 
   const [debugMode, setDebugMode] = useState<DebugViewMode>("ORIGINAL");
-  const [matchMethod, setMatchMethod] = useState<MatchMethodMode>("CCOEFF");
+  const matchMethod: MatchMethodMode = "CCOEFF";
   const [selectedSampleId, setSelectedSampleId] = useState<string | null>(null);
 
   const [mainPreviewUrl, setMainPreviewUrl] = useState("");
   const [samplePreviewUrl, setSamplePreviewUrl] = useState("");
   const [buildingPreview, setBuildingPreview] = useState(false);
   const [matchBoxes, setMatchBoxes] = useState<MatchBox[]>([]);
+
   const [matchThreshold, setMatchThreshold] = useState(0.8);
+  const [draftThreshold, setDraftThreshold] = useState(0.8);
+
   const [rotationRange, setRotationRange] = useState<RotationRangeMode>(0);
   const [scaleRange, setScaleRange] = useState<ScaleRangeMode>(0);
   const [shearRange, setShearRange] = useState<ShearRangeMode>(0);
@@ -518,15 +517,6 @@ export default function ReviewPage() {
         setMainPreviewUrl(storedImage);
       }
 
-      const savedSensitivity = localStorage.getItem(SENSITIVITY_KEY);
-      if (savedSensitivity !== null) {
-        const n = Number(savedSensitivity);
-        if (Number.isFinite(n)) {
-          setDraftSensitivity(n);
-          setAppliedSensitivity(n);
-        }
-      }
-
       const savedMissing = localStorage.getItem(MISSING_KEY);
       if (savedMissing !== null) setMissingOn(savedMissing === "true");
 
@@ -539,7 +529,10 @@ export default function ReviewPage() {
       const savedThreshold = localStorage.getItem(MATCH_THRESHOLD_KEY);
       if (savedThreshold !== null) {
         const n = Number(savedThreshold);
-        if (Number.isFinite(n)) setMatchThreshold(n);
+        if (Number.isFinite(n)) {
+          setMatchThreshold(n);
+          setDraftThreshold(n);
+        }
       }
 
       const savedRotationRange = localStorage.getItem(ROTATION_RANGE_KEY);
@@ -598,15 +591,6 @@ export default function ReviewPage() {
       prevResolutionRef.current = compareResolution;
     }
   }, [compareResolution, samplesLoaded]);
-
-  useEffect(() => {
-    if (draftSensitivity === appliedSensitivity) return;
-    const timer = window.setTimeout(() => {
-      setAppliedSensitivity(draftSensitivity);
-      localStorage.setItem(SENSITIVITY_KEY, String(draftSensitivity));
-    }, 120);
-    return () => window.clearTimeout(timer);
-  }, [draftSensitivity, appliedSensitivity]);
 
   useEffect(() => {
     localStorage.setItem(MATCH_THRESHOLD_KEY, String(matchThreshold));
@@ -819,7 +803,6 @@ export default function ReviewPage() {
     cvReady,
     capturedImage,
     debugMode,
-    matchMethod,
     matchThreshold,
     rotationRange,
     scaleRange,
@@ -856,31 +839,20 @@ export default function ReviewPage() {
 
       <div className="px-4 pt-4 pb-3 border-b border-zinc-800 bg-zinc-950 space-y-3">
         <div className="flex items-center gap-3">
-          <div className="text-sm text-zinc-300 shrink-0">感度</div>
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={draftSensitivity}
-            onChange={(e) => setDraftSensitivity(Number(e.target.value))}
-            className="flex-1"
-          />
-          <div className="text-sm w-9 text-right text-zinc-300">{draftSensitivity}</div>
-        </div>
-
-        <div className="flex items-center gap-3">
           <div className="text-sm text-zinc-300 shrink-0">しきい値</div>
           <input
             type="range"
             min={0}
             max={0.99}
             step={0.01}
-            value={matchThreshold}
-            onChange={(e) => setMatchThreshold(Number(e.target.value))}
+            value={draftThreshold}
+            onChange={(e) => setDraftThreshold(Number(e.target.value))}
+            onMouseUp={() => setMatchThreshold(draftThreshold)}
+            onTouchEnd={() => setMatchThreshold(draftThreshold)}
             className="flex-1"
           />
           <div className="text-sm w-12 text-right text-zinc-300">
-            {matchThreshold.toFixed(2)}
+            {draftThreshold.toFixed(2)}
           </div>
         </div>
 
@@ -911,22 +883,6 @@ export default function ReviewPage() {
               className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
                 debugMode === mode
                   ? "bg-white text-black border-white"
-                  : "bg-zinc-900 text-zinc-300 border-zinc-700"
-              }`}
-            >
-              {mode}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex gap-2 overflow-x-auto pb-1">
-          {MATCH_METHODS.map((mode) => (
-            <button
-              key={mode}
-              onClick={() => setMatchMethod(mode)}
-              className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
-                matchMethod === mode
-                  ? "bg-emerald-300 text-black border-emerald-300"
                   : "bg-zinc-900 text-zinc-300 border-zinc-700"
               }`}
             >
@@ -1066,7 +1022,7 @@ export default function ReviewPage() {
               </div>
 
               <div className="absolute right-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10">
-                {`${matchMethod} / hits ${matchBoxes.length}`}
+                {`CCOEFF / hits ${matchBoxes.length}`}
               </div>
             </>
           ) : (
