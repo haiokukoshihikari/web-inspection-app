@@ -1033,7 +1033,7 @@ export default function ReviewPage() {
           sceneWidth: sceneWork.cols,
           sceneHeight: sceneWork.rows,
           debugMode,
-          matchMode,
+          matchMode: matchMethod,
           threshold: matchThreshold,
           rotationRange,
           scaleRange,
