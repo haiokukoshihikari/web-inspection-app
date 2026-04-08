@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "v2026-04-08-02";
+const REVIEW_VERSION = "review-stable-01";
 
 const MAX_SAMPLES = 6;
 const SENSITIVITY_KEY = "inspection:sensitivity";
@@ -22,7 +22,6 @@ const SCALE_RANGE_KEY = "inspection:scaleRange";
 const SHEAR_RANGE_KEY = "inspection:shearRange";
 const RESOLUTION_KEY = "inspection:compareResolution";
 const HIT_LIMIT_KEY = "inspection:hitLimit";
-const RECTIFY_KEY = "inspection:rectifyMode";
 
 type DebugViewMode =
   | "ORIGINAL"
@@ -39,14 +38,6 @@ type ScaleRangeMode = 0 | 5 | 10;
 type ShearRangeMode = 0 | 5 | 10;
 type CompareResolutionMode = 1200 | 1600 | 2000 | 2400;
 type HitLimitMode = 30 | 60 | 100 | 300 | 9999;
-type RectifyMode = "OFF" | "ON";
-
-type CropNorm = {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-};
 
 type SampleItem = {
   id: string;
@@ -55,9 +46,7 @@ type SampleItem = {
   thumbUrl?: string;
   compareUrl?: string;
   aspectRatio?: number;
-  sourceImageUrl?: string;
-  cropNorm?: CropNorm;
-  savedRectifyMode?: RectifyMode;
+  savedResolution?: CompareResolutionMode;
 };
 
 type MatchBox = {
@@ -88,9 +77,6 @@ const SCALE_RANGE_OPTIONS: ScaleRangeMode[] = [0, 5, 10];
 const SHEAR_RANGE_OPTIONS: ShearRangeMode[] = [0, 5, 10];
 const RESOLUTION_OPTIONS: CompareResolutionMode[] = [1200, 1600, 2000, 2400];
 const HIT_LIMIT_OPTIONS: HitLimitMode[] = [30, 60, 100, 300, 9999];
-const RECTIFY_OPTIONS: RectifyMode[] = ["OFF", "ON"];
-
-const DEFAULT_SAMPLES: SampleItem[] = [];
 
 function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v));
@@ -247,171 +233,6 @@ function getShearValues(range: ShearRangeMode): number[] {
   return [-0.1, -0.05, 0, 0.05, 0.1];
 }
 
-function orderQuadPoints(points: { x: number; y: number }[]) {
-  const sorted = [...points].sort((a, b) => a.y - b.y);
-  const top = sorted.slice(0, 2).sort((a, b) => a.x - b.x);
-  const bottom = sorted.slice(2, 4).sort((a, b) => a.x - b.x);
-  return [top[0], top[1], bottom[1], bottom[0]];
-}
-
-function rectifySceneApprox(cv: any, srcMat: any): any {
-  let gray: any = null;
-  let blur: any = null;
-  let edges: any = null;
-  let contours: any = null;
-  let hierarchy: any = null;
-  let bestContour: any = null;
-  let bestHull: any = null;
-  let approx: any = null;
-  let dst: any = null;
-  let M: any = null;
-
-  try {
-    gray = new cv.Mat();
-    cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY);
-
-    blur = new cv.Mat();
-    cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
-
-    edges = new cv.Mat();
-    cv.Canny(blur, edges, 40, 140);
-
-    const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
-    cv.dilate(edges, edges, kernel);
-    cv.morphologyEx(edges, edges, cv.MORPH_CLOSE, kernel);
-    kernel.delete();
-
-    contours = new cv.MatVector();
-    hierarchy = new cv.Mat();
-    cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-    let bestArea = 0;
-
-    for (let i = 0; i < contours.size(); i++) {
-      const cnt = contours.get(i);
-      const area = cv.contourArea(cnt);
-      const rect = cv.boundingRect(cnt);
-
-      const largeEnough =
-        rect.width > srcMat.cols * 0.35 &&
-        rect.height > srcMat.rows * 0.35;
-
-      if (largeEnough && area > bestArea) {
-        bestArea = area;
-        bestContour?.delete?.();
-        bestContour = cnt.clone();
-      }
-      cnt.delete();
-    }
-
-    if (!bestContour) {
-      return srcMat.clone();
-    }
-
-    bestHull = new cv.Mat();
-    cv.convexHull(bestContour, bestHull, false, true);
-
-    const peri = cv.arcLength(bestHull, true);
-    approx = new cv.Mat();
-    cv.approxPolyDP(bestHull, approx, 0.02 * peri, true);
-
-    let quad: { x: number; y: number }[] | null = null;
-
-    if (approx.rows === 4) {
-      quad = [];
-      for (let i = 0; i < 4; i++) {
-        quad.push({
-          x: approx.intPtr(i, 0)[0],
-          y: approx.intPtr(i, 0)[1],
-        });
-      }
-    } else {
-      const pts: { x: number; y: number }[] = [];
-      for (let i = 0; i < bestHull.rows; i++) {
-        pts.push({
-          x: bestHull.intPtr(i, 0)[0],
-          y: bestHull.intPtr(i, 0)[1],
-        });
-      }
-
-      if (pts.length >= 4) {
-        const minY = Math.min(...pts.map((p) => p.y));
-        const maxY = Math.max(...pts.map((p) => p.y));
-        const band = Math.max(10, Math.round((maxY - minY) * 0.15));
-
-        const topBand = pts.filter((p) => p.y <= minY + band);
-        const bottomBand = pts.filter((p) => p.y >= maxY - band);
-
-        if (topBand.length >= 2 && bottomBand.length >= 2) {
-          quad = [
-            topBand.reduce((a, b) => (a.x < b.x ? a : b)),
-            topBand.reduce((a, b) => (a.x > b.x ? a : b)),
-            bottomBand.reduce((a, b) => (a.x > b.x ? a : b)),
-            bottomBand.reduce((a, b) => (a.x < b.x ? a : b)),
-          ];
-        }
-      }
-    }
-
-    if (!quad) {
-      return srcMat.clone();
-    }
-
-    const [tl, tr, br, bl] = orderQuadPoints(quad);
-
-    const widthTop = Math.hypot(tr.x - tl.x, tr.y - tl.y);
-    const widthBottom = Math.hypot(br.x - bl.x, br.y - bl.y);
-    const heightLeft = Math.hypot(bl.x - tl.x, bl.y - tl.y);
-    const heightRight = Math.hypot(br.x - tr.x, br.y - tr.y);
-
-    const dstW = Math.max(1, Math.round(Math.max(widthTop, widthBottom)));
-    const dstH = Math.max(1, Math.round(Math.max(heightLeft, heightRight)));
-
-    const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
-      tl.x, tl.y,
-      tr.x, tr.y,
-      br.x, br.y,
-      bl.x, bl.y,
-    ]);
-    const dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
-      0, 0,
-      dstW - 1, 0,
-      dstW - 1, dstH - 1,
-      0, dstH - 1,
-    ]);
-
-    M = cv.getPerspectiveTransform(srcTri, dstTri);
-    dst = new cv.Mat();
-    cv.warpPerspective(
-      srcMat,
-      dst,
-      M,
-      new cv.Size(dstW, dstH),
-      cv.INTER_LINEAR,
-      cv.BORDER_CONSTANT,
-      new cv.Scalar(0, 0, 0, 255)
-    );
-
-    srcTri.delete();
-    dstTri.delete();
-
-    return dst.clone();
-  } finally {
-    try {
-      gray?.delete?.();
-      blur?.delete?.();
-      edges?.delete?.();
-      contours?.delete?.();
-      hierarchy?.delete?.();
-      bestContour?.delete?.();
-      bestHull?.delete?.();
-      approx?.delete?.();
-      dst?.delete?.();
-      M?.delete?.();
-    } catch {}
-  }
-}
-
 function transformTemplateGray(
   cv: any,
   grayMat: any,
@@ -492,57 +313,6 @@ function transformTemplateGray(
       sheared?.delete?.();
       Mrot?.delete?.();
       Mshear?.delete?.();
-    } catch {}
-  }
-}
-
-async function rebuildSampleMat(params: {
-  cv: any;
-  sample: SampleItem;
-  compareResolution: CompareResolutionMode;
-  rectifyMode: RectifyMode;
-}): Promise<{ mat: any; previewUrl: string; aspectRatio: number } | null> {
-  const { cv, sample, compareResolution, rectifyMode } = params;
-
-  if (!sample.sourceImageUrl || !sample.cropNorm) {
-    if (!sample.compareUrl) return null;
-    const loaded = await imageSrcToMat(cv, sample.compareUrl, compareResolution);
-    if (!loaded) return null;
-    return {
-      mat: loaded.srcMat.clone(),
-      previewUrl: sample.compareUrl,
-      aspectRatio: loaded.width / loaded.height,
-    };
-  }
-
-  let src: any = null;
-  let work: any = null;
-  let crop: any = null;
-
-  try {
-    const loaded = await imageSrcToMat(cv, sample.sourceImageUrl, compareResolution);
-    if (!loaded) return null;
-
-    src = loaded.srcMat;
-    work = rectifyMode === "ON" ? rectifySceneApprox(cv, src) : src.clone();
-
-    const x = clamp(Math.round(sample.cropNorm.x * work.cols), 0, work.cols - 1);
-    const y = clamp(Math.round(sample.cropNorm.y * work.rows), 0, work.rows - 1);
-    const w = clamp(Math.round(sample.cropNorm.w * work.cols), 1, work.cols - x);
-    const h = clamp(Math.round(sample.cropNorm.h * work.rows), 1, work.rows - y);
-
-    crop = work.roi(new cv.Rect(x, y, w, h)).clone();
-
-    return {
-      mat: crop.clone(),
-      previewUrl: matToDataUrl(cv, crop),
-      aspectRatio: w / h,
-    };
-  } finally {
-    try {
-      src?.delete?.();
-      work?.delete?.();
-      crop?.delete?.();
     } catch {}
   }
 }
@@ -650,6 +420,7 @@ function runMultiMatch(params: {
               const suppressY = clamp(y - Math.round(h * 0.35), 0, result.rows - 1);
               const suppressW = clamp(Math.round(w * 0.7), 1, result.cols - suppressX);
               const suppressH = clamp(Math.round(h * 0.7), 1, result.rows - suppressY);
+
               if (suppressW <= 0 || suppressH <= 0) break;
 
               const roi = result.roi(new cv.Rect(suppressX, suppressY, suppressW, suppressH));
@@ -700,7 +471,7 @@ function runMultiMatch(params: {
 export default function ReviewPage() {
   const router = useRouter();
   const frameRef = useRef<HTMLDivElement | null>(null);
-  const prevRectifyRef = useRef<RectifyMode | null>(null);
+  const prevResolutionRef = useRef<CompareResolutionMode | null>(null);
 
   const [capturedImage, setCapturedImage] = useState("");
   const [draftSensitivity, setDraftSensitivity] = useState(58);
@@ -709,7 +480,7 @@ export default function ReviewPage() {
   const [showDeleteFor, setShowDeleteFor] = useState<string | null>(null);
   const [samplesLoaded, setSamplesLoaded] = useState(false);
 
-  const [samples, setSamples] = useState<SampleItem[]>(DEFAULT_SAMPLES);
+  const [samples, setSamples] = useState<SampleItem[]>([]);
 
   const [cvReady, setCvReady] = useState(false);
   const [cvError, setCvError] = useState("");
@@ -730,7 +501,6 @@ export default function ReviewPage() {
   const [compareResolution, setCompareResolution] =
     useState<CompareResolutionMode>(1200);
   const [hitLimit, setHitLimit] = useState<HitLimitMode>(30);
-  const [rectifyMode, setRectifyMode] = useState<RectifyMode>("OFF");
 
   const [displayBasis, setDisplayBasis] = useState({ width: 0, height: 0 });
   const [imageRect, setImageRect] = useState({
@@ -801,14 +571,6 @@ export default function ReviewPage() {
         const n = Number(savedHitLimit) as HitLimitMode;
         if ([30, 60, 100, 300, 9999].includes(n)) setHitLimit(n);
       }
-
-      const savedRectify = localStorage.getItem(RECTIFY_KEY);
-      if (savedRectify === "OFF" || savedRectify === "ON") {
-        setRectifyMode(savedRectify);
-        prevRectifyRef.current = savedRectify;
-      } else {
-        prevRectifyRef.current = "OFF";
-      }
     } catch {}
 
     setSamplesLoaded(true);
@@ -821,19 +583,21 @@ export default function ReviewPage() {
 
   useEffect(() => {
     if (!samplesLoaded) return;
-    if (prevRectifyRef.current === null) {
-      prevRectifyRef.current = rectifyMode;
+
+    if (prevResolutionRef.current === null) {
+      prevResolutionRef.current = compareResolution;
       return;
     }
-    if (prevRectifyRef.current !== rectifyMode) {
+
+    if (prevResolutionRef.current !== compareResolution) {
       setSamples([]);
       setSelectedSampleId(null);
       setSamplePreviewUrl("");
       setMatchBoxes([]);
       localStorage.removeItem(SAMPLES_KEY);
-      prevRectifyRef.current = rectifyMode;
+      prevResolutionRef.current = compareResolution;
     }
-  }, [rectifyMode, samplesLoaded]);
+  }, [compareResolution, samplesLoaded]);
 
   useEffect(() => {
     if (draftSensitivity === appliedSensitivity) return;
@@ -867,10 +631,6 @@ export default function ReviewPage() {
   useEffect(() => {
     localStorage.setItem(HIT_LIMIT_KEY, String(hitLimit));
   }, [hitLimit]);
-
-  useEffect(() => {
-    localStorage.setItem(RECTIFY_KEY, rectifyMode);
-  }, [rectifyMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -975,29 +735,29 @@ export default function ReviewPage() {
 
       setBuildingPreview(true);
 
-      let sceneOriginal: any = null;
-      let sceneWork: any = null;
+      let sceneMat: any = null;
       let sampleMat: any = null;
 
       try {
         const loadedScene = await imageSrcToMat(cv, capturedImage, compareResolution);
         if (!loadedScene) return;
 
-        sceneOriginal = loadedScene.srcMat;
-        sceneWork =
-          rectifyMode === "ON" ? rectifySceneApprox(cv, sceneOriginal) : sceneOriginal.clone();
+        sceneMat = loadedScene.srcMat;
 
         if (cancelled) return;
 
-        setDisplayBasis({ width: sceneWork.cols, height: sceneWork.rows });
+        setDisplayBasis({ width: sceneMat.cols, height: sceneMat.rows });
         setMainPreviewUrl(
           debugMode === "ORIGINAL"
-            ? matToDataUrl(cv, sceneWork)
-            : buildDebugImageFromSrcMat(cv, sceneWork, debugMode)
+            ? matToDataUrl(cv, sceneMat)
+            : buildDebugImageFromSrcMat(cv, sceneMat, debugMode)
         );
 
         const sample = samples.find(
-          (s) => s.id === selectedSampleId && (s.sourceImageUrl || s.compareUrl)
+          (s) =>
+            s.id === selectedSampleId &&
+            !!s.compareUrl &&
+            s.savedResolution === compareResolution
         );
 
         if (!sample) {
@@ -1006,32 +766,27 @@ export default function ReviewPage() {
           return;
         }
 
-        const rebuilt = await rebuildSampleMat({
-          cv,
-          sample,
-          compareResolution,
-          rectifyMode,
-        });
-        if (!rebuilt) {
+        const loadedSample = await imageSrcToMat(cv, sample.compareUrl!, compareResolution);
+        if (!loadedSample) {
           setSamplePreviewUrl("");
           setMatchBoxes([]);
           return;
         }
 
-        sampleMat = rebuilt.mat;
+        sampleMat = loadedSample.srcMat;
 
         setSamplePreviewUrl(
           debugMode === "ORIGINAL"
-            ? rebuilt.previewUrl
+            ? sample.compareUrl!
             : buildDebugImageFromSrcMat(cv, sampleMat, debugMode)
         );
 
         const hits = runMultiMatch({
           cv,
-          sceneSrcMat: sceneWork,
+          sceneSrcMat: sceneMat,
           sampleSrcMat: sampleMat,
-          sceneWidth: sceneWork.cols,
-          sceneHeight: sceneWork.rows,
+          sceneWidth: sceneMat.cols,
+          sceneHeight: sceneMat.rows,
           debugMode,
           matchMode: matchMethod,
           threshold: matchThreshold,
@@ -1048,8 +803,7 @@ export default function ReviewPage() {
         console.error(e);
       } finally {
         try {
-          sceneOriginal?.delete?.();
-          sceneWork?.delete?.();
+          sceneMat?.delete?.();
           sampleMat?.delete?.();
         } catch {}
         if (!cancelled) setBuildingPreview(false);
@@ -1072,7 +826,6 @@ export default function ReviewPage() {
     shearRange,
     compareResolution,
     hitLimit,
-    rectifyMode,
     selectedSampleId,
     samples,
   ]);
@@ -1258,22 +1011,6 @@ export default function ReviewPage() {
               }`}
             >
               {v === 9999 ? "MAX" : `${v}`}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex gap-2 overflow-x-auto pb-1">
-          {RECTIFY_OPTIONS.map((v) => (
-            <button
-              key={v}
-              onClick={() => setRectifyMode(v)}
-              className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
-                rectifyMode === v
-                  ? "bg-lime-300 text-black border-lime-300"
-                  : "bg-zinc-900 text-zinc-300 border-zinc-700"
-              }`}
-            >
-              {v === "OFF" ? "RECT OFF" : "RECT ON"}
             </button>
           ))}
         </div>
