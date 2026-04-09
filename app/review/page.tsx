@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "review-stable-02";
+const REVIEW_VERSION = "review-stable-03";
 
 const MAX_SAMPLES = 6;
 const MISSING_KEY = "inspection:missingOn";
@@ -22,15 +22,7 @@ const SHEAR_RANGE_KEY = "inspection:shearRange";
 const RESOLUTION_KEY = "inspection:compareResolution";
 const HIT_LIMIT_KEY = "inspection:hitLimit";
 
-type DebugViewMode =
-  | "ORIGINAL"
-  | "GRAY"
-  | "EQUALIZE"
-  | "CLAHE"
-  | "BIN50"
-  | "BIN80"
-  | "EDGE";
-
+type DebugViewMode = "ORIGINAL" | "EDGE";
 type MatchMethodMode = "CCOEFF" | "CCORR" | "SQDIFF";
 type RotationRangeMode = 0 | 3 | 6 | 9;
 type ScaleRangeMode = 0 | 5 | 10;
@@ -60,16 +52,7 @@ type MatchBox = {
   shearFactor: number;
 };
 
-const DEBUG_MODES: DebugViewMode[] = [
-  "ORIGINAL",
-  "GRAY",
-  "EQUALIZE",
-  "CLAHE",
-  "BIN50",
-  "BIN80",
-  "EDGE",
-];
-
+const DEBUG_MODES: DebugViewMode[] = ["ORIGINAL", "EDGE"];
 const ROTATION_RANGE_OPTIONS: RotationRangeMode[] = [0, 3, 6, 9];
 const SCALE_RANGE_OPTIONS: ScaleRangeMode[] = [0, 5, 10];
 const SHEAR_RANGE_OPTIONS: ShearRangeMode[] = [0, 5, 10];
@@ -140,31 +123,8 @@ function buildProcessedGrayMat(
     gray = new cv.Mat();
     cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY);
 
-    if (mode === "ORIGINAL" || mode === "GRAY") {
+    if (mode === "ORIGINAL") {
       return gray.clone();
-    }
-
-    if (mode === "EQUALIZE") {
-      work1 = new cv.Mat();
-      cv.equalizeHist(gray, work1);
-      return work1.clone();
-    }
-
-    if (mode === "CLAHE") {
-      const clahe = new cv.CLAHE(2.0, new cv.Size(8, 8));
-      work1 = new cv.Mat();
-      clahe.apply(gray, work1);
-      clahe.delete();
-      return work1.clone();
-    }
-
-    if (mode === "BIN50" || mode === "BIN80") {
-      const thresholdValue = mode === "BIN50" ? 50 : 80;
-      work1 = new cv.Mat();
-      cv.GaussianBlur(gray, work1, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
-      work2 = new cv.Mat();
-      cv.threshold(work1, work2, thresholdValue, 255, cv.THRESH_BINARY);
-      return work2.clone();
     }
 
     if (mode === "EDGE") {
@@ -819,6 +779,10 @@ export default function ReviewPage() {
     localStorage.setItem(MISSING_KEY, String(next));
   };
 
+  const adjustDraftThreshold = (delta: number) => {
+    setDraftThreshold((prev) => clamp(Number((prev + delta).toFixed(2)), 0, 0.99));
+  };
+
   const canAdd = useMemo(() => samples.length < MAX_SAMPLES, [samples.length]);
 
   return (
@@ -838,8 +802,16 @@ export default function ReviewPage() {
       </div>
 
       <div className="px-4 pt-4 pb-3 border-b border-zinc-800 bg-zinc-950 space-y-3">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           <div className="text-sm text-zinc-300 shrink-0">しきい値</div>
+
+          <button
+            onClick={() => adjustDraftThreshold(-0.01)}
+            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
+          >
+            -
+          </button>
+
           <input
             type="range"
             min={0}
@@ -851,6 +823,14 @@ export default function ReviewPage() {
             onTouchEnd={() => setMatchThreshold(draftThreshold)}
             className="flex-1"
           />
+
+          <button
+            onClick={() => adjustDraftThreshold(0.01)}
+            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
+          >
+            +
+          </button>
+
           <div className="text-sm w-12 text-right text-zinc-300">
             {draftThreshold.toFixed(2)}
           </div>
@@ -1009,10 +989,12 @@ export default function ReviewPage() {
               ))}
 
               {buildingPreview ? (
-                <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/45">
-                  <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/55 text-center">
-                    <div className="text-lg font-semibold">{debugMode}</div>
-                    <div className="mt-1 text-sm text-zinc-300">変換中...</div>
+                <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/50">
+                  <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
+                    <div className="text-lg font-semibold">再検査中…</div>
+                    <div className="mt-1 text-sm text-zinc-300">
+                      条件変更を反映しています
+                    </div>
                   </div>
                 </div>
               ) : null}
