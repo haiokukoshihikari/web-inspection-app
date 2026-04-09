@@ -398,26 +398,37 @@ function runMultiMatch(params: {
 
     boxes.sort((a, b) => b.score - a.score);
 
+    boxes.sort((a, b) => b.score - a.score);
+
+    function isOverlapping(a: MatchBox, b: MatchBox) {
+      const ax1 = a.x;
+      const ay1 = a.y;
+      const ax2 = a.x + a.w;
+      const ay2 = a.y + a.h;
+
+      const bx1 = b.x;
+      const by1 = b.y;
+      const bx2 = b.x + b.w;
+      const by2 = b.y + b.h;
+
+      const overlapW = Math.min(ax2, bx2) - Math.max(ax1, bx1);
+      const overlapH = Math.min(ay2, by2) - Math.max(ay1, by1);
+
+      return overlapW > 0 && overlapH > 0;
+    }
+
     const deduped: MatchBox[] = [];
     for (const box of boxes) {
-      const cx = box.x + box.w / 2;
-      const cy = box.y + box.h / 2;
-
-      const exists = deduped.some((d) => {
-        const dcx = d.x + d.w / 2;
-        const dcy = d.y + d.h / 2;
-        const dx = cx - dcx;
-        const dy = cy - dcy;
-        const dist = Math.hypot(dx, dy);
-        const ref = Math.max(box.w, box.h, d.w, d.h) * 0.45;
-        return dist < ref;
-      });
-
-      if (!exists) deduped.push(box);
+      const overlapped = deduped.some((d) => isOverlapping(box, d));
+      if (!overlapped) {
+        deduped.push(box);
+      }
       if (deduped.length >= hitLimit) break;
     }
 
     return deduped;
+
+    
   } finally {
     try {
       sceneGray?.delete?.();

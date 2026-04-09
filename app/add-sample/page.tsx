@@ -7,14 +7,12 @@ const SAMPLES_KEY = "inspection:samples";
 const RESOLUTION_KEY = "inspection:compareResolution";
 
 const MAX_SAMPLES = 6;
-const PAGE_VERSION = "add-sample-stable-03";
+const PAGE_VERSION = "add-sample-stable-04";
 
-const MIN_BOX_W = 0.12;
+const MIN_BOX_W = 0.08;
 const MAX_BOX_W = 0.8;
-const MIN_BOX_H = 0.1;
+const MIN_BOX_H = 0.06;
 const MAX_BOX_H = 0.6;
-
-// 画面が飛びにくい安全側の上限
 const MAX_IMAGE_SCALE = 2.5;
 
 type CompareResolutionMode = 1200 | 1600 | 2000 | 2400;
@@ -83,6 +81,8 @@ export default function AddSamplePage() {
   const [compareResolution, setCompareResolution] =
     useState<CompareResolutionMode>(1200);
 
+  const [compareBasis, setCompareBasis] = useState({ width: 0, height: 0 });
+
   const [baseRect, setBaseRect] = useState({
     left: 0,
     top: 0,
@@ -102,6 +102,13 @@ export default function AddSamplePage() {
       const stored = sessionStorage.getItem("capturedImage");
       if (stored && stored.startsWith("data:image/")) {
         setCapturedImage(stored);
+        loadImage(stored).then((img) => {
+          const compareScale = Math.min(1, compareResolution / img.naturalWidth);
+          setCompareBasis({
+            width: Math.max(1, Math.round(img.naturalWidth * compareScale)),
+            height: Math.max(1, Math.round(img.naturalHeight * compareScale)),
+          });
+        });
       }
 
       const savedRes = localStorage.getItem(RESOLUTION_KEY);
@@ -113,6 +120,17 @@ export default function AddSamplePage() {
       }
     } catch {}
   }, []);
+
+  useEffect(() => {
+    if (!capturedImage) return;
+    loadImage(capturedImage).then((img) => {
+      const compareScale = Math.min(1, compareResolution / img.naturalWidth);
+      setCompareBasis({
+        width: Math.max(1, Math.round(img.naturalWidth * compareScale)),
+        height: Math.max(1, Math.round(img.naturalHeight * compareScale)),
+      });
+    });
+  }, [capturedImage, compareResolution]);
 
   const safeBoxWidthRatio = clamp(boxWidthRatio, MIN_BOX_W, MAX_BOX_W);
   const safeBoxHeightRatio = clamp(boxHeightRatio, MIN_BOX_H, MAX_BOX_H);
@@ -145,23 +163,42 @@ export default function AddSamplePage() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
+  const cropRectImage = useMemo(() => {
+    const width = Math.max(1, Math.round(compareBasis.width * safeBoxWidthRatio));
+    const height = Math.max(1, Math.round(compareBasis.height * safeBoxHeightRatio));
+    const x = Math.max(0, Math.round((compareBasis.width - width) / 2));
+    const y = Math.max(0, Math.round((compareBasis.height - height) / 2));
+    return { x, y, width, height };
+  }, [compareBasis.width, compareBasis.height, safeBoxWidthRatio, safeBoxHeightRatio]);
+
   const displayBox = useMemo(() => {
-    const maxWidth = Math.max(0, baseRect.width);
-    const maxHeight = Math.max(0, baseRect.height);
+    if (!compareBasis.width || !compareBasis.height || !baseRect.width || !baseRect.height) {
+      return { left: 0, top: 0, width: 0, height: 0 };
+    }
 
-    const rawWidth = maxWidth * safeBoxWidthRatio;
-    const rawHeight = maxHeight * safeBoxHeightRatio;
+    const scaledWidth = baseRect.width * imageScale;
+    const scaledHeight = baseRect.height * imageScale;
 
-    const width = Math.min(rawWidth, maxWidth);
-    const height = Math.min(rawHeight, maxHeight);
+    const imageLeft =
+      baseRect.left + imagePanX - (scaledWidth - baseRect.width) / 2;
+    const imageTop =
+      baseRect.top + imagePanY - (scaledHeight - baseRect.height) / 2;
 
     return {
-      left: baseRect.left + (baseRect.width - width) / 2,
-      top: baseRect.top + (baseRect.height - height) / 2,
-      width,
-      height,
+      left: imageLeft + (cropRectImage.x / compareBasis.width) * scaledWidth,
+      top: imageTop + (cropRectImage.y / compareBasis.height) * scaledHeight,
+      width: (cropRectImage.width / compareBasis.width) * scaledWidth,
+      height: (cropRectImage.height / compareBasis.height) * scaledHeight,
     };
-  }, [baseRect, safeBoxWidthRatio, safeBoxHeightRatio]);
+  }, [
+    baseRect,
+    imageScale,
+    imagePanX,
+    imagePanY,
+    cropRectImage,
+    compareBasis.width,
+    compareBasis.height,
+  ]);
 
   const getDistance = (
     a: { x: number; y: number },
@@ -180,22 +217,25 @@ export default function AddSamplePage() {
       baseRect.left + nextPanX - (scaledWidth - baseRect.width) / 2;
     const imageTop =
       baseRect.top + nextPanY - (scaledHeight - baseRect.height) / 2;
-
     const imageRight = imageLeft + scaledWidth;
     const imageBottom = imageTop + scaledHeight;
+
+    const boxLeft =
+      imageLeft + (cropRectImage.x / Math.max(1, compareBasis.width)) * scaledWidth;
+    const boxTop =
+      imageTop + (cropRectImage.y / Math.max(1, compareBasis.height)) * scaledHeight;
+    const boxRight =
+      boxLeft + (cropRectImage.width / Math.max(1, compareBasis.width)) * scaledWidth;
+    const boxBottom =
+      boxTop + (cropRectImage.height / Math.max(1, compareBasis.height)) * scaledHeight;
 
     let correctedPanX = nextPanX;
     let correctedPanY = nextPanY;
 
-    const boxLeft = displayBox.left;
-    const boxTop = displayBox.top;
-    const boxRight = displayBox.left + displayBox.width;
-    const boxBottom = displayBox.top + displayBox.height;
-
-    if (imageLeft > boxLeft) correctedPanX -= imageLeft - boxLeft;
-    if (imageRight < boxRight) correctedPanX += boxRight - imageRight;
-    if (imageTop > boxTop) correctedPanY -= imageTop - boxTop;
-    if (imageBottom < boxBottom) correctedPanY += boxBottom - imageBottom;
+    if (boxLeft < imageLeft) correctedPanX += imageLeft - boxLeft;
+    if (boxRight > imageRight) correctedPanX -= boxRight - imageRight;
+    if (boxTop < imageTop) correctedPanY += imageTop - boxTop;
+    if (boxBottom > imageBottom) correctedPanY -= boxBottom - imageBottom;
 
     return { x: correctedPanX, y: correctedPanY };
   };
@@ -301,7 +341,7 @@ export default function AddSamplePage() {
   };
 
   const handleSave = async () => {
-    if (!capturedImage || !imgRef.current || !baseRect.width || !baseRect.height) return;
+    if (!capturedImage || !compareBasis.width || !compareBasis.height) return;
 
     const sourceImg = await loadImage(capturedImage);
     const naturalWidth = sourceImg.naturalWidth;
@@ -320,43 +360,10 @@ export default function AddSamplePage() {
 
     compareCtx.drawImage(sourceImg, 0, 0, compareWidth, compareHeight);
 
-    const scaledWidthOnScreen = baseRect.width * imageScale;
-    const scaledHeightOnScreen = baseRect.height * imageScale;
-
-    const imageLeft =
-      baseRect.left + imagePanX - (scaledWidthOnScreen - baseRect.width) / 2;
-    const imageTop =
-      baseRect.top + imagePanY - (scaledHeightOnScreen - baseRect.height) / 2;
-
-    const cropLeftOnScreen = displayBox.left - imageLeft;
-    const cropTopOnScreen = displayBox.top - imageTop;
-
-    let srcX = (cropLeftOnScreen / scaledWidthOnScreen) * compareWidth;
-    let srcY = (cropTopOnScreen / scaledHeightOnScreen) * compareHeight;
-    let srcW = (displayBox.width / scaledWidthOnScreen) * compareWidth;
-    let srcH = (displayBox.height / scaledHeightOnScreen) * compareHeight;
-
-    if (srcX < 0) {
-      srcW += srcX;
-      srcX = 0;
-    }
-    if (srcY < 0) {
-      srcH += srcY;
-      srcY = 0;
-    }
-    if (srcX + srcW > compareWidth) {
-      srcW = compareWidth - srcX;
-    }
-    if (srcY + srcH > compareHeight) {
-      srcH = compareHeight - srcY;
-    }
-
-    srcX = Math.round(srcX);
-    srcY = Math.round(srcY);
-    srcW = Math.round(srcW);
-    srcH = Math.round(srcH);
-
-    if (srcW <= 1 || srcH <= 1) return;
+    const srcX = clamp(cropRectImage.x, 0, compareWidth - 1);
+    const srcY = clamp(cropRectImage.y, 0, compareHeight - 1);
+    const srcW = clamp(cropRectImage.width, 1, compareWidth - srcX);
+    const srcH = clamp(cropRectImage.height, 1, compareHeight - srcY);
 
     const cropCanvas = document.createElement("canvas");
     cropCanvas.width = srcW;
@@ -472,7 +479,7 @@ export default function AddSamplePage() {
               />
 
               <div
-                className="absolute border-[3px] border-white rounded-md bg-white/5 pointer-events-none"
+                className="absolute border border-white rounded-md bg-white/5 pointer-events-none"
                 style={{
                   left: displayBox.left,
                   top: displayBox.top,
@@ -493,7 +500,7 @@ export default function AddSamplePage() {
             <div className="w-14 text-sm text-zinc-300 shrink-0">横サイズ</div>
             <input
               type="range"
-              min={12}
+              min={8}
               max={80}
               value={Math.round(safeBoxWidthRatio * 100)}
               onChange={(e) =>
@@ -510,7 +517,7 @@ export default function AddSamplePage() {
             <div className="w-14 text-sm text-zinc-300 shrink-0">縦サイズ</div>
             <input
               type="range"
-              min={10}
+              min={6}
               max={60}
               value={Math.round(safeBoxHeightRatio * 100)}
               onChange={(e) =>
@@ -525,7 +532,7 @@ export default function AddSamplePage() {
         </div>
 
         <div className="text-center text-xs text-zinc-400">
-          1本指で画像移動 / 2本指で拡大縮小 / 枠は中央固定
+          1本指で画像移動 / 2本指で拡大縮小 / 枠は画像座標基準
         </div>
 
         <div className="flex items-center justify-center gap-3">
