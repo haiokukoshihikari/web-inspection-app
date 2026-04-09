@@ -3,32 +3,36 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
+const PAGE_VERSION = "camera-stable-01";
+
 export default function CameraPage() {
   const router = useRouter();
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const [error, setError] = useState("");
-  const [isCameraReady, setIsCameraReady] = useState(false);
-  const [isPickingImage, setIsPickingImage] = useState(false);
+  const [isReady, setIsReady] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
+  const [isCapturing, setIsCapturing] = useState(false);
 
   useEffect(() => {
-    let mounted = true;
+    let cancelled = false;
 
     async function startCamera() {
       try {
-        setError("");
-        setIsCameraReady(false);
+        setErrorMsg("");
+        setIsReady(false);
 
         const stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
           video: {
             facingMode: { ideal: "environment" },
+            width: { ideal: 4032 },
+            height: { ideal: 3024 },
           },
-          audio: false,
         });
 
-        if (!mounted) {
+        if (cancelled) {
           stream.getTracks().forEach((track) => track.stop());
           return;
         }
@@ -36,39 +40,26 @@ export default function CameraPage() {
         streamRef.current = stream;
 
         if (videoRef.current) {
-          const video = videoRef.current;
-          video.srcObject = stream;
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+        }
 
-          const handleLoadedMetadata = async () => {
-            try {
-              await video.play();
-            } catch (e) {
-              console.error("video play error:", e);
-            }
-
-            if (!mounted) return;
-
-            if (video.videoWidth > 0 && video.videoHeight > 0) {
-              setIsCameraReady(true);
-              setError("");
-            }
-          };
-
-          video.onloadedmetadata = handleLoadedMetadata;
+        if (!cancelled) {
+          setIsReady(true);
         }
       } catch (err) {
         console.error(err);
-        setError("カメラを起動できませんでした。権限設定を確認してください。");
+        if (!cancelled) {
+          setErrorMsg("カメラを起動できませんでした");
+          setIsReady(false);
+        }
       }
     }
 
     startCamera();
 
     return () => {
-      mounted = false;
-      if (videoRef.current) {
-        videoRef.current.onloadedmetadata = null;
-      }
+      cancelled = true;
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop());
         streamRef.current = null;
@@ -76,209 +67,158 @@ export default function CameraPage() {
     };
   }, []);
 
-  const handleCapture = () => {
+  const handleCapture = async () => {
+    if (!videoRef.current || isCapturing) return;
+
     const video = videoRef.current;
-    if (!video) return;
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
 
-    if (
-      !isCameraReady ||
-      video.readyState < 1 ||
-      !video.videoWidth ||
-      !video.videoHeight
-    ) {
-      setError("まだ撮影できる状態ではありません。少し待ってください。");
+    if (!vw || !vh) {
+      setErrorMsg("撮影画像の取得に失敗しました");
       return;
     }
-
-    const width = video.videoWidth;
-    const height = video.videoHeight;
-
-    const maxWidth = 1280;
-    const scale = Math.min(1, maxWidth / width);
-    const targetWidth = Math.round(width * scale);
-    const targetHeight = Math.round(height * scale);
-
-    const canvas = document.createElement("canvas");
-    canvas.width = targetWidth;
-    canvas.height = targetHeight;
-
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
-      setError("画像処理の初期化に失敗しました。");
-      return;
-    }
-
-    ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
-
-    const imageDataUrl = canvas.toDataURL("image/jpeg", 0.85);
 
     try {
-      sessionStorage.setItem("capturedImage", imageDataUrl);
-    } catch (e) {
-      console.error("sessionStorage save error:", e);
-      setError("撮影画像の保存に失敗しました。");
-      return;
-    }
+      setIsCapturing(true);
+      setErrorMsg("");
 
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
+      // 元の動画解像度でそのまま保存
+      const canvas = document.createElement("canvas");
+      canvas.width = vw;
+      canvas.height = vh;
 
-    router.push("/review");
-  };
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        throw new Error("canvas context unavailable");
+      }
 
-  const handlePickImageClick = () => {
-    if (isPickingImage) return;
-    setError("");
-    fileInputRef.current?.click();
-  };
+      ctx.drawImage(video, 0, 0, vw, vh);
 
-  const handleFileChange = async (
-    e: React.ChangeEvent<HTMLInputElement>
-  ) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+      const captured = canvas.toDataURL("image/jpeg", 0.98);
+      sessionStorage.setItem("capturedImage", captured);
 
-    setIsPickingImage(true);
-
-    try {
-      const reader = new FileReader();
-
-      reader.onload = () => {
-        const result = reader.result;
-        if (typeof result !== "string" || !result.startsWith("data:image/")) {
-          setError("画像の読み込みに失敗しました。");
-          setIsPickingImage(false);
-          return;
-        }
-
-        try {
-          sessionStorage.setItem("capturedImage", result);
-        } catch (err) {
-          console.error("sessionStorage save error:", err);
-          setError("画像の保存に失敗しました。");
-          setIsPickingImage(false);
-          return;
-        }
-
-        if (streamRef.current) {
-          streamRef.current.getTracks().forEach((track) => track.stop());
-          streamRef.current = null;
-        }
-
-        router.push("/review");
-      };
-
-      reader.onerror = () => {
-        setError("画像の読み込みに失敗しました。");
-        setIsPickingImage(false);
-      };
-
-      reader.readAsDataURL(file);
+      router.push("/review");
     } catch (err) {
       console.error(err);
-      setError("画像の選択に失敗しました。");
-      setIsPickingImage(false);
-    } finally {
-      e.target.value = "";
+      setErrorMsg("画像の保存に失敗しました");
+      setIsCapturing(false);
     }
   };
 
   return (
     <main className="min-h-screen bg-black text-white flex flex-col">
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/*"
-        onChange={handleFileChange}
-        className="hidden"
-      />
+      <div className="fixed right-2 bottom-2 z-[9999] text-[10px] px-2 py-1 rounded bg-black/70 text-zinc-300 border border-white/10 pointer-events-none">
+        {PAGE_VERSION}
+      </div>
 
-      <div className="relative flex-1 bg-black overflow-hidden flex items-center justify-center">
-        {error && (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 text-xs bg-red-500/20 text-red-200 px-3 py-2 rounded-full border border-red-300/20 max-w-[90%] text-center">
-            {error}
-          </div>
-        )}
+      <div className="flex items-center justify-between px-4 py-4 border-b border-zinc-800 bg-zinc-950">
+        <div className="text-base font-medium">カメラ</div>
+        <button
+          onClick={() => router.push("/")}
+          className="text-sm text-zinc-300"
+        >
+          戻る
+        </button>
+      </div>
 
+      <div className="flex-1 relative bg-black overflow-hidden">
         <video
           ref={videoRef}
-          className="absolute inset-0 w-full h-full object-contain bg-black"
+          className="absolute inset-0 w-full h-full object-cover"
           playsInline
           muted
           autoPlay
         />
 
+        {/* ガイドオーバーレイ */}
         <div className="absolute inset-0 pointer-events-none">
-          <div className="absolute left-4 top-4 text-xs bg-black/40 px-2 py-1 rounded-full border border-white/10">
-            ライブ簡易反応 2〜3fps
-          </div>
+          {/* 70%枠 */}
+          <div
+            className="absolute border border-white/70 rounded-md"
+            style={{
+              width: "70%",
+              height: "70%",
+              left: "15%",
+              top: "15%",
+            }}
+          />
+
+          {/* 中心縦線 */}
+          <div
+            className="absolute bg-white/50"
+            style={{
+              width: "1px",
+              height: "70%",
+              left: "50%",
+              top: "15%",
+              transform: "translateX(-0.5px)",
+            }}
+          />
+
+          {/* 中心横線 */}
+          <div
+            className="absolute bg-white/50"
+            style={{
+              height: "1px",
+              width: "70%",
+              left: "15%",
+              top: "50%",
+              transform: "translateY(-0.5px)",
+            }}
+          />
         </div>
+
+        {!isReady && !errorMsg ? (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/50">
+            <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
+              <div className="text-lg font-semibold">カメラ起動中…</div>
+              <div className="mt-1 text-sm text-zinc-300">しばらくお待ちください</div>
+            </div>
+          </div>
+        ) : null}
+
+        {isCapturing ? (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/50">
+            <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
+              <div className="text-lg font-semibold">保存中…</div>
+              <div className="mt-1 text-sm text-zinc-300">画像を処理しています</div>
+            </div>
+          </div>
+        ) : null}
+
+        {errorMsg ? (
+          <div className="absolute left-1/2 top-6 -translate-x-1/2 px-4 py-2 rounded-xl border border-rose-400/30 bg-black/70 text-rose-300 text-sm">
+            {errorMsg}
+          </div>
+        ) : null}
       </div>
 
       <div className="bg-black px-5 pt-3 pb-6">
         <div className="flex items-center justify-between">
           <button
-            onClick={handlePickImageClick}
-            disabled={isPickingImage}
-            className={`w-11 h-11 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center ${
-              isPickingImage ? "opacity-60" : ""
-            }`}
-            aria-label="写真を選ぶ"
-            title="写真を選ぶ"
+            onClick={() => router.push("/settings")}
+            className="w-11 h-11 rounded-full border border-white/15 bg-white/5 flex flex-col items-center justify-center gap-1"
+            aria-label="設定"
           >
-            <svg
-              viewBox="0 0 24 24"
-              className="w-6 h-6 text-white"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <rect x="3" y="5" width="18" height="14" rx="2" />
-              <circle cx="8.5" cy="10" r="1.5" />
-              <path d="M21 15l-5-5L5 21" />
-            </svg>
+            <span className="block w-4 h-0.5 bg-white rounded" />
+            <span className="block w-4 h-0.5 bg-white rounded" />
+            <span className="block w-4 h-0.5 bg-white rounded" />
           </button>
 
           <button
             onClick={handleCapture}
-            disabled={!isCameraReady}
-            className={`w-20 h-20 rounded-full flex items-center justify-center shadow-xl transition ${
-              isCameraReady
-                ? "bg-white active:scale-[0.98]"
-                : "bg-zinc-500 cursor-not-allowed opacity-60"
+            disabled={!isReady || isCapturing}
+            className={`w-20 h-20 rounded-full border-4 shadow-lg ${
+              !isReady || isCapturing
+                ? "border-zinc-600 bg-zinc-700"
+                : "border-white bg-white"
             }`}
             aria-label="撮影"
-          >
-            <span className="w-16 h-16 rounded-full border-[5px] border-black/80 block" />
-          </button>
+            title="撮影"
+          />
 
-          <button
-            onClick={() => router.push("/settings")}
-            className="w-11 h-11 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center"
-            aria-label="設定"
-            title="設定"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              className="w-6 h-6 text-white"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <circle cx="12" cy="12" r="3" />
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01A1.65 1.65 0 0 0 10.09 3H10a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-            </svg>
-          </button>
-        </div>
-
-        <div className="mt-3 text-center text-xs text-zinc-400">
-          左: 写真を選ぶ / 中央: 撮影 / 右: 設定
+          <div className="w-11 h-11" />
         </div>
       </div>
     </main>
