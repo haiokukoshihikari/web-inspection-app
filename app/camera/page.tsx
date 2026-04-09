@@ -3,12 +3,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
-const PAGE_VERSION = "camera-stable-01";
+const PAGE_VERSION = "camera-stable-02";
 
 export default function CameraPage() {
   const router = useRouter();
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
   const [isReady, setIsReady] = useState(false);
@@ -83,7 +84,6 @@ export default function CameraPage() {
       setIsCapturing(true);
       setErrorMsg("");
 
-      // 元の動画解像度でそのまま保存
       const canvas = document.createElement("canvas");
       canvas.width = vw;
       canvas.height = vh;
@@ -106,11 +106,56 @@ export default function CameraPage() {
     }
   };
 
+  const handlePickImage = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      setErrorMsg("");
+      setIsCapturing(true);
+
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result;
+        if (typeof result === "string" && result.startsWith("data:image/")) {
+          sessionStorage.setItem("capturedImage", result);
+          router.push("/review");
+        } else {
+          setErrorMsg("画像の読み込みに失敗しました");
+          setIsCapturing(false);
+        }
+      };
+      reader.onerror = () => {
+        setErrorMsg("画像の読み込みに失敗しました");
+        setIsCapturing(false);
+      };
+      reader.readAsDataURL(file);
+    } catch (err) {
+      console.error(err);
+      setErrorMsg("画像の読み込みに失敗しました");
+      setIsCapturing(false);
+    } finally {
+      e.target.value = "";
+    }
+  };
+
   return (
     <main className="min-h-screen bg-black text-white flex flex-col">
       <div className="fixed right-2 bottom-2 z-[9999] text-[10px] px-2 py-1 rounded bg-black/70 text-zinc-300 border border-white/10 pointer-events-none">
         {PAGE_VERSION}
       </div>
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={handleFileChange}
+      />
 
       <div className="flex items-center justify-between px-4 py-4 border-b border-zinc-800 bg-zinc-950">
         <div className="text-base font-medium">カメラ</div>
@@ -123,46 +168,49 @@ export default function CameraPage() {
       </div>
 
       <div className="flex-1 relative bg-black overflow-hidden">
-        <video
-          ref={videoRef}
-          className="absolute inset-0 w-full h-full object-cover"
-          playsInline
-          muted
-          autoPlay
-        />
+        {/* プレビュー領域 */}
+        <div className="absolute inset-0 flex items-center justify-center bg-black">
+          <video
+            ref={videoRef}
+            className="w-full h-full object-contain bg-black"
+            playsInline
+            muted
+            autoPlay
+          />
+        </div>
 
         {/* ガイドオーバーレイ */}
         <div className="absolute inset-0 pointer-events-none">
-          {/* 70%枠 */}
+          {/* 80%枠 */}
           <div
             className="absolute border border-white/70 rounded-md"
             style={{
-              width: "70%",
-              height: "70%",
-              left: "15%",
-              top: "15%",
+              width: "80%",
+              height: "80%",
+              left: "10%",
+              top: "10%",
             }}
           />
 
           {/* 中心縦線 */}
           <div
-            className="absolute bg-white/50"
+            className="absolute bg-white/45"
             style={{
               width: "1px",
-              height: "70%",
+              height: "80%",
               left: "50%",
-              top: "15%",
+              top: "10%",
               transform: "translateX(-0.5px)",
             }}
           />
 
           {/* 中心横線 */}
           <div
-            className="absolute bg-white/50"
+            className="absolute bg-white/45"
             style={{
               height: "1px",
-              width: "70%",
-              left: "15%",
+              width: "80%",
+              left: "10%",
               top: "50%",
               transform: "translateY(-0.5px)",
             }}
@@ -179,10 +227,10 @@ export default function CameraPage() {
         ) : null}
 
         {isCapturing ? (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/50">
+          <div className="absolute inset-0 flex items-center justify-center bg-black/45">
             <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
-              <div className="text-lg font-semibold">保存中…</div>
-              <div className="mt-1 text-sm text-zinc-300">画像を処理しています</div>
+              <div className="text-lg font-semibold">処理中…</div>
+              <div className="mt-1 text-sm text-zinc-300">画像を準備しています</div>
             </div>
           </div>
         ) : null}
@@ -194,18 +242,32 @@ export default function CameraPage() {
         ) : null}
       </div>
 
-      <div className="bg-black px-5 pt-3 pb-6">
+      {/* 下部UI: iPhone標準カメラ風 */}
+      <div className="bg-black px-5 pt-4 pb-8">
         <div className="flex items-center justify-between">
+          {/* 左: 写真選択 */}
           <button
-            onClick={() => router.push("/settings")}
-            className="w-11 h-11 rounded-full border border-white/15 bg-white/5 flex flex-col items-center justify-center gap-1"
-            aria-label="設定"
+            onClick={handlePickImage}
+            className="w-14 h-14 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center shadow-lg active:scale-[0.98]"
+            aria-label="写真を選択"
+            title="写真を選択"
           >
-            <span className="block w-4 h-0.5 bg-white rounded" />
-            <span className="block w-4 h-0.5 bg-white rounded" />
-            <span className="block w-4 h-0.5 bg-white rounded" />
+            <svg
+              viewBox="0 0 24 24"
+              className="w-7 h-7 text-white"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <rect x="3" y="5" width="18" height="14" rx="2" />
+              <circle cx="8.5" cy="10.5" r="1.5" />
+              <path d="M21 15l-5-5L5 21" />
+            </svg>
           </button>
 
+          {/* 中央: シャッター */}
           <button
             onClick={handleCapture}
             disabled={!isReady || isCapturing}
@@ -218,7 +280,19 @@ export default function CameraPage() {
             title="撮影"
           />
 
-          <div className="w-11 h-11" />
+          {/* 右: 設定 */}
+          <button
+            onClick={() => router.push("/settings")}
+            className="w-14 h-14 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center shadow-lg active:scale-[0.98]"
+            aria-label="設定"
+            title="設定"
+          >
+            <span className="flex flex-col items-center justify-center gap-1">
+              <span className="block w-5 h-0.5 bg-white rounded" />
+              <span className="block w-5 h-0.5 bg-white rounded" />
+              <span className="block w-5 h-0.5 bg-white rounded" />
+            </span>
+          </button>
         </div>
       </div>
     </main>
