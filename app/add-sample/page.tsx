@@ -7,7 +7,7 @@ const SAMPLES_KEY = "inspection:samples";
 const RESOLUTION_KEY = "inspection:compareResolution";
 
 const MAX_SAMPLES = 6;
-const PAGE_VERSION = "add-sample-stable-04";
+const PAGE_VERSION = "add-sample-stable-05";
 
 const MIN_BOX_W = 0.08;
 const MAX_BOX_W = 0.8;
@@ -102,13 +102,6 @@ export default function AddSamplePage() {
       const stored = sessionStorage.getItem("capturedImage");
       if (stored && stored.startsWith("data:image/")) {
         setCapturedImage(stored);
-        loadImage(stored).then((img) => {
-          const compareScale = Math.min(1, compareResolution / img.naturalWidth);
-          setCompareBasis({
-            width: Math.max(1, Math.round(img.naturalWidth * compareScale)),
-            height: Math.max(1, Math.round(img.naturalHeight * compareScale)),
-          });
-        });
       }
 
       const savedRes = localStorage.getItem(RESOLUTION_KEY);
@@ -123,6 +116,7 @@ export default function AddSamplePage() {
 
   useEffect(() => {
     if (!capturedImage) return;
+
     loadImage(capturedImage).then((img) => {
       const compareScale = Math.min(1, compareResolution / img.naturalWidth);
       setCompareBasis({
@@ -163,17 +157,29 @@ export default function AddSamplePage() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  const cropRectImage = useMemo(() => {
-    const width = Math.max(1, Math.round(compareBasis.width * safeBoxWidthRatio));
-    const height = Math.max(1, Math.round(compareBasis.height * safeBoxHeightRatio));
-    const x = Math.max(0, Math.round((compareBasis.width - width) / 2));
-    const y = Math.max(0, Math.round((compareBasis.height - height) / 2));
-    return { x, y, width, height };
-  }, [compareBasis.width, compareBasis.height, safeBoxWidthRatio, safeBoxHeightRatio]);
-
+  // 見た目の枠は常に中央固定
   const displayBox = useMemo(() => {
+    const maxWidth = Math.max(0, baseRect.width);
+    const maxHeight = Math.max(0, baseRect.height);
+
+    const rawWidth = maxWidth * safeBoxWidthRatio;
+    const rawHeight = maxHeight * safeBoxHeightRatio;
+
+    const width = Math.min(rawWidth, maxWidth);
+    const height = Math.min(rawHeight, maxHeight);
+
+    return {
+      left: baseRect.left + (baseRect.width - width) / 2,
+      top: baseRect.top + (baseRect.height - height) / 2,
+      width,
+      height,
+    };
+  }, [baseRect, safeBoxWidthRatio, safeBoxHeightRatio]);
+
+  // 固定枠が今どの画像座標を見ているかを毎回計算
+  const cropRectImage = useMemo(() => {
     if (!compareBasis.width || !compareBasis.height || !baseRect.width || !baseRect.height) {
-      return { left: 0, top: 0, width: 0, height: 0 };
+      return { x: 0, y: 0, width: 0, height: 0 };
     }
 
     const scaledWidth = baseRect.width * imageScale;
@@ -184,20 +190,28 @@ export default function AddSamplePage() {
     const imageTop =
       baseRect.top + imagePanY - (scaledHeight - baseRect.height) / 2;
 
-    return {
-      left: imageLeft + (cropRectImage.x / compareBasis.width) * scaledWidth,
-      top: imageTop + (cropRectImage.y / compareBasis.height) * scaledHeight,
-      width: (cropRectImage.width / compareBasis.width) * scaledWidth,
-      height: (cropRectImage.height / compareBasis.height) * scaledHeight,
-    };
+    const cropLeftOnScreen = displayBox.left - imageLeft;
+    const cropTopOnScreen = displayBox.top - imageTop;
+
+    let x = Math.round((cropLeftOnScreen / scaledWidth) * compareBasis.width);
+    let y = Math.round((cropTopOnScreen / scaledHeight) * compareBasis.height);
+    let width = Math.round((displayBox.width / scaledWidth) * compareBasis.width);
+    let height = Math.round((displayBox.height / scaledHeight) * compareBasis.height);
+
+    x = clamp(x, 0, Math.max(0, compareBasis.width - 1));
+    y = clamp(y, 0, Math.max(0, compareBasis.height - 1));
+    width = clamp(width, 1, compareBasis.width - x);
+    height = clamp(height, 1, compareBasis.height - y);
+
+    return { x, y, width, height };
   }, [
+    compareBasis.width,
+    compareBasis.height,
     baseRect,
+    displayBox,
     imageScale,
     imagePanX,
     imagePanY,
-    cropRectImage,
-    compareBasis.width,
-    compareBasis.height,
   ]);
 
   const getDistance = (
@@ -205,6 +219,7 @@ export default function AddSamplePage() {
     b: { x: number; y: number }
   ) => Math.hypot(a.x - b.x, a.y - b.y);
 
+  // 枠は固定なので、画像が枠から外れない範囲でだけ移動・拡大できる
   const clampPan = (
     nextPanX: number,
     nextPanY: number,
@@ -213,29 +228,25 @@ export default function AddSamplePage() {
     const scaledWidth = baseRect.width * nextScale;
     const scaledHeight = baseRect.height * nextScale;
 
-    const imageLeft =
-      baseRect.left + nextPanX - (scaledWidth - baseRect.width) / 2;
-    const imageTop =
-      baseRect.top + nextPanY - (scaledHeight - baseRect.height) / 2;
-    const imageRight = imageLeft + scaledWidth;
-    const imageBottom = imageTop + scaledHeight;
-
-    const boxLeft =
-      imageLeft + (cropRectImage.x / Math.max(1, compareBasis.width)) * scaledWidth;
-    const boxTop =
-      imageTop + (cropRectImage.y / Math.max(1, compareBasis.height)) * scaledHeight;
-    const boxRight =
-      boxLeft + (cropRectImage.width / Math.max(1, compareBasis.width)) * scaledWidth;
-    const boxBottom =
-      boxTop + (cropRectImage.height / Math.max(1, compareBasis.height)) * scaledHeight;
-
     let correctedPanX = nextPanX;
     let correctedPanY = nextPanY;
 
-    if (boxLeft < imageLeft) correctedPanX += imageLeft - boxLeft;
-    if (boxRight > imageRight) correctedPanX -= boxRight - imageRight;
-    if (boxTop < imageTop) correctedPanY += imageTop - boxTop;
-    if (boxBottom > imageBottom) correctedPanY -= boxBottom - imageBottom;
+    const imageLeft =
+      baseRect.left + correctedPanX - (scaledWidth - baseRect.width) / 2;
+    const imageTop =
+      baseRect.top + correctedPanY - (scaledHeight - baseRect.height) / 2;
+    const imageRight = imageLeft + scaledWidth;
+    const imageBottom = imageTop + scaledHeight;
+
+    const boxLeft = displayBox.left;
+    const boxTop = displayBox.top;
+    const boxRight = displayBox.left + displayBox.width;
+    const boxBottom = displayBox.top + displayBox.height;
+
+    if (imageLeft > boxLeft) correctedPanX -= imageLeft - boxLeft;
+    if (imageRight < boxRight) correctedPanX += boxRight - imageRight;
+    if (imageTop > boxTop) correctedPanY -= imageTop - boxTop;
+    if (imageBottom < boxBottom) correctedPanY += boxBottom - imageBottom;
 
     return { x: correctedPanX, y: correctedPanY };
   };
@@ -532,7 +543,7 @@ export default function AddSamplePage() {
         </div>
 
         <div className="text-center text-xs text-zinc-400">
-          1本指で画像移動 / 2本指で拡大縮小 / 枠は画像座標基準
+          1本指で画像移動 / 2本指で拡大縮小 / 枠は中央固定
         </div>
 
         <div className="flex items-center justify-center gap-3">
