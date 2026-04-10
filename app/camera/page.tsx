@@ -3,13 +3,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
-const PAGE_VERSION = "camera-stable-06";
+const PAGE_VERSION = "camera-stable-07";
 
 type SaveStep =
   | "idle"
   | "capture_start"
   | "canvas_create"
   | "canvas_draw"
+  | "image_resize"
   | "dataurl_create"
   | "sessionstorage_save"
   | "navigate_review"
@@ -38,7 +39,7 @@ export default function CameraPage() {
   const pushSaveLog = useCallback((msg: string) => {
     setSaveLog((prev) => {
       const next = [...prev, msg];
-      return next.slice(-8);
+      return next.slice(-10);
     });
   }, []);
 
@@ -169,6 +170,125 @@ export default function CameraPage() {
     [pushSaveLog]
   );
 
+  const makeResizedDataUrlForStorage = useCallback(
+    (sourceCanvas: HTMLCanvasElement) => {
+      const attempts = [
+        { maxSide: 2400, quality: 0.9 },
+        { maxSide: 2000, quality: 0.88 },
+        { maxSide: 1600, quality: 0.85 },
+        { maxSide: 1280, quality: 0.82 },
+        { maxSide: 1024, quality: 0.8 },
+      ];
+
+      for (const attempt of attempts) {
+        const srcW = sourceCanvas.width;
+        const srcH = sourceCanvas.height;
+        const longSide = Math.max(srcW, srcH);
+        const scale = Math.min(1, attempt.maxSide / longSide);
+
+        const outW = Math.max(1, Math.round(srcW * scale));
+        const outH = Math.max(1, Math.round(srcH * scale));
+
+        const outCanvas = document.createElement("canvas");
+        outCanvas.width = outW;
+        outCanvas.height = outH;
+        const outCtx = outCanvas.getContext("2d");
+        if (!outCtx) continue;
+
+        outCtx.drawImage(sourceCanvas, 0, 0, srcW, srcH, 0, 0, outW, outH);
+
+        let dataUrl = "";
+        try {
+          dataUrl = outCanvas.toDataURL("image/jpeg", attempt.quality);
+        } catch {
+          continue;
+        }
+
+        if (dataUrl && dataUrl.startsWith("data:image/")) {
+          return {
+            dataUrl,
+            width: outW,
+            height: outH,
+            quality: attempt.quality,
+            maxSide: attempt.maxSide,
+          };
+        }
+      }
+
+      return null;
+    },
+    []
+  );
+
+  const saveToSessionStorageSafely = useCallback(
+    (sourceCanvas: HTMLCanvasElement) => {
+      const attempts = [
+        { maxSide: 2400, quality: 0.9 },
+        { maxSide: 2000, quality: 0.88 },
+        { maxSide: 1600, quality: 0.85 },
+        { maxSide: 1280, quality: 0.82 },
+        { maxSide: 1024, quality: 0.8 },
+      ];
+
+      for (const attempt of attempts) {
+        const srcW = sourceCanvas.width;
+        const srcH = sourceCanvas.height;
+        const longSide = Math.max(srcW, srcH);
+        const scale = Math.min(1, attempt.maxSide / longSide);
+
+        const outW = Math.max(1, Math.round(srcW * scale));
+        const outH = Math.max(1, Math.round(srcH * scale));
+
+        const outCanvas = document.createElement("canvas");
+        outCanvas.width = outW;
+        outCanvas.height = outH;
+
+        const outCtx = outCanvas.getContext("2d");
+        if (!outCtx) {
+          pushSaveLog(`resize fail: ctx unavailable / ${attempt.maxSide}`);
+          continue;
+        }
+
+        outCtx.drawImage(sourceCanvas, 0, 0, srcW, srcH, 0, 0, outW, outH);
+
+        let dataUrl = "";
+        try {
+          dataUrl = outCanvas.toDataURL("image/jpeg", attempt.quality);
+        } catch (err) {
+          pushSaveLog(`toDataURL fail: ${attempt.maxSide}`);
+          console.error(err);
+          continue;
+        }
+
+        if (!dataUrl || !dataUrl.startsWith("data:image/")) {
+          pushSaveLog(`invalid dataUrl: ${attempt.maxSide}`);
+          continue;
+        }
+
+        pushSaveLog(
+          `try save: ${outW}x${outH} / q${attempt.quality} / ${dataUrl.length.toLocaleString()} chars`
+        );
+
+        try {
+          sessionStorage.setItem("capturedImage", dataUrl);
+          return {
+            ok: true as const,
+            width: outW,
+            height: outH,
+            quality: attempt.quality,
+            length: dataUrl.length,
+          };
+        } catch (err) {
+          console.error(err);
+          pushSaveLog(`sessionStorage fail: ${outW}x${outH}`);
+        }
+      }
+
+      return { ok: false as const };
+    },
+    [pushSaveLog]
+  );
+
   const handleCapture = async () => {
     if (!videoRef.current || isCapturing || !isReady) return;
 
@@ -207,31 +327,21 @@ export default function CameraPage() {
       ctx.drawImage(video, 0, 0, vw, vh);
       pushSaveLog("canvas draw: ok");
 
-      setSaveStep("dataurl_create");
-      let captured = "";
-      try {
-        captured = canvas.toDataURL("image/jpeg", 0.98);
-      } catch (err) {
-        failSave("保存失敗: 画像変換(toDataURL)", err);
-        return;
-      }
-
-      if (!captured || !captured.startsWith("data:image/")) {
-        failSave("保存失敗: 画像変換結果が不正");
-        return;
-      }
-
-      pushSaveLog(`data url length: ${captured.length.toLocaleString()}`);
-      setLastImageInfo(`video: ${vw}x${vh} / dataURL: ${captured.length.toLocaleString()} chars`);
+      setSaveStep("image_resize");
+      pushSaveLog("resize for storage: start");
 
       setSaveStep("sessionstorage_save");
-      try {
-        sessionStorage.setItem("capturedImage", captured);
-      } catch (err) {
-        failSave("保存失敗: sessionStorage保存", err);
+      const saved = saveToSessionStorageSafely(canvas);
+
+      if (!saved.ok) {
+        failSave("保存失敗: sessionStorage保存");
         return;
       }
-      pushSaveLog("sessionStorage save: ok");
+
+      setLastImageInfo(
+        `video: ${vw}x${vh} / stored: ${saved.width}x${saved.height} / q${saved.quality} / ${saved.length.toLocaleString()} chars`
+      );
+      pushSaveLog(`saved: ${saved.width}x${saved.height}`);
 
       setSaveStep("navigate_review");
       pushSaveLog("navigate: /review");
@@ -243,7 +353,7 @@ export default function CameraPage() {
     }
   };
 
-  const handlePickImage = () => {
+  const handlePickImage = async () => {
     fileInputRef.current?.click();
   };
 
@@ -266,22 +376,57 @@ export default function CameraPage() {
       reader.onload = () => {
         const result = reader.result;
 
-        if (typeof result === "string" && result.startsWith("data:image/")) {
+        if (typeof result !== "string" || !result.startsWith("data:image/")) {
+          failSave("画像の読み込みに失敗しました");
+          return;
+        }
+
+        const img = new Image();
+        img.onload = () => {
           try {
-            setSaveStep("sessionstorage_save");
-            sessionStorage.setItem("capturedImage", result);
-            pushSaveLog(`data url length: ${result.length.toLocaleString()}`);
-            pushSaveLog("sessionStorage save: ok");
+            setSaveStep("canvas_create");
+            const canvas = document.createElement("canvas");
+            canvas.width = img.naturalWidth;
+            canvas.height = img.naturalHeight;
+
+            const ctx = canvas.getContext("2d");
+            if (!ctx) {
+              failSave("保存失敗: canvas context 作成");
+              return;
+            }
+
+            setSaveStep("canvas_draw");
+            ctx.drawImage(img, 0, 0);
+            pushSaveLog(`image loaded: ${img.naturalWidth}x${img.naturalHeight}`);
+
+            setSaveStep("image_resize");
+            const saved = saveToSessionStorageSafely(canvas);
+
+            if (!saved.ok) {
+              failSave("保存失敗: sessionStorage保存");
+              return;
+            }
+
+            setLastImageInfo(
+              `file image: ${img.naturalWidth}x${img.naturalHeight} / stored: ${saved.width}x${saved.height} / q${saved.quality} / ${saved.length.toLocaleString()} chars`
+            );
+            pushSaveLog(`saved: ${saved.width}x${saved.height}`);
+
             setSaveStep("navigate_review");
             pushSaveLog("navigate: /review");
             setSaveStep("done");
+
             router.push("/review");
           } catch (err) {
-            failSave("保存失敗: sessionStorage保存", err);
+            failSave("画像の読み込みに失敗しました", err);
           }
-        } else {
+        };
+
+        img.onerror = () => {
           failSave("画像の読み込みに失敗しました");
-        }
+        };
+
+        img.src = result;
       };
 
       reader.onerror = () => {
@@ -439,6 +584,7 @@ export default function CameraPage() {
               {saveStep === "capture_start" && "撮影開始"}
               {saveStep === "canvas_create" && "保存準備中"}
               {saveStep === "canvas_draw" && "画像描画中"}
+              {saveStep === "image_resize" && "保存用に縮小中"}
               {saveStep === "dataurl_create" && "画像変換中"}
               {saveStep === "sessionstorage_save" && "一時保存中"}
               {saveStep === "navigate_review" && "画面移動中"}
