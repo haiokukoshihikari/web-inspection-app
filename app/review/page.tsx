@@ -489,6 +489,9 @@ export default function ReviewPage() {
     useState<CompareResolutionMode>(1200);
   const [hitLimit, setHitLimit] = useState<HitLimitMode>(30);
 
+  const reversedDraftThreshold =
+    UI_THRESHOLD_MAX + UI_THRESHOLD_MIN - draftThreshold;
+
   const [displayBasis, setDisplayBasis] = useState({ width: 0, height: 0 });
   const [imageRect, setImageRect] = useState({
     left: 0,
@@ -658,8 +661,15 @@ export default function ReviewPage() {
 
     thresholdApplyTimerRef.current = window.setTimeout(() => {
       const nextEffective = effectiveThresholdFrom(base, sens);
-      setMatchThreshold(nextEffective);
+
       setPendingRecheck(false);
+      setBuildingPreview(true);
+
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          setMatchThreshold(nextEffective);
+        });
+      });
     }, 1000);
   };
 
@@ -929,36 +939,40 @@ export default function ReviewPage() {
         </div>
 
         <div className="flex items-center gap-2">
-          <div className="text-sm text-zinc-300 shrink-0">しきい値</div>
+        <div className="text-sm text-zinc-300 shrink-0">しきい値</div>
 
-          <button
-            onClick={() => adjustDraftThreshold(-0.01)}
-            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
-          >
-            -
-          </button>
+        <button
+          onClick={() => adjustDraftThreshold(-0.01)}
+          className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
+        >
+          -
+        </button>
 
-          <input
-            type="range"
-            min={UI_THRESHOLD_MIN}
-            max={UI_THRESHOLD_MAX}
-            step={0.01}
-            value={draftThreshold}
-            onChange={(e) => applyDirectThresholdChange(Number(e.target.value))}
-            className="flex-1"
-          />
+        <input
+          type="range"
+          min={UI_THRESHOLD_MIN}
+          max={UI_THRESHOLD_MAX}
+          step={0.01}
+          value={reversedDraftThreshold}
+          onChange={(e) => {
+            const raw = Number(e.target.value);
+            const restored = UI_THRESHOLD_MAX + UI_THRESHOLD_MIN - raw;
+            applyDirectThresholdChange(restored);
+          }}
+          className="flex-1"
+        />
 
-          <button
-            onClick={() => adjustDraftThreshold(0.01)}
-            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
-          >
-            +
-          </button>
+        <button
+          onClick={() => adjustDraftThreshold(0.01)}
+          className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
+        >
+          +
+        </button>
 
-          <div className="text-sm w-12 text-right text-zinc-300">
-            {draftThreshold.toFixed(2)}
-          </div>
+        <div className="text-sm w-12 text-right text-zinc-300">
+          {draftThreshold.toFixed(2)}
         </div>
+      </div>
 
         <div className="text-[11px] text-zinc-500">
           {`しきい値 ${draftThreshold.toFixed(2)} / 感度 ${sensitivity} / 実適用 ${matchThreshold.toFixed(3)}`}
