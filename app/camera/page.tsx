@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
-const PAGE_VERSION = "camera-stable-02";
+const PAGE_VERSION = "camera-stable-03";
 
 export default function CameraPage() {
   const router = useRouter();
@@ -15,6 +15,17 @@ export default function CameraPage() {
   const [isReady, setIsReady] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
   const [isCapturing, setIsCapturing] = useState(false);
+  const [isLandscape, setIsLandscape] = useState(false);
+
+  useEffect(() => {
+    const updateOrientation = () => {
+      setIsLandscape(window.innerWidth > window.innerHeight);
+    };
+
+    updateOrientation();
+    window.addEventListener("resize", updateOrientation);
+    return () => window.removeEventListener("resize", updateOrientation);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -143,6 +154,148 @@ export default function CameraPage() {
     }
   };
 
+  const TopBar = (
+    <div className="flex items-center justify-between px-4 py-4 border-b border-zinc-800 bg-zinc-950">
+      <div className="text-base font-medium">カメラ</div>
+      <button
+        onClick={() => router.push("/")}
+        className="text-sm text-zinc-300"
+      >
+        戻る
+      </button>
+    </div>
+  );
+
+  const PreviewArea = (
+    <div className="relative w-full h-full bg-black flex items-center justify-center overflow-hidden">
+      <video
+        ref={videoRef}
+        className="w-full h-full object-contain bg-black"
+        playsInline
+        muted
+        autoPlay
+      />
+
+      <div className="absolute inset-0 pointer-events-none">
+        <div
+          className="absolute border border-white/70 rounded-md"
+          style={{
+            width: "75%",
+            height: "75%",
+            left: "12.5%",
+            top: "12.5%",
+          }}
+        />
+
+        <div
+          className="absolute bg-white/45"
+          style={{
+            width: "1px",
+            height: "75%",
+            left: "50%",
+            top: "12.5%",
+            transform: "translateX(-0.5px)",
+          }}
+        />
+
+        <div
+          className="absolute bg-white/45"
+          style={{
+            height: "1px",
+            width: "75%",
+            left: "12.5%",
+            top: "50%",
+            transform: "translateY(-0.5px)",
+          }}
+        />
+      </div>
+
+      {!isReady && !errorMsg ? (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/50">
+          <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
+            <div className="text-lg font-semibold">カメラ起動中…</div>
+            <div className="mt-1 text-sm text-zinc-300">しばらくお待ちください</div>
+          </div>
+        </div>
+      ) : null}
+
+      {isCapturing ? (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/45">
+          <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
+            <div className="text-lg font-semibold">処理中…</div>
+            <div className="mt-1 text-sm text-zinc-300">画像を準備しています</div>
+          </div>
+        </div>
+      ) : null}
+
+      {errorMsg ? (
+        <div className="absolute left-1/2 top-6 -translate-x-1/2 px-4 py-2 rounded-xl border border-rose-400/30 bg-black/70 text-rose-300 text-sm">
+          {errorMsg}
+        </div>
+      ) : null}
+    </div>
+  );
+
+  const IconPhoto = (
+    <svg
+      viewBox="0 0 24 24"
+      className="w-7 h-7 text-white"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <circle cx="8.5" cy="10.5" r="1.5" />
+      <path d="M21 15l-5-5L5 21" />
+    </svg>
+  );
+
+  const IconMenu = (
+    <span className="flex flex-col items-center justify-center gap-1">
+      <span className="block w-5 h-0.5 bg-white rounded" />
+      <span className="block w-5 h-0.5 bg-white rounded" />
+      <span className="block w-5 h-0.5 bg-white rounded" />
+    </span>
+  );
+
+  const ShutterButton = (
+    <button
+      onClick={handleCapture}
+      disabled={!isReady || isCapturing}
+      className={`w-20 h-20 rounded-full border-4 shadow-lg ${
+        !isReady || isCapturing
+          ? "border-zinc-600 bg-zinc-700"
+          : "border-white bg-white"
+      }`}
+      aria-label="撮影"
+      title="撮影"
+    />
+  );
+
+  const PhotoButton = (
+    <button
+      onClick={handlePickImage}
+      className="w-14 h-14 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center shadow-lg active:scale-[0.98]"
+      aria-label="写真を選択"
+      title="写真を選択"
+    >
+      {IconPhoto}
+    </button>
+  );
+
+  const SettingsButton = (
+    <button
+      onClick={() => router.push("/settings")}
+      className="w-14 h-14 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center shadow-lg active:scale-[0.98]"
+      aria-label="設定"
+      title="設定"
+    >
+      {IconMenu}
+    </button>
+  );
+
   return (
     <main className="min-h-screen bg-black text-white flex flex-col">
       <div className="fixed right-2 bottom-2 z-[9999] text-[10px] px-2 py-1 rounded bg-black/70 text-zinc-300 border border-white/10 pointer-events-none">
@@ -157,144 +310,34 @@ export default function CameraPage() {
         onChange={handleFileChange}
       />
 
-      <div className="flex items-center justify-between px-4 py-4 border-b border-zinc-800 bg-zinc-950">
-        <div className="text-base font-medium">カメラ</div>
-        <button
-          onClick={() => router.push("/")}
-          className="text-sm text-zinc-300"
-        >
-          戻る
-        </button>
-      </div>
+      {TopBar}
 
-      <div className="flex-1 relative bg-black overflow-hidden">
-        {/* プレビュー領域 */}
-        <div className="absolute inset-0 flex items-center justify-center bg-black">
-          <video
-            ref={videoRef}
-            className="w-full h-full object-contain bg-black"
-            playsInline
-            muted
-            autoPlay
-          />
+      {isLandscape ? (
+        <div className="flex-1 flex bg-black min-h-0">
+          <div className="w-24 flex flex-col items-center justify-end gap-5 pb-8">
+            {PhotoButton}
+          </div>
+
+          <div className="flex-1 min-w-0 min-h-0">{PreviewArea}</div>
+
+          <div className="w-28 flex flex-col items-center justify-center gap-6">
+            {ShutterButton}
+            {SettingsButton}
+          </div>
         </div>
+      ) : (
+        <>
+          <div className="flex-1 relative bg-black overflow-hidden">{PreviewArea}</div>
 
-        {/* ガイドオーバーレイ */}
-        <div className="absolute inset-0 pointer-events-none">
-          {/* 80%枠 */}
-          <div
-            className="absolute border border-white/70 rounded-md"
-            style={{
-              width: "80%",
-              height: "80%",
-              left: "10%",
-              top: "10%",
-            }}
-          />
-
-          {/* 中心縦線 */}
-          <div
-            className="absolute bg-white/45"
-            style={{
-              width: "1px",
-              height: "80%",
-              left: "50%",
-              top: "10%",
-              transform: "translateX(-0.5px)",
-            }}
-          />
-
-          {/* 中心横線 */}
-          <div
-            className="absolute bg-white/45"
-            style={{
-              height: "1px",
-              width: "80%",
-              left: "10%",
-              top: "50%",
-              transform: "translateY(-0.5px)",
-            }}
-          />
-        </div>
-
-        {!isReady && !errorMsg ? (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/50">
-            <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
-              <div className="text-lg font-semibold">カメラ起動中…</div>
-              <div className="mt-1 text-sm text-zinc-300">しばらくお待ちください</div>
+          <div className="bg-black px-5 pt-4 pb-8">
+            <div className="flex items-center justify-between">
+              {PhotoButton}
+              {ShutterButton}
+              {SettingsButton}
             </div>
           </div>
-        ) : null}
-
-        {isCapturing ? (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/45">
-            <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
-              <div className="text-lg font-semibold">処理中…</div>
-              <div className="mt-1 text-sm text-zinc-300">画像を準備しています</div>
-            </div>
-          </div>
-        ) : null}
-
-        {errorMsg ? (
-          <div className="absolute left-1/2 top-6 -translate-x-1/2 px-4 py-2 rounded-xl border border-rose-400/30 bg-black/70 text-rose-300 text-sm">
-            {errorMsg}
-          </div>
-        ) : null}
-      </div>
-
-      {/* 下部UI: iPhone標準カメラ風 */}
-      <div className="bg-black px-5 pt-4 pb-8">
-        <div className="flex items-center justify-between">
-          {/* 左: 写真選択 */}
-          <button
-            onClick={handlePickImage}
-            className="w-14 h-14 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center shadow-lg active:scale-[0.98]"
-            aria-label="写真を選択"
-            title="写真を選択"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              className="w-7 h-7 text-white"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <rect x="3" y="5" width="18" height="14" rx="2" />
-              <circle cx="8.5" cy="10.5" r="1.5" />
-              <path d="M21 15l-5-5L5 21" />
-            </svg>
-          </button>
-
-          {/* 中央: シャッター */}
-          <button
-            onClick={handleCapture}
-            disabled={!isReady || isCapturing}
-            className={`w-20 h-20 rounded-full border-4 shadow-lg ${
-              !isReady || isCapturing
-                ? "border-zinc-600 bg-zinc-700"
-                : "border-white bg-white"
-            }`}
-            aria-label="撮影"
-            title="撮影"
-          />
-
-          {/* 右: 設定 */}
-          <button
-            onClick={() => router.push("/settings")}
-            className="w-14 h-14 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center shadow-lg active:scale-[0.98]"
-            aria-label="設定"
-            title="設定"
-          >
-            <span className="flex flex-col items-center justify-center gap-1">
-              <span className="block w-5 h-0.5 bg-white rounded" />
-              <span className="block w-5 h-0.5 bg-white rounded" />
-              <span className="block w-5 h-0.5 bg-white rounded" />
-            </span>
-          </button>
-        </div>
-      </div>
+        </>
+      )}
     </main>
   );
 }
