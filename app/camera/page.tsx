@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
-const PAGE_VERSION = "camera-stable-04";
+const PAGE_VERSION = "camera-stable-05";
 
 export default function CameraPage() {
   const router = useRouter();
@@ -112,7 +112,6 @@ export default function CameraPage() {
     };
   }, [startCamera, stopCamera]);
 
-  // 向きが変わったら安全に再起動
   useEffect(() => {
     if (!mountedRef.current) return;
 
@@ -264,6 +263,17 @@ export default function CameraPage() {
     </button>
   );
 
+  const BackButton = (
+    <button
+      onClick={() => router.push("/")}
+      className="w-14 h-14 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center shadow-lg active:scale-[0.98] shrink-0 text-sm text-zinc-300"
+      aria-label="戻る"
+      title="戻る"
+    >
+      戻る
+    </button>
+  );
+
   const TopBar = (
     <div className="h-20 shrink-0 flex items-center justify-between px-4 border-b border-zinc-800 bg-zinc-950">
       <div className="text-base font-medium">カメラ</div>
@@ -280,9 +290,7 @@ export default function CameraPage() {
     <div className="relative w-full h-full bg-black flex items-center justify-center overflow-hidden">
       <video
         ref={videoRef}
-        className={`w-full h-full bg-black ${
-          isLandscape ? "object-cover" : "object-contain"
-        }`}
+        className="w-full h-full object-contain bg-black"
         playsInline
         muted
         autoPlay
@@ -364,30 +372,30 @@ export default function CameraPage() {
 
       {isLandscape ? (
         <div className="flex-1 min-h-0 flex bg-black overflow-hidden">
-        <div className="w-20 shrink-0 flex flex-col items-center justify-between py-4">
-          <button
-            onClick={() => router.push("/")}
-            className="w-14 h-14 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center shadow-lg active:scale-[0.98] shrink-0 text-sm text-zinc-300"
-            aria-label="戻る"
-            title="戻る"
-          >
-            戻る
-          </button>
+          <div className="w-20 shrink-0 relative">
+            <div className="absolute left-1/2 top-4 -translate-x-1/2">
+              {BackButton}
+            </div>
 
-          {PhotoButton}
-        </div>
+            <div className="absolute left-1/2 bottom-4 -translate-x-1/2">
+              {PhotoButton}
+            </div>
+          </div>
 
-        <div className="flex-1 min-w-0 min-h-0 overflow-hidden">
-          {PreviewArea}
-        </div>
+          <div className="flex-1 min-w-0 min-h-0 overflow-hidden">
+            {PreviewArea}
+          </div>
 
-        <div className="w-24 shrink-0 grid grid-rows-[1fr_auto_1fr_auto] place-items-center px-2 py-4">
-          <div />
-          {ShutterButton}
-          <div />
-          {SettingsButton}
+          <div className="w-24 shrink-0 relative">
+            <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+              {ShutterButton}
+            </div>
+
+            <div className="absolute left-1/2 bottom-4 -translate-x-1/2">
+              {SettingsButton}
+            </div>
+          </div>
         </div>
-      </div>
       ) : (
         <>
           <div className="flex-1 min-h-0 relative bg-black overflow-hidden">
