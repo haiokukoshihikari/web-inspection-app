@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "review-stable-05";
+const REVIEW_VERSION = "review-stable-06";
 
 const MAX_SAMPLES = 6;
 const MISSING_KEY = "inspection:missingOn";
@@ -23,6 +23,7 @@ const SCALE_RANGE_KEY = "inspection:scaleRange";
 const SHEAR_RANGE_KEY = "inspection:shearRange";
 const RESOLUTION_KEY = "inspection:compareResolution";
 const HIT_LIMIT_KEY = "inspection:hitLimit";
+const AUTO_SAVE_KEY = "inspection:autoSaveOn";
 
 const UI_THRESHOLD_MIN = 0.25;
 const UI_THRESHOLD_MAX = 0.74;
@@ -125,11 +126,7 @@ function matToDataUrl(cv: any, mat: any): string {
   return canvas.toDataURL("image/png");
 }
 
-function buildProcessedGrayMat(
-  cv: any,
-  srcMat: any,
-  mode: DebugViewMode
-): any {
+function buildProcessedGrayMat(cv: any, srcMat: any, mode: DebugViewMode): any {
   let gray: any = null;
   let work1: any = null;
   let work2: any = null;
@@ -485,12 +482,12 @@ export default function ReviewPage() {
   const [rotationRange, setRotationRange] = useState<RotationRangeMode>(0);
   const [scaleRange, setScaleRange] = useState<ScaleRangeMode>(0);
   const [shearRange, setShearRange] = useState<ShearRangeMode>(0);
-  const [compareResolution, setCompareResolution] =
-    useState<CompareResolutionMode>(1200);
+  const [compareResolution, setCompareResolution] = useState<CompareResolutionMode>(1200);
   const [hitLimit, setHitLimit] = useState<HitLimitMode>(30);
 
-  const reversedDraftThreshold =
-    UI_THRESHOLD_MAX + UI_THRESHOLD_MIN - draftThreshold;
+  const [autoSaveOn, setAutoSaveOn] = useState(false);
+  const [savingOnLeave, setSavingOnLeave] = useState(false);
+  const [saveLeavingMessage, setSaveLeavingMessage] = useState("");
 
   const [displayBasis, setDisplayBasis] = useState({ width: 0, height: 0 });
   const [imageRect, setImageRect] = useState({
@@ -516,6 +513,9 @@ export default function ReviewPage() {
 
       const savedMissing = localStorage.getItem(MISSING_KEY);
       if (savedMissing !== null) setMissingOn(savedMissing === "true");
+
+      const savedAutoSave = localStorage.getItem(AUTO_SAVE_KEY);
+      if (savedAutoSave !== null) setAutoSaveOn(savedAutoSave === "true");
 
       const savedSamples = localStorage.getItem(SAMPLES_KEY);
       if (savedSamples) {
@@ -661,7 +661,6 @@ export default function ReviewPage() {
 
     thresholdApplyTimerRef.current = window.setTimeout(() => {
       const nextEffective = effectiveThresholdFrom(base, sens);
-
       setPendingRecheck(false);
       setBuildingPreview(true);
 
@@ -793,7 +792,9 @@ export default function ReviewPage() {
       const cv = window.cv;
       if (!cv) return;
 
-      setBuildingPreview(true);
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => resolve());
+      });
 
       let sceneMat: any = null;
       let sampleMat: any = null;
@@ -899,6 +900,106 @@ export default function ReviewPage() {
     applyDirectThresholdChange(draftThreshold + delta);
   };
 
+  const reversedDraftThreshold =
+    UI_THRESHOLD_MAX + UI_THRESHOLD_MIN - draftThreshold;
+
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+
+  const downloadDataUrl = async (dataUrl: string, filename: string) => {
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = filename;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    await sleep(250);
+  };
+
+  const buildResultImageDataUrl = async () => {
+    const baseSrc = mainPreviewUrl || capturedImage;
+    if (!baseSrc) return "";
+
+    const img = await loadImage(baseSrc);
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return "";
+
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    ctx.lineWidth = Math.max(3, Math.round(Math.min(canvas.width, canvas.height) * 0.004));
+    ctx.font = `${Math.max(18, Math.round(canvas.width * 0.018))}px sans-serif`;
+    ctx.textBaseline = "top";
+
+    matchBoxes.forEach((box, i) => {
+      const x = Math.round(box.x * canvas.width);
+      const y = Math.round(box.y * canvas.height);
+      const w = Math.round(box.w * canvas.width);
+      const h = Math.round(box.h * canvas.height);
+      const color = colorFromIndex(i);
+
+      ctx.strokeStyle = color;
+      ctx.strokeRect(x, y, w, h);
+
+      const label = `${i + 1}`;
+      const padX = 8;
+      const padY = 4;
+      const textW = ctx.measureText(label).width;
+      const boxW = Math.ceil(textW + padX * 2);
+      const boxH = Math.ceil(parseInt(ctx.font, 10) + padY * 2);
+
+      ctx.fillStyle = color;
+      ctx.fillRect(x, Math.max(0, y - boxH), boxW, boxH);
+
+      ctx.fillStyle = "#000";
+      ctx.fillText(label, x + padX, Math.max(0, y - boxH) + padY);
+    });
+
+    return canvas.toDataURL("image/jpeg", 0.92);
+  };
+
+  const handleLeaveWithAutoSave = async (path: string) => {
+    if (savingOnLeave) return;
+
+    if (!autoSaveOn) {
+      router.push(path);
+      return;
+    }
+
+    try {
+      setSavingOnLeave(true);
+      setSaveLeavingMessage("画像を保存しています");
+
+      const now = new Date();
+      const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(
+        now.getDate()
+      ).padStart(2, "0")}_${String(now.getHours()).padStart(2, "0")}${String(
+        now.getMinutes()
+      ).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
+
+      if (capturedImage) {
+        await downloadDataUrl(capturedImage, `inspection_raw_${stamp}.jpg`);
+      }
+
+      const resultDataUrl = await buildResultImageDataUrl();
+      if (resultDataUrl) {
+        await downloadDataUrl(resultDataUrl, `inspection_result_${stamp}.jpg`);
+      }
+
+      await sleep(200);
+      router.push(path);
+    } catch (err) {
+      console.error(err);
+      alert("画像保存に失敗しました。");
+      setSavingOnLeave(false);
+      setSaveLeavingMessage("");
+    }
+  };
+
   const canAdd = useMemo(() => samples.length < MAX_SAMPLES, [samples.length]);
 
   return (
@@ -939,40 +1040,40 @@ export default function ReviewPage() {
         </div>
 
         <div className="flex items-center gap-2">
-        <div className="text-sm text-zinc-300 shrink-0">しきい値</div>
+          <div className="text-sm text-zinc-300 shrink-0">しきい値</div>
 
-        <button
-          onClick={() => adjustDraftThreshold(-0.01)}
-          className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
-        >
-          -
-        </button>
+          <button
+            onClick={() => adjustDraftThreshold(-0.01)}
+            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
+          >
+            -
+          </button>
 
-        <input
-          type="range"
-          min={UI_THRESHOLD_MIN}
-          max={UI_THRESHOLD_MAX}
-          step={0.01}
-          value={reversedDraftThreshold}
-          onChange={(e) => {
-            const raw = Number(e.target.value);
-            const restored = UI_THRESHOLD_MAX + UI_THRESHOLD_MIN - raw;
-            applyDirectThresholdChange(restored);
-          }}
-          className="flex-1"
-        />
+          <input
+            type="range"
+            min={UI_THRESHOLD_MIN}
+            max={UI_THRESHOLD_MAX}
+            step={0.01}
+            value={reversedDraftThreshold}
+            onChange={(e) => {
+              const raw = Number(e.target.value);
+              const restored = UI_THRESHOLD_MAX + UI_THRESHOLD_MIN - raw;
+              applyDirectThresholdChange(restored);
+            }}
+            className="flex-1"
+          />
 
-        <button
-          onClick={() => adjustDraftThreshold(0.01)}
-          className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
-        >
-          +
-        </button>
+          <button
+            onClick={() => adjustDraftThreshold(0.01)}
+            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
+          >
+            +
+          </button>
 
-        <div className="text-sm w-12 text-right text-zinc-300">
-          {draftThreshold.toFixed(2)}
+          <div className="text-sm w-12 text-right text-zinc-300">
+            {draftThreshold.toFixed(2)}
+          </div>
         </div>
-      </div>
 
         <div className="text-[11px] text-zinc-500">
           {`しきい値 ${draftThreshold.toFixed(2)} / 感度 ${sensitivity} / 実適用 ${matchThreshold.toFixed(3)}`}
@@ -1134,9 +1235,7 @@ export default function ReviewPage() {
                 <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/35">
                   <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
                     <div className="text-lg font-semibold">再検査待機中…</div>
-                    <div className="mt-1 text-sm text-zinc-300">
-                      条件変更の確定待ちです
-                    </div>
+                    <div className="mt-1 text-sm text-zinc-300">条件変更の確定待ちです</div>
                   </div>
                 </div>
               ) : null}
@@ -1145,8 +1244,17 @@ export default function ReviewPage() {
                 <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/50">
                   <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
                     <div className="text-lg font-semibold">検査中…</div>
+                    <div className="mt-1 text-sm text-zinc-300">条件変更を反映しています</div>
+                  </div>
+                </div>
+              ) : null}
+
+              {savingOnLeave ? (
+                <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/55">
+                  <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
+                    <div className="text-lg font-semibold">保存中…</div>
                     <div className="mt-1 text-sm text-zinc-300">
-                      条件変更を反映しています
+                      {saveLeavingMessage || "画像を保存しています"}
                     </div>
                   </div>
                 </div>
@@ -1169,6 +1277,7 @@ export default function ReviewPage() {
           <div className="text-sm text-zinc-300 mb-2">
             選択中の見本: {selectedSampleId ? selectedSampleId : "なし"}
           </div>
+
           <div className="w-full h-36 rounded-xl border border-zinc-800 bg-zinc-900 flex items-center justify-center overflow-hidden">
             {samplePreviewUrl ? (
               <img
@@ -1182,9 +1291,8 @@ export default function ReviewPage() {
               </div>
             )}
           </div>
-          <div className="mt-2 text-[11px] text-zinc-400">
-            SAMPLE: {debugMode}
-          </div>
+
+          <div className="mt-2 text-[11px] text-zinc-400">SAMPLE: {debugMode}</div>
 
           {matchBoxes.length > 0 ? (
             <div className="mt-3 max-h-32 overflow-auto text-[11px] space-y-1 text-zinc-300">
@@ -1263,7 +1371,7 @@ export default function ReviewPage() {
                   …
                 </button>
 
-                {showDeleteFor === sample.id && (
+                {showDeleteFor === sample.id ? (
                   <div className="absolute top-10 right-1 z-50">
                     <button
                       type="button"
@@ -1286,26 +1394,26 @@ export default function ReviewPage() {
                       ×
                     </button>
                   </div>
-                )}
+                ) : null}
               </div>
             );
           })}
 
-          {canAdd && (
+          {canAdd ? (
             <button
               onClick={() => router.push("/add-sample")}
               className="w-full h-14 rounded-2xl border border-dashed border-zinc-700 bg-zinc-900 text-2xl text-zinc-300"
             >
               +
             </button>
-          )}
+          ) : null}
         </div>
       </div>
 
       <div className="bg-black px-5 pt-2 pb-6">
         <div className="flex items-center justify-between">
           <button
-            onClick={() => router.push("/settings")}
+            onClick={() => void handleLeaveWithAutoSave("/settings")}
             className="w-11 h-11 rounded-full border border-white/15 bg-white/5 flex flex-col items-center justify-center gap-1"
             aria-label="設定"
           >
@@ -1317,7 +1425,7 @@ export default function ReviewPage() {
           <div className="flex-1" />
 
           <button
-            onClick={() => router.push("/camera")}
+            onClick={() => void handleLeaveWithAutoSave("/camera")}
             className="w-14 h-14 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center shadow-lg active:scale-[0.98]"
             aria-label="再撮影"
             title="再撮影"
