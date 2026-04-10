@@ -18,6 +18,46 @@ export default function CameraPage() {
   const [isLandscape, setIsLandscape] = useState(false);
 
   useEffect(() => {
+  let cancelled = false;
+
+  const rebindVideo = async () => {
+    const video = videoRef.current;
+    const stream = streamRef.current;
+    if (!video || !stream) return;
+
+    try {
+      setIsReady(false);
+
+      video.srcObject = null;
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+
+      if (cancelled) return;
+
+      video.srcObject = stream;
+      await video.play();
+
+      if (!cancelled) {
+        setIsReady(true);
+      }
+    } catch (err) {
+      console.error(err);
+      if (!cancelled) {
+        setErrorMsg("画面回転後のカメラ再表示に失敗しました");
+      }
+    }
+  };
+
+  const timer = window.setTimeout(() => {
+    void rebindVideo();
+  }, 150);
+
+  return () => {
+    cancelled = true;
+    window.clearTimeout(timer);
+  };
+}, [isLandscape]);
+
+  useEffect(() => {
     const updateOrientation = () => {
       setIsLandscape(window.innerWidth > window.innerHeight);
     };
