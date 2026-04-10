@@ -10,12 +10,14 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "review-stable-03";
+const REVIEW_VERSION = "review-stable-04";
 
 const MAX_SAMPLES = 6;
 const MISSING_KEY = "inspection:missingOn";
 const SAMPLES_KEY = "inspection:samples";
 const MATCH_THRESHOLD_KEY = "inspection:matchThreshold";
+const BASE_THRESHOLD_KEY = "inspection:baseThreshold";
+const SENSITIVITY_KEY = "inspection:sensitivity";
 const ROTATION_RANGE_KEY = "inspection:rotationRange";
 const SCALE_RANGE_KEY = "inspection:scaleRange";
 const SHEAR_RANGE_KEY = "inspection:shearRange";
@@ -50,6 +52,16 @@ type MatchBox = {
   rotationDeg: number;
   scaleFactor: number;
   shearFactor: number;
+};
+
+type CaptureDebugInfo = {
+  sourceType: "camera" | "file";
+  originalWidth: number;
+  originalHeight: number;
+  storedWidth: number;
+  storedHeight: number;
+  quality: number;
+  dataUrlLength: number;
 };
 
 const DEBUG_MODES: DebugViewMode[] = ["ORIGINAL", "EDGE"];
@@ -398,8 +410,6 @@ function runMultiMatch(params: {
 
     boxes.sort((a, b) => b.score - a.score);
 
-    boxes.sort((a, b) => b.score - a.score);
-
     function isOverlapping(a: MatchBox, b: MatchBox) {
       const ax1 = a.x;
       const ay1 = a.y;
@@ -427,8 +437,6 @@ function runMultiMatch(params: {
     }
 
     return deduped;
-
-    
   } finally {
     try {
       sceneGray?.delete?.();
@@ -441,8 +449,11 @@ export default function ReviewPage() {
   const router = useRouter();
   const frameRef = useRef<HTMLDivElement | null>(null);
   const prevResolutionRef = useRef<CompareResolutionMode | null>(null);
+  const thresholdApplyTimerRef = useRef<number | null>(null);
 
   const [capturedImage, setCapturedImage] = useState("");
+  const [captureDebugInfo, setCaptureDebugInfo] = useState<CaptureDebugInfo | null>(null);
+
   const [missingOn, setMissingOn] = useState(true);
   const [showDeleteFor, setShowDeleteFor] = useState<string | null>(null);
   const [samplesLoaded, setSamplesLoaded] = useState(false);
@@ -462,8 +473,10 @@ export default function ReviewPage() {
   const [buildingPreview, setBuildingPreview] = useState(false);
   const [matchBoxes, setMatchBoxes] = useState<MatchBox[]>([]);
 
+  const [baseThreshold, setBaseThreshold] = useState(0.8);
   const [matchThreshold, setMatchThreshold] = useState(0.8);
   const [draftThreshold, setDraftThreshold] = useState(0.8);
+  const [sensitivity, setSensitivity] = useState(50);
 
   const [rotationRange, setRotationRange] = useState<RotationRangeMode>(0);
   const [scaleRange, setScaleRange] = useState<ScaleRangeMode>(0);
@@ -488,6 +501,12 @@ export default function ReviewPage() {
         setMainPreviewUrl(storedImage);
       }
 
+      const debugRaw = sessionStorage.getItem("captureDebugInfo");
+      if (debugRaw) {
+        const parsed = JSON.parse(debugRaw) as CaptureDebugInfo;
+        setCaptureDebugInfo(parsed);
+      }
+
       const savedMissing = localStorage.getItem(MISSING_KEY);
       if (savedMissing !== null) setMissingOn(savedMissing === "true");
 
@@ -497,14 +516,35 @@ export default function ReviewPage() {
         if (Array.isArray(parsed)) setSamples(parsed);
       }
 
+      const savedBaseThreshold = localStorage.getItem(BASE_THRESHOLD_KEY);
       const savedThreshold = localStorage.getItem(MATCH_THRESHOLD_KEY);
-      if (savedThreshold !== null) {
+      const savedSensitivity = localStorage.getItem(SENSITIVITY_KEY);
+
+      let initialBaseThreshold = 0.8;
+      if (savedBaseThreshold !== null) {
+        const n = Number(savedBaseThreshold);
+        if (Number.isFinite(n)) initialBaseThreshold = n;
+      } else if (savedThreshold !== null) {
         const n = Number(savedThreshold);
-        if (Number.isFinite(n)) {
-          setMatchThreshold(n);
-          setDraftThreshold(n);
-        }
+        if (Number.isFinite(n)) initialBaseThreshold = n;
       }
+
+      let initialSensitivity = 50;
+      if (savedSensitivity !== null) {
+        const n = Number(savedSensitivity);
+        if (Number.isFinite(n)) initialSensitivity = clamp(Math.round(n), 0, 100);
+      }
+
+      const initialThreshold = clamp(
+        Number((initialBaseThreshold - (initialSensitivity - 50) * 0.005).toFixed(3)),
+        0,
+        0.99
+      );
+
+      setBaseThreshold(initialBaseThreshold);
+      setSensitivity(initialSensitivity);
+      setMatchThreshold(initialThreshold);
+      setDraftThreshold(initialThreshold);
 
       const savedRotationRange = localStorage.getItem(ROTATION_RANGE_KEY);
       if (savedRotationRange !== null) {
@@ -568,6 +608,14 @@ export default function ReviewPage() {
   }, [matchThreshold]);
 
   useEffect(() => {
+    localStorage.setItem(BASE_THRESHOLD_KEY, String(baseThreshold));
+  }, [baseThreshold]);
+
+  useEffect(() => {
+    localStorage.setItem(SENSITIVITY_KEY, String(sensitivity));
+  }, [sensitivity]);
+
+  useEffect(() => {
     localStorage.setItem(ROTATION_RANGE_KEY, String(rotationRange));
   }, [rotationRange]);
 
@@ -586,6 +634,45 @@ export default function ReviewPage() {
   useEffect(() => {
     localStorage.setItem(HIT_LIMIT_KEY, String(hitLimit));
   }, [hitLimit]);
+
+  useEffect(() => {
+    return () => {
+      if (thresholdApplyTimerRef.current !== null) {
+        window.clearTimeout(thresholdApplyTimerRef.current);
+      }
+    };
+  }, []);
+
+  const scheduleThresholdApply = (nextThreshold: number) => {
+    if (thresholdApplyTimerRef.current !== null) {
+      window.clearTimeout(thresholdApplyTimerRef.current);
+    }
+
+    thresholdApplyTimerRef.current = window.setTimeout(() => {
+      setMatchThreshold(nextThreshold);
+    }, 1000);
+  };
+
+  const applyDirectThresholdChange = (nextThresholdRaw: number) => {
+    const nextThreshold = clamp(Number(nextThresholdRaw.toFixed(3)), 0, 0.99);
+    setDraftThreshold(nextThreshold);
+    setBaseThreshold(nextThreshold);
+    setSensitivity(50);
+    scheduleThresholdApply(nextThreshold);
+  };
+
+  const applySensitivityChange = (nextSensitivityRaw: number) => {
+    const nextSensitivity = clamp(Math.round(nextSensitivityRaw), 0, 100);
+    const nextThreshold = clamp(
+      Number((baseThreshold - (nextSensitivity - 50) * 0.005).toFixed(3)),
+      0,
+      0.99
+    );
+
+    setSensitivity(nextSensitivity);
+    setDraftThreshold(nextThreshold);
+    scheduleThresholdApply(nextThreshold);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -791,7 +878,7 @@ export default function ReviewPage() {
   };
 
   const adjustDraftThreshold = (delta: number) => {
-    setDraftThreshold((prev) => clamp(Number((prev + delta).toFixed(2)), 0, 0.99));
+    applyDirectThresholdChange(draftThreshold + delta);
   };
 
   const canAdd = useMemo(() => samples.length < MAX_SAMPLES, [samples.length]);
@@ -813,6 +900,26 @@ export default function ReviewPage() {
       </div>
 
       <div className="px-4 pt-4 pb-3 border-b border-zinc-800 bg-zinc-950 space-y-3">
+        {captureDebugInfo ? (
+          <div className="rounded-xl border border-emerald-400/20 bg-emerald-500/10 px-3 py-2 text-[12px] text-emerald-200">
+            {`保存成功: ${captureDebugInfo.storedWidth}x${captureDebugInfo.storedHeight} / q${captureDebugInfo.quality} / 元 ${captureDebugInfo.originalWidth}x${captureDebugInfo.originalHeight}`}
+          </div>
+        ) : null}
+
+        <div className="flex items-center gap-3">
+          <div className="text-sm text-zinc-300 shrink-0">感度</div>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={sensitivity}
+            onChange={(e) => applySensitivityChange(Number(e.target.value))}
+            className="flex-1"
+          />
+          <div className="text-sm w-10 text-right text-zinc-300">{sensitivity}</div>
+        </div>
+
         <div className="flex items-center gap-2">
           <div className="text-sm text-zinc-300 shrink-0">しきい値</div>
 
@@ -829,9 +936,7 @@ export default function ReviewPage() {
             max={0.99}
             step={0.01}
             value={draftThreshold}
-            onChange={(e) => setDraftThreshold(Number(e.target.value))}
-            onMouseUp={() => setMatchThreshold(draftThreshold)}
-            onTouchEnd={() => setMatchThreshold(draftThreshold)}
+            onChange={(e) => applyDirectThresholdChange(Number(e.target.value))}
             className="flex-1"
           />
 
@@ -845,6 +950,10 @@ export default function ReviewPage() {
           <div className="text-sm w-12 text-right text-zinc-300">
             {draftThreshold.toFixed(2)}
           </div>
+        </div>
+
+        <div className="text-[11px] text-zinc-500">
+          {`感度50 = 基準しきい値 ${baseThreshold.toFixed(2)} / 実適用 ${matchThreshold.toFixed(2)}`}
         </div>
 
         <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2">

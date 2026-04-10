@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
-const PAGE_VERSION = "camera-stable-07";
+const PAGE_VERSION = "camera-stable-08";
 
 type SaveStep =
   | "idle"
@@ -16,6 +16,16 @@ type SaveStep =
   | "navigate_review"
   | "done"
   | "error";
+
+type CaptureDebugInfo = {
+  sourceType: "camera" | "file";
+  originalWidth: number;
+  originalHeight: number;
+  storedWidth: number;
+  storedHeight: number;
+  quality: number;
+  dataUrlLength: number;
+};
 
 export default function CameraPage() {
   const router = useRouter();
@@ -170,56 +180,6 @@ export default function CameraPage() {
     [pushSaveLog]
   );
 
-  const makeResizedDataUrlForStorage = useCallback(
-    (sourceCanvas: HTMLCanvasElement) => {
-      const attempts = [
-        { maxSide: 2400, quality: 0.9 },
-        { maxSide: 2000, quality: 0.88 },
-        { maxSide: 1600, quality: 0.85 },
-        { maxSide: 1280, quality: 0.82 },
-        { maxSide: 1024, quality: 0.8 },
-      ];
-
-      for (const attempt of attempts) {
-        const srcW = sourceCanvas.width;
-        const srcH = sourceCanvas.height;
-        const longSide = Math.max(srcW, srcH);
-        const scale = Math.min(1, attempt.maxSide / longSide);
-
-        const outW = Math.max(1, Math.round(srcW * scale));
-        const outH = Math.max(1, Math.round(srcH * scale));
-
-        const outCanvas = document.createElement("canvas");
-        outCanvas.width = outW;
-        outCanvas.height = outH;
-        const outCtx = outCanvas.getContext("2d");
-        if (!outCtx) continue;
-
-        outCtx.drawImage(sourceCanvas, 0, 0, srcW, srcH, 0, 0, outW, outH);
-
-        let dataUrl = "";
-        try {
-          dataUrl = outCanvas.toDataURL("image/jpeg", attempt.quality);
-        } catch {
-          continue;
-        }
-
-        if (dataUrl && dataUrl.startsWith("data:image/")) {
-          return {
-            dataUrl,
-            width: outW,
-            height: outH,
-            quality: attempt.quality,
-            maxSide: attempt.maxSide,
-          };
-        }
-      }
-
-      return null;
-    },
-    []
-  );
-
   const saveToSessionStorageSafely = useCallback(
     (sourceCanvas: HTMLCanvasElement) => {
       const attempts = [
@@ -271,6 +231,16 @@ export default function CameraPage() {
 
         try {
           sessionStorage.setItem("capturedImage", dataUrl);
+          const debugInfo: CaptureDebugInfo = {
+            sourceType: "camera",
+            originalWidth: srcW,
+            originalHeight: srcH,
+            storedWidth: outW,
+            storedHeight: outH,
+            quality: attempt.quality,
+            dataUrlLength: dataUrl.length,
+          };
+          sessionStorage.setItem("captureDebugInfo", JSON.stringify(debugInfo));
           return {
             ok: true as const,
             width: outW,
@@ -407,6 +377,19 @@ export default function CameraPage() {
               return;
             }
 
+            try {
+              const debugInfo: CaptureDebugInfo = {
+                sourceType: "file",
+                originalWidth: img.naturalWidth,
+                originalHeight: img.naturalHeight,
+                storedWidth: saved.width,
+                storedHeight: saved.height,
+                quality: saved.quality,
+                dataUrlLength: saved.length,
+              };
+              sessionStorage.setItem("captureDebugInfo", JSON.stringify(debugInfo));
+            } catch {}
+
             setLastImageInfo(
               `file image: ${img.naturalWidth}x${img.naturalHeight} / stored: ${saved.width}x${saved.height} / q${saved.quality} / ${saved.length.toLocaleString()} chars`
             );
@@ -426,6 +409,7 @@ export default function CameraPage() {
           failSave("画像の読み込みに失敗しました");
         };
 
+        setSaveStep("dataurl_create");
         img.src = result;
       };
 
