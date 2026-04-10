@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "review-stable-04";
+const REVIEW_VERSION = "review-stable-05";
 
 const MAX_SAMPLES = 6;
 const MISSING_KEY = "inspection:missingOn";
@@ -23,6 +23,9 @@ const SCALE_RANGE_KEY = "inspection:scaleRange";
 const SHEAR_RANGE_KEY = "inspection:shearRange";
 const RESOLUTION_KEY = "inspection:compareResolution";
 const HIT_LIMIT_KEY = "inspection:hitLimit";
+
+const UI_THRESHOLD_MIN = 0.25;
+const UI_THRESHOLD_MAX = 0.74;
 
 type DebugViewMode = "ORIGINAL" | "EDGE";
 type MatchMethodMode = "CCOEFF" | "CCORR" | "SQDIFF";
@@ -471,11 +474,12 @@ export default function ReviewPage() {
   const [mainPreviewUrl, setMainPreviewUrl] = useState("");
   const [samplePreviewUrl, setSamplePreviewUrl] = useState("");
   const [buildingPreview, setBuildingPreview] = useState(false);
+  const [pendingRecheck, setPendingRecheck] = useState(false);
   const [matchBoxes, setMatchBoxes] = useState<MatchBox[]>([]);
 
-  const [baseThreshold, setBaseThreshold] = useState(0.8);
-  const [matchThreshold, setMatchThreshold] = useState(0.8);
-  const [draftThreshold, setDraftThreshold] = useState(0.8);
+  const [baseThreshold, setBaseThreshold] = useState(0.5);
+  const [matchThreshold, setMatchThreshold] = useState(0.5);
+  const [draftThreshold, setDraftThreshold] = useState(0.5);
   const [sensitivity, setSensitivity] = useState(50);
 
   const [rotationRange, setRotationRange] = useState<RotationRangeMode>(0);
@@ -517,16 +521,14 @@ export default function ReviewPage() {
       }
 
       const savedBaseThreshold = localStorage.getItem(BASE_THRESHOLD_KEY);
-      const savedThreshold = localStorage.getItem(MATCH_THRESHOLD_KEY);
       const savedSensitivity = localStorage.getItem(SENSITIVITY_KEY);
 
-      let initialBaseThreshold = 0.8;
+      let initialBaseThreshold = 0.5;
       if (savedBaseThreshold !== null) {
         const n = Number(savedBaseThreshold);
-        if (Number.isFinite(n)) initialBaseThreshold = n;
-      } else if (savedThreshold !== null) {
-        const n = Number(savedThreshold);
-        if (Number.isFinite(n)) initialBaseThreshold = n;
+        if (Number.isFinite(n)) {
+          initialBaseThreshold = clamp(n, UI_THRESHOLD_MIN, UI_THRESHOLD_MAX);
+        }
       }
 
       let initialSensitivity = 50;
@@ -542,9 +544,9 @@ export default function ReviewPage() {
       );
 
       setBaseThreshold(initialBaseThreshold);
+      setDraftThreshold(initialBaseThreshold);
       setSensitivity(initialSensitivity);
       setMatchThreshold(initialThreshold);
-      setDraftThreshold(initialThreshold);
 
       const savedRotationRange = localStorage.getItem(ROTATION_RANGE_KEY);
       if (savedRotationRange !== null) {
@@ -643,35 +645,41 @@ export default function ReviewPage() {
     };
   }, []);
 
-  const scheduleThresholdApply = (nextThreshold: number) => {
+  const effectiveThresholdFrom = (base: number, sens: number) => {
+    return clamp(Number((base - (sens - 50) * 0.005).toFixed(3)), 0, 0.99);
+  };
+
+  const scheduleThresholdApply = (base: number, sens: number) => {
     if (thresholdApplyTimerRef.current !== null) {
       window.clearTimeout(thresholdApplyTimerRef.current);
     }
 
+    setPendingRecheck(true);
+
     thresholdApplyTimerRef.current = window.setTimeout(() => {
-      setMatchThreshold(nextThreshold);
+      const nextEffective = effectiveThresholdFrom(base, sens);
+      setMatchThreshold(nextEffective);
+      setPendingRecheck(false);
     }, 1000);
   };
 
   const applyDirectThresholdChange = (nextThresholdRaw: number) => {
-    const nextThreshold = clamp(Number(nextThresholdRaw.toFixed(3)), 0, 0.99);
-    setDraftThreshold(nextThreshold);
-    setBaseThreshold(nextThreshold);
+    const nextBase = clamp(
+      Number(nextThresholdRaw.toFixed(2)),
+      UI_THRESHOLD_MIN,
+      UI_THRESHOLD_MAX
+    );
+
+    setDraftThreshold(nextBase);
+    setBaseThreshold(nextBase);
     setSensitivity(50);
-    scheduleThresholdApply(nextThreshold);
+    scheduleThresholdApply(nextBase, 50);
   };
 
   const applySensitivityChange = (nextSensitivityRaw: number) => {
     const nextSensitivity = clamp(Math.round(nextSensitivityRaw), 0, 100);
-    const nextThreshold = clamp(
-      Number((baseThreshold - (nextSensitivity - 50) * 0.005).toFixed(3)),
-      0,
-      0.99
-    );
-
     setSensitivity(nextSensitivity);
-    setDraftThreshold(nextThreshold);
-    scheduleThresholdApply(nextThreshold);
+    scheduleThresholdApply(baseThreshold, nextSensitivity);
   };
 
   useEffect(() => {
@@ -932,8 +940,8 @@ export default function ReviewPage() {
 
           <input
             type="range"
-            min={0}
-            max={0.99}
+            min={UI_THRESHOLD_MIN}
+            max={UI_THRESHOLD_MAX}
             step={0.01}
             value={draftThreshold}
             onChange={(e) => applyDirectThresholdChange(Number(e.target.value))}
@@ -953,7 +961,7 @@ export default function ReviewPage() {
         </div>
 
         <div className="text-[11px] text-zinc-500">
-          {`感度50 = 基準しきい値 ${baseThreshold.toFixed(2)} / 実適用 ${matchThreshold.toFixed(2)}`}
+          {`しきい値 ${draftThreshold.toFixed(2)} / 感度 ${sensitivity} / 実適用 ${matchThreshold.toFixed(3)}`}
         </div>
 
         <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2">
@@ -1108,10 +1116,21 @@ export default function ReviewPage() {
                 />
               ))}
 
+              {pendingRecheck ? (
+                <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/35">
+                  <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
+                    <div className="text-lg font-semibold">再検査待機中…</div>
+                    <div className="mt-1 text-sm text-zinc-300">
+                      条件変更の確定待ちです
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
               {buildingPreview ? (
                 <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/50">
                   <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
-                    <div className="text-lg font-semibold">再検査中…</div>
+                    <div className="text-lg font-semibold">検査中…</div>
                     <div className="mt-1 text-sm text-zinc-300">
                       条件変更を反映しています
                     </div>
