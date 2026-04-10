@@ -3,7 +3,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
-const PAGE_VERSION = "camera-stable-05";
+const PAGE_VERSION = "camera-stable-06";
+
+type SaveStep =
+  | "idle"
+  | "capture_start"
+  | "canvas_create"
+  | "canvas_draw"
+  | "dataurl_create"
+  | "sessionstorage_save"
+  | "navigate_review"
+  | "done"
+  | "error";
 
 export default function CameraPage() {
   const router = useRouter();
@@ -19,6 +30,23 @@ export default function CameraPage() {
   const [errorMsg, setErrorMsg] = useState("");
   const [isCapturing, setIsCapturing] = useState(false);
   const [isLandscape, setIsLandscape] = useState(false);
+
+  const [saveStep, setSaveStep] = useState<SaveStep>("idle");
+  const [saveLog, setSaveLog] = useState<string[]>([]);
+  const [lastImageInfo, setLastImageInfo] = useState("");
+
+  const pushSaveLog = useCallback((msg: string) => {
+    setSaveLog((prev) => {
+      const next = [...prev, msg];
+      return next.slice(-8);
+    });
+  }, []);
+
+  const resetSaveDebug = useCallback(() => {
+    setSaveStep("idle");
+    setSaveLog([]);
+    setLastImageInfo("");
+  }, []);
 
   const stopCamera = useCallback(() => {
     try {
@@ -130,15 +158,28 @@ export default function CameraPage() {
     };
   }, [isLandscape, startCamera]);
 
+  const failSave = useCallback(
+    (message: string, detail?: unknown) => {
+      console.error(message, detail);
+      setSaveStep("error");
+      setErrorMsg(message);
+      pushSaveLog(`ERROR: ${message}`);
+      setIsCapturing(false);
+    },
+    [pushSaveLog]
+  );
+
   const handleCapture = async () => {
     if (!videoRef.current || isCapturing || !isReady) return;
+
+    resetSaveDebug();
 
     const video = videoRef.current;
     const vw = video.videoWidth;
     const vh = video.videoHeight;
 
     if (!vw || !vh) {
-      setErrorMsg("撮影画像の取得に失敗しました");
+      failSave("保存失敗: 撮影サイズ取得");
       return;
     }
 
@@ -146,23 +187,59 @@ export default function CameraPage() {
       setIsCapturing(true);
       setErrorMsg("");
 
+      setSaveStep("capture_start");
+      pushSaveLog(`capture start: ${vw}x${vh}`);
+      setLastImageInfo(`video: ${vw}x${vh}`);
+
+      setSaveStep("canvas_create");
       const canvas = document.createElement("canvas");
       canvas.width = vw;
       canvas.height = vh;
+      pushSaveLog(`canvas created: ${canvas.width}x${canvas.height}`);
 
       const ctx = canvas.getContext("2d");
-      if (!ctx) throw new Error("canvas context unavailable");
+      if (!ctx) {
+        failSave("保存失敗: canvas context 作成");
+        return;
+      }
 
+      setSaveStep("canvas_draw");
       ctx.drawImage(video, 0, 0, vw, vh);
+      pushSaveLog("canvas draw: ok");
 
-      const captured = canvas.toDataURL("image/jpeg", 0.98);
-      sessionStorage.setItem("capturedImage", captured);
+      setSaveStep("dataurl_create");
+      let captured = "";
+      try {
+        captured = canvas.toDataURL("image/jpeg", 0.98);
+      } catch (err) {
+        failSave("保存失敗: 画像変換(toDataURL)", err);
+        return;
+      }
+
+      if (!captured || !captured.startsWith("data:image/")) {
+        failSave("保存失敗: 画像変換結果が不正");
+        return;
+      }
+
+      pushSaveLog(`data url length: ${captured.length.toLocaleString()}`);
+      setLastImageInfo(`video: ${vw}x${vh} / dataURL: ${captured.length.toLocaleString()} chars`);
+
+      setSaveStep("sessionstorage_save");
+      try {
+        sessionStorage.setItem("capturedImage", captured);
+      } catch (err) {
+        failSave("保存失敗: sessionStorage保存", err);
+        return;
+      }
+      pushSaveLog("sessionStorage save: ok");
+
+      setSaveStep("navigate_review");
+      pushSaveLog("navigate: /review");
+      setSaveStep("done");
 
       router.push("/review");
     } catch (err) {
-      console.error(err);
-      setErrorMsg("画像の保存に失敗しました");
-      setIsCapturing(false);
+      failSave("保存失敗: 想定外エラー", err);
     }
   };
 
@@ -174,30 +251,47 @@ export default function CameraPage() {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    resetSaveDebug();
+
     try {
       setErrorMsg("");
       setIsCapturing(true);
+      setSaveStep("capture_start");
+      pushSaveLog(`file selected: ${file.name}`);
+      pushSaveLog(`file size: ${file.size.toLocaleString()} bytes`);
+      setLastImageInfo(`file: ${file.name} / ${file.size.toLocaleString()} bytes`);
 
       const reader = new FileReader();
+
       reader.onload = () => {
         const result = reader.result;
+
         if (typeof result === "string" && result.startsWith("data:image/")) {
-          sessionStorage.setItem("capturedImage", result);
-          router.push("/review");
+          try {
+            setSaveStep("sessionstorage_save");
+            sessionStorage.setItem("capturedImage", result);
+            pushSaveLog(`data url length: ${result.length.toLocaleString()}`);
+            pushSaveLog("sessionStorage save: ok");
+            setSaveStep("navigate_review");
+            pushSaveLog("navigate: /review");
+            setSaveStep("done");
+            router.push("/review");
+          } catch (err) {
+            failSave("保存失敗: sessionStorage保存", err);
+          }
         } else {
-          setErrorMsg("画像の読み込みに失敗しました");
-          setIsCapturing(false);
+          failSave("画像の読み込みに失敗しました");
         }
       };
+
       reader.onerror = () => {
-        setErrorMsg("画像の読み込みに失敗しました");
-        setIsCapturing(false);
+        failSave("画像の読み込みに失敗しました");
       };
+
+      setSaveStep("dataurl_create");
       reader.readAsDataURL(file);
     } catch (err) {
-      console.error(err);
-      setErrorMsg("画像の読み込みに失敗しました");
-      setIsCapturing(false);
+      failSave("画像の読み込みに失敗しました", err);
     } finally {
       e.target.value = "";
     }
@@ -339,9 +433,33 @@ export default function CameraPage() {
 
       {isCapturing ? (
         <div className="absolute inset-0 flex items-center justify-center bg-black/45">
-          <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
+          <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center min-w-[260px]">
             <div className="text-lg font-semibold">処理中…</div>
-            <div className="mt-1 text-sm text-zinc-300">画像を準備しています</div>
+            <div className="mt-1 text-sm text-zinc-300">
+              {saveStep === "capture_start" && "撮影開始"}
+              {saveStep === "canvas_create" && "保存準備中"}
+              {saveStep === "canvas_draw" && "画像描画中"}
+              {saveStep === "dataurl_create" && "画像変換中"}
+              {saveStep === "sessionstorage_save" && "一時保存中"}
+              {saveStep === "navigate_review" && "画面移動中"}
+              {saveStep === "done" && "完了"}
+              {saveStep === "error" && "エラー"}
+              {saveStep === "idle" && "待機中"}
+            </div>
+
+            {lastImageInfo ? (
+              <div className="mt-2 text-[11px] text-zinc-400 break-all">
+                {lastImageInfo}
+              </div>
+            ) : null}
+
+            {saveLog.length > 0 ? (
+              <div className="mt-3 text-left text-[11px] text-zinc-300 bg-black/40 rounded-lg p-2 max-w-[320px]">
+                {saveLog.map((line, index) => (
+                  <div key={`${index}-${line}`}>{line}</div>
+                ))}
+              </div>
+            ) : null}
           </div>
         </div>
       ) : null}
