@@ -280,7 +280,9 @@ export default function CameraPage() {
     <div className="relative w-full h-full bg-black flex items-center justify-center overflow-hidden">
       <video
         ref={videoRef}
-        className="w-full h-full object-contain bg-black"
+        className={`w-full h-full bg-black ${
+          isLandscape ? "object-cover" : "object-contain"
+        }`}
         playsInline
         muted
         autoPlay
@@ -358,23 +360,32 @@ export default function CameraPage() {
         onChange={handleFileChange}
       />
 
-      {TopBar}
+      {!isLandscape ? TopBar : null}
 
       {isLandscape ? (
         <div className="flex-1 min-h-0 flex bg-black overflow-hidden">
-          <div className="w-20 shrink-0 flex flex-col items-center justify-end pb-6">
-            {PhotoButton}
-          </div>
+        <div className="w-20 shrink-0 flex flex-col items-center justify-between py-4">
+          <button
+            onClick={() => router.push("/")}
+            className="w-14 h-14 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center shadow-lg active:scale-[0.98] shrink-0 text-sm text-zinc-300"
+            aria-label="戻る"
+            title="戻る"
+          >
+            戻る
+          </button>
 
-          <div className="flex-1 min-w-0 min-h-0 overflow-hidden">
-            {PreviewArea}
-          </div>
-
-          <div className="w-24 shrink-0 flex flex-col items-center justify-center gap-5 px-2">
-            {ShutterButton}
-            {SettingsButton}
-          </div>
+          {PhotoButton}
         </div>
+
+        <div className="flex-1 min-w-0 min-h-0 overflow-hidden">
+          {PreviewArea}
+        </div>
+
+        <div className="w-24 shrink-0 flex flex-col items-center justify-center gap-5 px-2">
+          {ShutterButton}
+          {SettingsButton}
+        </div>
+      </div>
       ) : (
         <>
           <div className="flex-1 min-h-0 relative bg-black overflow-hidden">
