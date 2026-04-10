@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
-const PAGE_VERSION = "camera-stable-03";
+const PAGE_VERSION = "camera-stable-04";
 
 export default function CameraPage() {
   const router = useRouter();
@@ -11,116 +11,128 @@ export default function CameraPage() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const restartTimerRef = useRef<number | null>(null);
+  const startingRef = useRef(false);
+  const mountedRef = useRef(true);
 
   const [isReady, setIsReady] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
   const [isCapturing, setIsCapturing] = useState(false);
   const [isLandscape, setIsLandscape] = useState(false);
 
-  useEffect(() => {
-  let cancelled = false;
+  const stopCamera = useCallback(() => {
+    try {
+      const video = videoRef.current;
+      if (video) {
+        video.pause();
+        video.srcObject = null;
+      }
+    } catch {}
 
-  const rebindVideo = async () => {
-    const video = videoRef.current;
-    const stream = streamRef.current;
-    if (!video || !stream) return;
+    try {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
+    } catch {}
+  }, []);
+
+  const startCamera = useCallback(async () => {
+    if (startingRef.current) return;
+    startingRef.current = true;
 
     try {
       setIsReady(false);
+      setErrorMsg("");
 
-      video.srcObject = null;
-      await new Promise((resolve) => window.setTimeout(resolve, 50));
+      stopCamera();
 
-      if (cancelled) return;
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 4032 },
+          height: { ideal: 3024 },
+        },
+      });
+
+      if (!mountedRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+
+      streamRef.current = stream;
+
+      const video = videoRef.current;
+      if (!video) {
+        stream.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+        return;
+      }
 
       video.srcObject = stream;
+      video.playsInline = true;
+      video.muted = true;
+
       await video.play();
 
-      if (!cancelled) {
-        setIsReady(true);
-      }
+      if (!mountedRef.current) return;
+
+      setErrorMsg("");
+      setIsReady(true);
     } catch (err) {
       console.error(err);
-      if (!cancelled) {
-        setErrorMsg("画面回転後のカメラ再表示に失敗しました");
-      }
+      if (!mountedRef.current) return;
+      setIsReady(false);
+      setErrorMsg("カメラを起動できませんでした");
+    } finally {
+      startingRef.current = false;
     }
-  };
-
-  const timer = window.setTimeout(() => {
-    void rebindVideo();
-  }, 150);
-
-  return () => {
-    cancelled = true;
-    window.clearTimeout(timer);
-  };
-}, [isLandscape]);
+  }, [stopCamera]);
 
   useEffect(() => {
+    mountedRef.current = true;
+
     const updateOrientation = () => {
       setIsLandscape(window.innerWidth > window.innerHeight);
     };
 
     updateOrientation();
     window.addEventListener("resize", updateOrientation);
-    return () => window.removeEventListener("resize", updateOrientation);
-  }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function startCamera() {
-      try {
-        setErrorMsg("");
-        setIsReady(false);
-
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            facingMode: { ideal: "environment" },
-            width: { ideal: 4032 },
-            height: { ideal: 3024 },
-          },
-        });
-
-        if (cancelled) {
-          stream.getTracks().forEach((track) => track.stop());
-          return;
-        }
-
-        streamRef.current = stream;
-
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play();
-        }
-
-        if (!cancelled) {
-          setIsReady(true);
-        }
-      } catch (err) {
-        console.error(err);
-        if (!cancelled) {
-          setErrorMsg("カメラを起動できませんでした");
-          setIsReady(false);
-        }
-      }
-    }
-
-    startCamera();
+    void startCamera();
 
     return () => {
-      cancelled = true;
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
+      mountedRef.current = false;
+      window.removeEventListener("resize", updateOrientation);
+      if (restartTimerRef.current !== null) {
+        window.clearTimeout(restartTimerRef.current);
+      }
+      stopCamera();
+    };
+  }, [startCamera, stopCamera]);
+
+  // 向きが変わったら安全に再起動
+  useEffect(() => {
+    if (!mountedRef.current) return;
+
+    if (restartTimerRef.current !== null) {
+      window.clearTimeout(restartTimerRef.current);
+    }
+
+    restartTimerRef.current = window.setTimeout(() => {
+      void startCamera();
+    }, 250);
+
+    return () => {
+      if (restartTimerRef.current !== null) {
+        window.clearTimeout(restartTimerRef.current);
       }
     };
-  }, []);
+  }, [isLandscape, startCamera]);
 
   const handleCapture = async () => {
-    if (!videoRef.current || isCapturing) return;
+    if (!videoRef.current || isCapturing || !isReady) return;
 
     const video = videoRef.current;
     const vw = video.videoWidth;
@@ -140,9 +152,7 @@ export default function CameraPage() {
       canvas.height = vh;
 
       const ctx = canvas.getContext("2d");
-      if (!ctx) {
-        throw new Error("canvas context unavailable");
-      }
+      if (!ctx) throw new Error("canvas context unavailable");
 
       ctx.drawImage(video, 0, 0, vw, vh);
 
@@ -194,8 +204,68 @@ export default function CameraPage() {
     }
   };
 
+  const IconPhoto = (
+    <svg
+      viewBox="0 0 24 24"
+      className="w-7 h-7 text-white"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <circle cx="8.5" cy="10.5" r="1.5" />
+      <path d="M21 15l-5-5L5 21" />
+    </svg>
+  );
+
+  const IconMenu = (
+    <span className="flex flex-col items-center justify-center gap-1">
+      <span className="block w-5 h-0.5 bg-white rounded" />
+      <span className="block w-5 h-0.5 bg-white rounded" />
+      <span className="block w-5 h-0.5 bg-white rounded" />
+    </span>
+  );
+
+  const ShutterButton = (
+    <button
+      onClick={handleCapture}
+      disabled={!isReady || isCapturing}
+      className={`w-20 h-20 rounded-full border-4 shadow-lg shrink-0 ${
+        !isReady || isCapturing
+          ? "border-zinc-600 bg-zinc-700"
+          : "border-white bg-white"
+      }`}
+      aria-label="撮影"
+      title="撮影"
+    />
+  );
+
+  const PhotoButton = (
+    <button
+      onClick={handlePickImage}
+      className="w-14 h-14 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center shadow-lg active:scale-[0.98] shrink-0"
+      aria-label="写真を選択"
+      title="写真を選択"
+    >
+      {IconPhoto}
+    </button>
+  );
+
+  const SettingsButton = (
+    <button
+      onClick={() => router.push("/settings")}
+      className="w-14 h-14 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center shadow-lg active:scale-[0.98] shrink-0"
+      aria-label="設定"
+      title="設定"
+    >
+      {IconMenu}
+    </button>
+  );
+
   const TopBar = (
-    <div className="flex items-center justify-between px-4 py-4 border-b border-zinc-800 bg-zinc-950">
+    <div className="h-20 shrink-0 flex items-center justify-between px-4 border-b border-zinc-800 bg-zinc-950">
       <div className="text-base font-medium">カメラ</div>
       <button
         onClick={() => router.push("/")}
@@ -226,7 +296,6 @@ export default function CameraPage() {
             top: "12.5%",
           }}
         />
-
         <div
           className="absolute bg-white/45"
           style={{
@@ -237,7 +306,6 @@ export default function CameraPage() {
             transform: "translateX(-0.5px)",
           }}
         />
-
         <div
           className="absolute bg-white/45"
           style={{
@@ -276,68 +344,8 @@ export default function CameraPage() {
     </div>
   );
 
-  const IconPhoto = (
-    <svg
-      viewBox="0 0 24 24"
-      className="w-7 h-7 text-white"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <rect x="3" y="5" width="18" height="14" rx="2" />
-      <circle cx="8.5" cy="10.5" r="1.5" />
-      <path d="M21 15l-5-5L5 21" />
-    </svg>
-  );
-
-  const IconMenu = (
-    <span className="flex flex-col items-center justify-center gap-1">
-      <span className="block w-5 h-0.5 bg-white rounded" />
-      <span className="block w-5 h-0.5 bg-white rounded" />
-      <span className="block w-5 h-0.5 bg-white rounded" />
-    </span>
-  );
-
-  const ShutterButton = (
-    <button
-      onClick={handleCapture}
-      disabled={!isReady || isCapturing}
-      className={`w-20 h-20 rounded-full border-4 shadow-lg ${
-        !isReady || isCapturing
-          ? "border-zinc-600 bg-zinc-700"
-          : "border-white bg-white"
-      }`}
-      aria-label="撮影"
-      title="撮影"
-    />
-  );
-
-  const PhotoButton = (
-    <button
-      onClick={handlePickImage}
-      className="w-14 h-14 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center shadow-lg active:scale-[0.98]"
-      aria-label="写真を選択"
-      title="写真を選択"
-    >
-      {IconPhoto}
-    </button>
-  );
-
-  const SettingsButton = (
-    <button
-      onClick={() => router.push("/settings")}
-      className="w-14 h-14 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center shadow-lg active:scale-[0.98]"
-      aria-label="設定"
-      title="設定"
-    >
-      {IconMenu}
-    </button>
-  );
-
   return (
-    <main className="min-h-screen bg-black text-white flex flex-col">
+    <main className="h-[100dvh] bg-black text-white flex flex-col overflow-hidden">
       <div className="fixed right-2 bottom-2 z-[9999] text-[10px] px-2 py-1 rounded bg-black/70 text-zinc-300 border border-white/10 pointer-events-none">
         {PAGE_VERSION}
       </div>
@@ -353,23 +361,27 @@ export default function CameraPage() {
       {TopBar}
 
       {isLandscape ? (
-        <div className="flex-1 flex bg-black min-h-0">
-          <div className="w-24 flex flex-col items-center justify-end gap-5 pb-8">
+        <div className="flex-1 min-h-0 flex bg-black overflow-hidden">
+          <div className="w-20 shrink-0 flex flex-col items-center justify-end pb-6">
             {PhotoButton}
           </div>
 
-          <div className="flex-1 min-w-0 min-h-0">{PreviewArea}</div>
+          <div className="flex-1 min-w-0 min-h-0 overflow-hidden">
+            {PreviewArea}
+          </div>
 
-          <div className="w-28 flex flex-col items-center justify-center gap-6">
+          <div className="w-24 shrink-0 flex flex-col items-center justify-center gap-5 px-2">
             {ShutterButton}
             {SettingsButton}
           </div>
         </div>
       ) : (
         <>
-          <div className="flex-1 relative bg-black overflow-hidden">{PreviewArea}</div>
+          <div className="flex-1 min-h-0 relative bg-black overflow-hidden">
+            {PreviewArea}
+          </div>
 
-          <div className="bg-black px-5 pt-4 pb-8">
+          <div className="shrink-0 bg-black px-5 pt-4 pb-8">
             <div className="flex items-center justify-between">
               {PhotoButton}
               {ShutterButton}
