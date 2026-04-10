@@ -381,8 +381,10 @@ export default function CameraPage() {
           {PreviewArea}
         </div>
 
-        <div className="w-24 shrink-0 flex flex-col items-center justify-center gap-5 px-2">
+        <div className="w-24 shrink-0 flex flex-col items-center px-2 py-4">
+          <div className="flex-1" />
           {ShutterButton}
+          <div className="flex-1" />
           {SettingsButton}
         </div>
       </div>
