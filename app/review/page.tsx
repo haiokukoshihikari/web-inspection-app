@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "review-stable-07";
+const REVIEW_VERSION = "review-stable-08";
 
 const MAX_SAMPLES = 6;
 const MISSING_KEY = "inspection:missingOn";
@@ -58,6 +58,13 @@ type MatchBox = {
   shearFactor: number;
 };
 
+type CandidateBox = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
+
 type CaptureDebugInfo = {
   sourceType: "camera" | "file";
   originalWidth: number;
@@ -95,6 +102,26 @@ function loadImage(src: string): Promise<HTMLImageElement> {
     img.onerror = reject;
     img.src = src;
   });
+}
+
+function median(values: number[]) {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+}
+
+function rectsOverlap(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }) {
+  const ax2 = a.x + a.w;
+  const ay2 = a.y + a.h;
+  const bx2 = b.x + b.w;
+  const by2 = b.y + b.h;
+
+  const overlapW = Math.min(ax2, bx2) - Math.max(a.x, b.x);
+  const overlapH = Math.min(ay2, by2) - Math.max(a.y, b.y);
+  return overlapW > 0 && overlapH > 0;
 }
 
 async function imageSrcToMat(
@@ -410,26 +437,9 @@ function runMultiMatch(params: {
 
     boxes.sort((a, b) => b.score - a.score);
 
-    function isOverlapping(a: MatchBox, b: MatchBox) {
-      const ax1 = a.x;
-      const ay1 = a.y;
-      const ax2 = a.x + a.w;
-      const ay2 = a.y + a.h;
-
-      const bx1 = b.x;
-      const by1 = b.y;
-      const bx2 = b.x + b.w;
-      const by2 = b.y + b.h;
-
-      const overlapW = Math.min(ax2, bx2) - Math.max(ax1, bx1);
-      const overlapH = Math.min(ay2, by2) - Math.max(ay1, by1);
-
-      return overlapW > 0 && overlapH > 0;
-    }
-
     const deduped: MatchBox[] = [];
     for (const box of boxes) {
-      const overlapped = deduped.some((d) => isOverlapping(box, d));
+      const overlapped = deduped.some((d) => rectsOverlap(box, d));
       if (!overlapped) {
         deduped.push(box);
       }
@@ -890,6 +900,85 @@ export default function ReviewPage() {
     samples,
   ]);
 
+  const missingCandidates = useMemo<CandidateBox[]>(() => {
+    if (!missingOn) return [];
+    if (matchBoxes.length < 3) return [];
+
+    const centers = matchBoxes.map((b) => ({
+      cx: b.x + b.w / 2,
+      cy: b.y + b.h / 2,
+      w: b.w,
+      h: b.h,
+    }));
+
+    const xs = centers.map((c) => c.cx);
+    const ys = centers.map((c) => c.cy);
+    const spreadX = Math.max(...xs) - Math.min(...xs);
+    const spreadY = Math.max(...ys) - Math.min(...ys);
+
+    const dominant: "x" | "y" = spreadY >= spreadX ? "y" : "x";
+
+    const sorted = [...centers].sort((a, b) =>
+      dominant === "y" ? a.cy - b.cy : a.cx - b.cx
+    );
+
+    const gaps: number[] = [];
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const gap =
+        dominant === "y"
+          ? sorted[i + 1].cy - sorted[i].cy
+          : sorted[i + 1].cx - sorted[i].cx;
+      if (gap > 0.01 && gap < 0.8) gaps.push(gap);
+    }
+
+    const baseGap = median(gaps);
+    if (!baseGap || baseGap <= 0) return [];
+
+    const baseW = median(sorted.map((s) => s.w));
+    const baseH = median(sorted.map((s) => s.h));
+
+    const candidates: CandidateBox[] = [];
+
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const a = sorted[i];
+      const b = sorted[i + 1];
+
+      const gap =
+        dominant === "y" ? b.cy - a.cy : b.cx - a.cx;
+
+      const ratio = gap / baseGap;
+
+      if (ratio < 1.7 || ratio > 3.2) continue;
+
+      const missingCount = Math.max(1, Math.min(2, Math.round(ratio) - 1));
+
+      for (let k = 1; k <= missingCount; k++) {
+        const t = k / (missingCount + 1);
+        const cx = a.cx + (b.cx - a.cx) * t;
+        const cy = a.cy + (b.cy - a.cy) * t;
+
+        const candidate: CandidateBox = {
+          x: clamp01(cx - baseW / 2),
+          y: clamp01(cy - baseH / 2),
+          w: clamp01(baseW),
+          h: clamp01(baseH),
+        };
+
+        if (candidate.x + candidate.w > 1) candidate.x = Math.max(0, 1 - candidate.w);
+        if (candidate.y + candidate.h > 1) candidate.y = Math.max(0, 1 - candidate.h);
+
+        const overlapsDetected = matchBoxes.some((box) => rectsOverlap(candidate, box));
+        const overlapsCandidate = candidates.some((box) => rectsOverlap(candidate, box));
+
+        if (!overlapsDetected && !overlapsCandidate) {
+          candidates.push(candidate);
+        }
+      }
+    }
+
+    return candidates;
+  }, [missingOn, matchBoxes]);
+
   const handleMissingToggle = () => {
     const next = !missingOn;
     setMissingOn(next);
@@ -967,6 +1056,22 @@ export default function ReviewPage() {
       ctx.fillStyle = "#000";
       ctx.fillText(label, x + padX, Math.max(0, y - boxH) + padY);
     });
+
+    if (missingOn) {
+      ctx.setLineDash([14, 10]);
+      ctx.lineWidth = Math.max(3, Math.round(Math.min(canvas.width, canvas.height) * 0.004));
+      ctx.strokeStyle = "#fb7185";
+
+      missingCandidates.forEach((box) => {
+        const x = Math.round(box.x * canvas.width);
+        const y = Math.round(box.y * canvas.height);
+        const w = Math.round(box.w * canvas.width);
+        const h = Math.round(box.h * canvas.height);
+        ctx.strokeRect(x, y, w, h);
+      });
+
+      ctx.setLineDash([]);
+    }
 
     return canvas.toDataURL("image/jpeg", 0.92);
   };
@@ -1129,11 +1234,11 @@ export default function ReviewPage() {
           <div className="text-sm">欠落候補</div>
           <button
             onClick={handleMissingToggle}
-            className={`w-14 h-8 rounded-full transition ${missingOn ? "bg-rose-500" : "bg-zinc-700"}`}
+            className={`relative w-14 h-8 rounded-full transition ${missingOn ? "bg-rose-500" : "bg-zinc-700"}`}
           >
             <span
-              className={`block w-6 h-6 bg-white rounded-full transition translate-y-1 ${
-                missingOn ? "translate-x-7" : "translate-x-1"
+              className={`absolute top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-white transition ${
+                missingOn ? "left-7" : "left-1"
               }`}
             />
           </button>
@@ -1277,6 +1382,22 @@ export default function ReviewPage() {
                 />
               ))}
 
+              {missingOn
+                ? missingCandidates.map((box, i) => (
+                    <div
+                      key={`missing-${i}-${box.x}-${box.y}`}
+                      className="absolute rounded-md pointer-events-none border-[3px] border-dashed border-rose-400"
+                      style={{
+                        left: imageRect.left + imageRect.width * box.x,
+                        top: imageRect.top + imageRect.height * box.y,
+                        width: imageRect.width * box.w,
+                        height: imageRect.height * box.h,
+                      }}
+                      title="欠落候補"
+                    />
+                  ))
+                : null}
+
               {pendingRecheck ? (
                 <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/35">
                   <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
@@ -1311,7 +1432,7 @@ export default function ReviewPage() {
               </div>
 
               <div className="absolute right-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10">
-                {`CCOEFF / hits ${matchBoxes.length}`}
+                {`CCOEFF / hits ${matchBoxes.length} / missing ${missingCandidates.length}`}
               </div>
             </>
           ) : (
