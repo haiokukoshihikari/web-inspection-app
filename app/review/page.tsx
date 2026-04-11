@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "review-stable-08";
+const REVIEW_VERSION = "review-stable-09";
 
 const MAX_SAMPLES = 6;
 const MISSING_KEY = "inspection:missingOn";
@@ -24,6 +24,7 @@ const SHEAR_RANGE_KEY = "inspection:shearRange";
 const RESOLUTION_KEY = "inspection:compareResolution";
 const HIT_LIMIT_KEY = "inspection:hitLimit";
 const AUTO_SAVE_KEY = "inspection:autoSaveOn";
+const MISSING_WEAK_THRESHOLD_KEY = "inspection:missingWeakThreshold";
 
 const UI_THRESHOLD_MIN = 0.25;
 const UI_THRESHOLD_MAX = 0.74;
@@ -58,6 +59,14 @@ type MatchBox = {
   shearFactor: number;
 };
 
+type WeakCandidate = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  score: number;
+};
+
 type CandidateBox = {
   x: number;
   y: number;
@@ -90,20 +99,6 @@ function clamp01(v: number) {
   return clamp(v, 0, 1);
 }
 
-function colorFromIndex(index: number) {
-  const colors = ["#38bdf8", "#34d399", "#f59e0b", "#d946ef", "#06b6d4", "#fb7185"];
-  return colors[index % colors.length];
-}
-
-function loadImage(src: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = src;
-  });
-}
-
 function median(values: number[]) {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
@@ -113,7 +108,15 @@ function median(values: number[]) {
     : sorted[mid];
 }
 
-function rectsOverlap(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }) {
+function colorFromIndex(index: number) {
+  const colors = ["#38bdf8", "#34d399", "#f59e0b", "#d946ef", "#06b6d4", "#fb7185"];
+  return colors[index % colors.length];
+}
+
+function rectsOverlap(
+  a: { x: number; y: number; w: number; h: number },
+  b: { x: number; y: number; w: number; h: number }
+) {
   const ax2 = a.x + a.w;
   const ay2 = a.y + a.h;
   const bx2 = b.x + b.w;
@@ -122,6 +125,15 @@ function rectsOverlap(a: { x: number; y: number; w: number; h: number }, b: { x:
   const overlapW = Math.min(ax2, bx2) - Math.max(a.x, b.x);
   const overlapH = Math.min(ay2, by2) - Math.max(a.y, b.y);
   return overlapW > 0 && overlapH > 0;
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
 }
 
 async function imageSrcToMat(
@@ -166,15 +178,11 @@ function buildProcessedGrayMat(cv: any, srcMat: any, mode: DebugViewMode): any {
       return gray.clone();
     }
 
-    if (mode === "EDGE") {
-      work1 = new cv.Mat();
-      cv.GaussianBlur(gray, work1, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
-      work2 = new cv.Mat();
-      cv.Canny(work1, work2, 60, 180);
-      return work2.clone();
-    }
-
-    return gray.clone();
+    work1 = new cv.Mat();
+    cv.GaussianBlur(gray, work1, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
+    work2 = new cv.Mat();
+    cv.Canny(work1, work2, 60, 180);
+    return work2.clone();
   } finally {
     try {
       gray?.delete?.();
@@ -323,11 +331,12 @@ function runMultiMatch(params: {
   debugMode: DebugViewMode;
   matchMode: MatchMethodMode;
   threshold: number;
+  weakThreshold: number;
   rotationRange: RotationRangeMode;
   scaleRange: ScaleRangeMode;
   shearRange: ShearRangeMode;
   hitLimit: HitLimitMode;
-}): MatchBox[] {
+}): { strong: MatchBox[]; weak: WeakCandidate[] } {
   const {
     cv,
     sceneSrcMat,
@@ -337,6 +346,7 @@ function runMultiMatch(params: {
     debugMode,
     matchMode,
     threshold,
+    weakThreshold,
     rotationRange,
     scaleRange,
     shearRange,
@@ -350,12 +360,14 @@ function runMultiMatch(params: {
     sceneGray = buildProcessedGrayMat(cv, sceneSrcMat, debugMode);
     sampleGray = buildProcessedGrayMat(cv, sampleSrcMat, debugMode);
 
-    const boxes: MatchBox[] = [];
+    const allStrong: MatchBox[] = [];
+    const allWeak: WeakCandidate[] = [];
+
     const rotationValues = getRotationValues(rotationRange);
     const scaleValues = getScaleValues(scaleRange);
     const shearValues = getShearValues(shearRange);
 
-    const localMaxCount = hitLimit === 9999 ? 300 : Math.max(20, Math.min(hitLimit, 120));
+    const localMaxCount = hitLimit === 9999 ? 300 : Math.max(50, Math.min(hitLimit * 4, 240));
 
     for (const rotationDeg of rotationValues) {
       for (const scaleFactor of scaleValues) {
@@ -396,22 +408,33 @@ function runMultiMatch(params: {
                 score = mm.maxVal;
               }
 
-              if (score < threshold) break;
+              if (score < weakThreshold) break;
 
               const w = template.cols;
               const h = template.rows;
 
-              boxes.push({
+              const candidate = {
                 x: clamp01(x / sceneWidth),
                 y: clamp01(y / sceneHeight),
                 w: clamp01(w / sceneWidth),
                 h: clamp01(h / sceneHeight),
-                score,
-                label: `${matchMode} / ${debugMode} / rot ${rotationDeg >= 0 ? "+" : ""}${rotationDeg} / scale ${scaleFactor.toFixed(2)} / shear ${shearFactor.toFixed(2)}`,
-                rotationDeg,
-                scaleFactor,
-                shearFactor,
-              });
+              };
+
+              if (score >= threshold) {
+                allStrong.push({
+                  ...candidate,
+                  score,
+                  label: `${matchMode} / ${debugMode} / rot ${rotationDeg >= 0 ? "+" : ""}${rotationDeg} / scale ${scaleFactor.toFixed(2)} / shear ${shearFactor.toFixed(2)}`,
+                  rotationDeg,
+                  scaleFactor,
+                  shearFactor,
+                });
+              } else {
+                allWeak.push({
+                  ...candidate,
+                  score,
+                });
+              }
 
               const suppressX = clamp(x - Math.round(w * 0.35), 0, result.cols - 1);
               const suppressY = clamp(y - Math.round(h * 0.35), 0, result.rows - 1);
@@ -435,24 +458,125 @@ function runMultiMatch(params: {
       }
     }
 
-    boxes.sort((a, b) => b.score - a.score);
+    allStrong.sort((a, b) => b.score - a.score);
+    allWeak.sort((a, b) => b.score - a.score);
 
-    const deduped: MatchBox[] = [];
-    for (const box of boxes) {
-      const overlapped = deduped.some((d) => rectsOverlap(box, d));
-      if (!overlapped) {
-        deduped.push(box);
-      }
-      if (deduped.length >= hitLimit) break;
+    const strongDeduped: MatchBox[] = [];
+    for (const box of allStrong) {
+      const overlapped = strongDeduped.some((d) => rectsOverlap(box, d));
+      if (!overlapped) strongDeduped.push(box);
+      if (strongDeduped.length >= hitLimit) break;
     }
 
-    return deduped;
+    const weakDeduped: WeakCandidate[] = [];
+    for (const box of allWeak) {
+      const overlappedStrong = strongDeduped.some((d) => rectsOverlap(box, d));
+      const overlappedWeak = weakDeduped.some((d) => rectsOverlap(box, d));
+      if (!overlappedStrong && !overlappedWeak) weakDeduped.push(box);
+      if (weakDeduped.length >= 200) break;
+    }
+
+    return { strong: strongDeduped, weak: weakDeduped };
   } finally {
     try {
       sceneGray?.delete?.();
       sampleGray?.delete?.();
     } catch {}
   }
+}
+
+function clusterAxis(values: number[], tolerance: number) {
+  if (values.length === 0) return [];
+  const sorted = [...values].sort((a, b) => a - b);
+  const groups: number[][] = [[sorted[0]]];
+
+  for (let i = 1; i < sorted.length; i++) {
+    const current = sorted[i];
+    const lastGroup = groups[groups.length - 1];
+    const groupCenter = lastGroup.reduce((s, v) => s + v, 0) / lastGroup.length;
+
+    if (Math.abs(current - groupCenter) <= tolerance) {
+      lastGroup.push(current);
+    } else {
+      groups.push([current]);
+    }
+  }
+
+  return groups.map((g) => g.reduce((s, v) => s + v, 0) / g.length);
+}
+
+function buildGridMissingCandidates(
+  strongBoxes: MatchBox[],
+  weakBoxes: WeakCandidate[],
+  weakThreshold: number
+): CandidateBox[] {
+  if (strongBoxes.length < 4) return [];
+
+  const centers = strongBoxes.map((b) => ({
+    cx: b.x + b.w / 2,
+    cy: b.y + b.h / 2,
+    w: b.w,
+    h: b.h,
+  }));
+
+  const medianW = median(centers.map((c) => c.w));
+  const medianH = median(centers.map((c) => c.h));
+  if (!medianW || !medianH) return [];
+
+  const rowTolerance = medianH * 0.6;
+  const colTolerance = medianW * 0.6;
+
+  const rowCenters = clusterAxis(
+    centers.map((c) => c.cy),
+    rowTolerance
+  );
+  const colCenters = clusterAxis(
+    centers.map((c) => c.cx),
+    colTolerance
+  );
+
+  if (rowCenters.length < 2 || colCenters.length < 2) return [];
+
+  const candidates: CandidateBox[] = [];
+
+  for (const cy of rowCenters) {
+    for (const cx of colCenters) {
+      const candidate: CandidateBox = {
+        x: clamp01(cx - medianW / 2),
+        y: clamp01(cy - medianH / 2),
+        w: clamp01(medianW),
+        h: clamp01(medianH),
+      };
+
+      if (candidate.x + candidate.w > 1) candidate.x = Math.max(0, 1 - candidate.w);
+      if (candidate.y + candidate.h > 1) candidate.y = Math.max(0, 1 - candidate.h);
+
+      const overlapsStrong = strongBoxes.some((box) => rectsOverlap(candidate, box));
+      if (overlapsStrong) continue;
+
+      const nearWeak = weakBoxes.some((box) => {
+        if (box.score < weakThreshold) return false;
+        const weakCx = box.x + box.w / 2;
+        const weakCy = box.y + box.h / 2;
+        const candCx = candidate.x + candidate.w / 2;
+        const candCy = candidate.y + candidate.h / 2;
+
+        const dx = Math.abs(weakCx - candCx);
+        const dy = Math.abs(weakCy - candCy);
+
+        return dx <= medianW * 0.45 && dy <= medianH * 0.45;
+      });
+
+      if (nearWeak) continue;
+
+      const overlapsCandidate = candidates.some((box) => rectsOverlap(candidate, box));
+      if (!overlapsCandidate) {
+        candidates.push(candidate);
+      }
+    }
+  }
+
+  return candidates;
 }
 
 export default function ReviewPage() {
@@ -465,6 +589,7 @@ export default function ReviewPage() {
   const [captureDebugInfo, setCaptureDebugInfo] = useState<CaptureDebugInfo | null>(null);
 
   const [missingOn, setMissingOn] = useState(true);
+  const [missingWeakThreshold, setMissingWeakThreshold] = useState(0.25);
   const [showDeleteFor, setShowDeleteFor] = useState<string | null>(null);
   const [samplesLoaded, setSamplesLoaded] = useState(false);
 
@@ -483,6 +608,7 @@ export default function ReviewPage() {
   const [buildingPreview, setBuildingPreview] = useState(false);
   const [pendingRecheck, setPendingRecheck] = useState(false);
   const [matchBoxes, setMatchBoxes] = useState<MatchBox[]>([]);
+  const [weakBoxes, setWeakBoxes] = useState<WeakCandidate[]>([]);
 
   const [baseThreshold, setBaseThreshold] = useState(0.5);
   const [matchThreshold, setMatchThreshold] = useState(0.5);
@@ -523,6 +649,12 @@ export default function ReviewPage() {
 
       const savedMissing = localStorage.getItem(MISSING_KEY);
       if (savedMissing !== null) setMissingOn(savedMissing === "true");
+
+      const savedWeakThreshold = localStorage.getItem(MISSING_WEAK_THRESHOLD_KEY);
+      if (savedWeakThreshold !== null) {
+        const n = Number(savedWeakThreshold);
+        if (Number.isFinite(n)) setMissingWeakThreshold(clamp(Number(n.toFixed(2)), 0.05, 0.95));
+      }
 
       const savedAutoSave = localStorage.getItem(AUTO_SAVE_KEY);
       if (savedAutoSave !== null) setAutoSaveOn(savedAutoSave === "true");
@@ -601,6 +733,10 @@ export default function ReviewPage() {
   }, [samples, samplesLoaded]);
 
   useEffect(() => {
+    localStorage.setItem(MISSING_WEAK_THRESHOLD_KEY, String(missingWeakThreshold));
+  }, [missingWeakThreshold]);
+
+  useEffect(() => {
     if (!samplesLoaded) return;
 
     if (prevResolutionRef.current === null) {
@@ -613,6 +749,7 @@ export default function ReviewPage() {
       setSelectedSampleId(null);
       setSamplePreviewUrl("");
       setMatchBoxes([]);
+      setWeakBoxes([]);
       localStorage.removeItem(SAMPLES_KEY);
       prevResolutionRef.current = compareResolution;
     }
@@ -834,6 +971,7 @@ export default function ReviewPage() {
         if (!sample) {
           setSamplePreviewUrl("");
           setMatchBoxes([]);
+          setWeakBoxes([]);
           return;
         }
 
@@ -841,6 +979,7 @@ export default function ReviewPage() {
         if (!loadedSample) {
           setSamplePreviewUrl("");
           setMatchBoxes([]);
+          setWeakBoxes([]);
           return;
         }
 
@@ -852,7 +991,7 @@ export default function ReviewPage() {
             : buildDebugImageFromSrcMat(cv, sampleMat, debugMode)
         );
 
-        const hits = runMultiMatch({
+        const result = runMultiMatch({
           cv,
           sceneSrcMat: sceneMat,
           sampleSrcMat: sampleMat,
@@ -861,6 +1000,7 @@ export default function ReviewPage() {
           debugMode,
           matchMode: matchMethod,
           threshold: matchThreshold,
+          weakThreshold: missingWeakThreshold,
           rotationRange,
           scaleRange,
           shearRange,
@@ -868,7 +1008,8 @@ export default function ReviewPage() {
         });
 
         if (!cancelled) {
-          setMatchBoxes(hits);
+          setMatchBoxes(result.strong);
+          setWeakBoxes(result.weak);
         }
       } catch (e) {
         console.error(e);
@@ -891,6 +1032,7 @@ export default function ReviewPage() {
     capturedImage,
     debugMode,
     matchThreshold,
+    missingWeakThreshold,
     rotationRange,
     scaleRange,
     shearRange,
@@ -900,84 +1042,10 @@ export default function ReviewPage() {
     samples,
   ]);
 
-  const missingCandidates = useMemo<CandidateBox[]>(() => {
+  const missingCandidates = useMemo(() => {
     if (!missingOn) return [];
-    if (matchBoxes.length < 3) return [];
-
-    const centers = matchBoxes.map((b) => ({
-      cx: b.x + b.w / 2,
-      cy: b.y + b.h / 2,
-      w: b.w,
-      h: b.h,
-    }));
-
-    const xs = centers.map((c) => c.cx);
-    const ys = centers.map((c) => c.cy);
-    const spreadX = Math.max(...xs) - Math.min(...xs);
-    const spreadY = Math.max(...ys) - Math.min(...ys);
-
-    const dominant: "x" | "y" = spreadY >= spreadX ? "y" : "x";
-
-    const sorted = [...centers].sort((a, b) =>
-      dominant === "y" ? a.cy - b.cy : a.cx - b.cx
-    );
-
-    const gaps: number[] = [];
-    for (let i = 0; i < sorted.length - 1; i++) {
-      const gap =
-        dominant === "y"
-          ? sorted[i + 1].cy - sorted[i].cy
-          : sorted[i + 1].cx - sorted[i].cx;
-      if (gap > 0.01 && gap < 0.8) gaps.push(gap);
-    }
-
-    const baseGap = median(gaps);
-    if (!baseGap || baseGap <= 0) return [];
-
-    const baseW = median(sorted.map((s) => s.w));
-    const baseH = median(sorted.map((s) => s.h));
-
-    const candidates: CandidateBox[] = [];
-
-    for (let i = 0; i < sorted.length - 1; i++) {
-      const a = sorted[i];
-      const b = sorted[i + 1];
-
-      const gap =
-        dominant === "y" ? b.cy - a.cy : b.cx - a.cx;
-
-      const ratio = gap / baseGap;
-
-      if (ratio < 1.7 || ratio > 3.2) continue;
-
-      const missingCount = Math.max(1, Math.min(2, Math.round(ratio) - 1));
-
-      for (let k = 1; k <= missingCount; k++) {
-        const t = k / (missingCount + 1);
-        const cx = a.cx + (b.cx - a.cx) * t;
-        const cy = a.cy + (b.cy - a.cy) * t;
-
-        const candidate: CandidateBox = {
-          x: clamp01(cx - baseW / 2),
-          y: clamp01(cy - baseH / 2),
-          w: clamp01(baseW),
-          h: clamp01(baseH),
-        };
-
-        if (candidate.x + candidate.w > 1) candidate.x = Math.max(0, 1 - candidate.w);
-        if (candidate.y + candidate.h > 1) candidate.y = Math.max(0, 1 - candidate.h);
-
-        const overlapsDetected = matchBoxes.some((box) => rectsOverlap(candidate, box));
-        const overlapsCandidate = candidates.some((box) => rectsOverlap(candidate, box));
-
-        if (!overlapsDetected && !overlapsCandidate) {
-          candidates.push(candidate);
-        }
-      }
-    }
-
-    return candidates;
-  }, [missingOn, matchBoxes]);
+    return buildGridMissingCandidates(matchBoxes, weakBoxes, missingWeakThreshold);
+  }, [missingOn, matchBoxes, weakBoxes, missingWeakThreshold]);
 
   const handleMissingToggle = () => {
     const next = !missingOn;
@@ -1226,8 +1294,26 @@ export default function ReviewPage() {
           </div>
         </div>
 
+        <div className="flex items-center gap-3">
+          <div className="text-sm text-zinc-300 shrink-0">欠落弱候補</div>
+          <input
+            type="range"
+            min={0.05}
+            max={0.95}
+            step={0.01}
+            value={missingWeakThreshold}
+            onChange={(e) =>
+              setMissingWeakThreshold(clamp(Number(Number(e.target.value).toFixed(2)), 0.05, 0.95))
+            }
+            className="flex-1"
+          />
+          <div className="text-sm w-12 text-right text-zinc-300">
+            {missingWeakThreshold.toFixed(2)}
+          </div>
+        </div>
+
         <div className="text-[11px] text-zinc-500">
-          {`しきい値 ${draftThreshold.toFixed(2)} / 感度 ${sensitivity} / 実適用 ${matchThreshold.toFixed(3)}`}
+          {`しきい値 ${draftThreshold.toFixed(2)} / 感度 ${sensitivity} / 実適用 ${matchThreshold.toFixed(3)} / 弱候補 ${missingWeakThreshold.toFixed(2)}`}
         </div>
 
         <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2">
@@ -1432,7 +1518,7 @@ export default function ReviewPage() {
               </div>
 
               <div className="absolute right-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10">
-                {`CCOEFF / hits ${matchBoxes.length} / missing ${missingCandidates.length}`}
+                {`CCOEFF / hits ${matchBoxes.length} / weak ${weakBoxes.length} / missing ${missingCandidates.length}`}
               </div>
             </>
           ) : (
@@ -1552,6 +1638,7 @@ export default function ReviewPage() {
                             setSelectedSampleId(null);
                             setSamplePreviewUrl("");
                             setMatchBoxes([]);
+                            setWeakBoxes([]);
                           }
                         }
                       }}
