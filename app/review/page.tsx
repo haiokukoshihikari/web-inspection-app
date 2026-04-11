@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "review-stable-09";
+const REVIEW_VERSION = "review-stable-10";
 
 const MAX_SAMPLES = 6;
 const MISSING_KEY = "inspection:missingOn";
@@ -24,7 +24,7 @@ const SHEAR_RANGE_KEY = "inspection:shearRange";
 const RESOLUTION_KEY = "inspection:compareResolution";
 const HIT_LIMIT_KEY = "inspection:hitLimit";
 const AUTO_SAVE_KEY = "inspection:autoSaveOn";
-const MISSING_WEAK_THRESHOLD_KEY = "inspection:missingWeakThreshold";
+const MISSING_CANDIDATE_THRESHOLD_KEY = "inspection:missingCandidateThreshold";
 
 const UI_THRESHOLD_MIN = 0.25;
 const UI_THRESHOLD_MAX = 0.74;
@@ -59,9 +59,9 @@ type MatchBox = {
   shearFactor: number;
 };
 
-type WeakCandidate = {
-  x: number;
-  y: number;
+type GridPoint = {
+  cx: number;
+  cy: number;
   w: number;
   h: number;
   score: number;
@@ -72,6 +72,7 @@ type CandidateBox = {
   y: number;
   w: number;
   h: number;
+  score: number;
 };
 
 type CaptureDebugInfo = {
@@ -322,7 +323,7 @@ function transformTemplateGray(
   }
 }
 
-function runMultiMatch(params: {
+function runStrongMatches(params: {
   cv: any;
   sceneSrcMat: any;
   sampleSrcMat: any;
@@ -331,12 +332,11 @@ function runMultiMatch(params: {
   debugMode: DebugViewMode;
   matchMode: MatchMethodMode;
   threshold: number;
-  weakThreshold: number;
   rotationRange: RotationRangeMode;
   scaleRange: ScaleRangeMode;
   shearRange: ShearRangeMode;
   hitLimit: HitLimitMode;
-}): { strong: MatchBox[]; weak: WeakCandidate[] } {
+}): MatchBox[] {
   const {
     cv,
     sceneSrcMat,
@@ -346,7 +346,6 @@ function runMultiMatch(params: {
     debugMode,
     matchMode,
     threshold,
-    weakThreshold,
     rotationRange,
     scaleRange,
     shearRange,
@@ -361,12 +360,9 @@ function runMultiMatch(params: {
     sampleGray = buildProcessedGrayMat(cv, sampleSrcMat, debugMode);
 
     const allStrong: MatchBox[] = [];
-    const allWeak: WeakCandidate[] = [];
-
     const rotationValues = getRotationValues(rotationRange);
     const scaleValues = getScaleValues(scaleRange);
     const shearValues = getShearValues(shearRange);
-
     const localMaxCount = hitLimit === 9999 ? 300 : Math.max(50, Math.min(hitLimit * 4, 240));
 
     for (const rotationDeg of rotationValues) {
@@ -408,33 +404,22 @@ function runMultiMatch(params: {
                 score = mm.maxVal;
               }
 
-              if (score < weakThreshold) break;
+              if (score < threshold) break;
 
               const w = template.cols;
               const h = template.rows;
 
-              const candidate = {
+              allStrong.push({
                 x: clamp01(x / sceneWidth),
                 y: clamp01(y / sceneHeight),
                 w: clamp01(w / sceneWidth),
                 h: clamp01(h / sceneHeight),
-              };
-
-              if (score >= threshold) {
-                allStrong.push({
-                  ...candidate,
-                  score,
-                  label: `${matchMode} / ${debugMode} / rot ${rotationDeg >= 0 ? "+" : ""}${rotationDeg} / scale ${scaleFactor.toFixed(2)} / shear ${shearFactor.toFixed(2)}`,
-                  rotationDeg,
-                  scaleFactor,
-                  shearFactor,
-                });
-              } else {
-                allWeak.push({
-                  ...candidate,
-                  score,
-                });
-              }
+                score,
+                label: `${matchMode} / ${debugMode} / rot ${rotationDeg >= 0 ? "+" : ""}${rotationDeg} / scale ${scaleFactor.toFixed(2)} / shear ${shearFactor.toFixed(2)}`,
+                rotationDeg,
+                scaleFactor,
+                shearFactor,
+              });
 
               const suppressX = clamp(x - Math.round(w * 0.35), 0, result.cols - 1);
               const suppressY = clamp(y - Math.round(h * 0.35), 0, result.rows - 1);
@@ -459,7 +444,6 @@ function runMultiMatch(params: {
     }
 
     allStrong.sort((a, b) => b.score - a.score);
-    allWeak.sort((a, b) => b.score - a.score);
 
     const strongDeduped: MatchBox[] = [];
     for (const box of allStrong) {
@@ -468,15 +452,7 @@ function runMultiMatch(params: {
       if (strongDeduped.length >= hitLimit) break;
     }
 
-    const weakDeduped: WeakCandidate[] = [];
-    for (const box of allWeak) {
-      const overlappedStrong = strongDeduped.some((d) => rectsOverlap(box, d));
-      const overlappedWeak = weakDeduped.some((d) => rectsOverlap(box, d));
-      if (!overlappedStrong && !overlappedWeak) weakDeduped.push(box);
-      if (weakDeduped.length >= 200) break;
-    }
-
-    return { strong: strongDeduped, weak: weakDeduped };
+    return strongDeduped;
   } finally {
     try {
       sceneGray?.delete?.();
@@ -493,23 +469,16 @@ function clusterAxis(values: number[], tolerance: number) {
   for (let i = 1; i < sorted.length; i++) {
     const current = sorted[i];
     const lastGroup = groups[groups.length - 1];
-    const groupCenter = lastGroup.reduce((s, v) => s + v, 0) / lastGroup.length;
+    const center = lastGroup.reduce((s, v) => s + v, 0) / lastGroup.length;
 
-    if (Math.abs(current - groupCenter) <= tolerance) {
-      lastGroup.push(current);
-    } else {
-      groups.push([current]);
-    }
+    if (Math.abs(current - center) <= tolerance) lastGroup.push(current);
+    else groups.push([current]);
   }
 
   return groups.map((g) => g.reduce((s, v) => s + v, 0) / g.length);
 }
 
-function buildGridMissingCandidates(
-  strongBoxes: MatchBox[],
-  weakBoxes: WeakCandidate[],
-  weakThreshold: number
-): CandidateBox[] {
+function buildGridPointsFromStrong(strongBoxes: MatchBox[]): GridPoint[] {
   if (strongBoxes.length < 4) return [];
 
   const centers = strongBoxes.map((b) => ({
@@ -523,60 +492,76 @@ function buildGridMissingCandidates(
   const medianH = median(centers.map((c) => c.h));
   if (!medianW || !medianH) return [];
 
-  const rowTolerance = medianH * 0.6;
-  const colTolerance = medianW * 0.6;
-
   const rowCenters = clusterAxis(
     centers.map((c) => c.cy),
-    rowTolerance
+    medianH * 0.6
   );
   const colCenters = clusterAxis(
     centers.map((c) => c.cx),
-    colTolerance
+    medianW * 0.6
   );
 
   if (rowCenters.length < 2 || colCenters.length < 2) return [];
 
-  const candidates: CandidateBox[] = [];
-
+  const points: GridPoint[] = [];
   for (const cy of rowCenters) {
     for (const cx of colCenters) {
-      const candidate: CandidateBox = {
-        x: clamp01(cx - medianW / 2),
-        y: clamp01(cy - medianH / 2),
-        w: clamp01(medianW),
-        h: clamp01(medianH),
-      };
-
-      if (candidate.x + candidate.w > 1) candidate.x = Math.max(0, 1 - candidate.w);
-      if (candidate.y + candidate.h > 1) candidate.y = Math.max(0, 1 - candidate.h);
-
-      const overlapsStrong = strongBoxes.some((box) => rectsOverlap(candidate, box));
-      if (overlapsStrong) continue;
-
-      const nearWeak = weakBoxes.some((box) => {
-        if (box.score < weakThreshold) return false;
-        const weakCx = box.x + box.w / 2;
-        const weakCy = box.y + box.h / 2;
-        const candCx = candidate.x + candidate.w / 2;
-        const candCy = candidate.y + candidate.h / 2;
-
-        const dx = Math.abs(weakCx - candCx);
-        const dy = Math.abs(weakCy - candCy);
-
-        return dx <= medianW * 0.45 && dy <= medianH * 0.45;
+      points.push({
+        cx,
+        cy,
+        w: medianW,
+        h: medianH,
+        score: 0,
       });
-
-      if (nearWeak) continue;
-
-      const overlapsCandidate = candidates.some((box) => rectsOverlap(candidate, box));
-      if (!overlapsCandidate) {
-        candidates.push(candidate);
-      }
     }
   }
 
-  return candidates;
+  return points;
+}
+
+function findExistenceForGridPoint(
+  point: GridPoint,
+  strongBoxes: MatchBox[]
+) {
+  return strongBoxes.some((b) => {
+    const cx = b.x + b.w / 2;
+    const cy = b.y + b.h / 2;
+    return (
+      Math.abs(cx - point.cx) <= point.w * 0.45 &&
+      Math.abs(cy - point.cy) <= point.h * 0.45
+    );
+  });
+}
+
+function sampleGridPointScore(
+  cv: any,
+  sceneProcessedGray: any,
+  sampleProcessedGray: any,
+  point: GridPoint
+) {
+  const sceneW = sceneProcessedGray.cols;
+  const sceneH = sceneProcessedGray.rows;
+  const tplW = sampleProcessedGray.cols;
+  const tplH = sampleProcessedGray.rows;
+
+  const cxPx = Math.round(point.cx * sceneW);
+  const cyPx = Math.round(point.cy * sceneH);
+
+  const x = clamp(Math.round(cxPx - tplW / 2), 0, Math.max(0, sceneW - tplW));
+  const y = clamp(Math.round(cyPx - tplH / 2), 0, Math.max(0, sceneH - tplH));
+
+  const roiRect = new cv.Rect(x, y, tplW, tplH);
+  const roi = sceneProcessedGray.roi(roiRect);
+  const result = new cv.Mat();
+
+  try {
+    cv.matchTemplate(roi, sampleProcessedGray, result, cv.TM_CCOEFF_NORMED);
+    const mm = cv.minMaxLoc(result);
+    return mm.maxVal;
+  } finally {
+    roi.delete();
+    result.delete();
+  }
 }
 
 export default function ReviewPage() {
@@ -589,7 +574,7 @@ export default function ReviewPage() {
   const [captureDebugInfo, setCaptureDebugInfo] = useState<CaptureDebugInfo | null>(null);
 
   const [missingOn, setMissingOn] = useState(true);
-  const [missingWeakThreshold, setMissingWeakThreshold] = useState(0.25);
+  const [missingCandidateThreshold, setMissingCandidateThreshold] = useState(0.30);
   const [showDeleteFor, setShowDeleteFor] = useState<string | null>(null);
   const [samplesLoaded, setSamplesLoaded] = useState(false);
 
@@ -608,7 +593,9 @@ export default function ReviewPage() {
   const [buildingPreview, setBuildingPreview] = useState(false);
   const [pendingRecheck, setPendingRecheck] = useState(false);
   const [matchBoxes, setMatchBoxes] = useState<MatchBox[]>([]);
-  const [weakBoxes, setWeakBoxes] = useState<WeakCandidate[]>([]);
+  const [gridPoints, setGridPoints] = useState<GridPoint[]>([]);
+  const [candidatePoints, setCandidatePoints] = useState<CandidateBox[]>([]);
+  const [missingCandidates, setMissingCandidates] = useState<CandidateBox[]>([]);
 
   const [baseThreshold, setBaseThreshold] = useState(0.5);
   const [matchThreshold, setMatchThreshold] = useState(0.5);
@@ -650,10 +637,12 @@ export default function ReviewPage() {
       const savedMissing = localStorage.getItem(MISSING_KEY);
       if (savedMissing !== null) setMissingOn(savedMissing === "true");
 
-      const savedWeakThreshold = localStorage.getItem(MISSING_WEAK_THRESHOLD_KEY);
-      if (savedWeakThreshold !== null) {
-        const n = Number(savedWeakThreshold);
-        if (Number.isFinite(n)) setMissingWeakThreshold(clamp(Number(n.toFixed(2)), 0.05, 0.95));
+      const savedCandidateThreshold = localStorage.getItem(MISSING_CANDIDATE_THRESHOLD_KEY);
+      if (savedCandidateThreshold !== null) {
+        const n = Number(savedCandidateThreshold);
+        if (Number.isFinite(n)) {
+          setMissingCandidateThreshold(clamp(Number(n.toFixed(2)), 0.05, 0.95));
+        }
       }
 
       const savedAutoSave = localStorage.getItem(AUTO_SAVE_KEY);
@@ -733,8 +722,8 @@ export default function ReviewPage() {
   }, [samples, samplesLoaded]);
 
   useEffect(() => {
-    localStorage.setItem(MISSING_WEAK_THRESHOLD_KEY, String(missingWeakThreshold));
-  }, [missingWeakThreshold]);
+    localStorage.setItem(MISSING_CANDIDATE_THRESHOLD_KEY, String(missingCandidateThreshold));
+  }, [missingCandidateThreshold]);
 
   useEffect(() => {
     if (!samplesLoaded) return;
@@ -749,7 +738,9 @@ export default function ReviewPage() {
       setSelectedSampleId(null);
       setSamplePreviewUrl("");
       setMatchBoxes([]);
-      setWeakBoxes([]);
+      setGridPoints([]);
+      setCandidatePoints([]);
+      setMissingCandidates([]);
       localStorage.removeItem(SAMPLES_KEY);
       prevResolutionRef.current = compareResolution;
     }
@@ -929,7 +920,7 @@ export default function ReviewPage() {
       window.clearTimeout(t1);
       window.clearTimeout(t2);
     };
-  }, [mainPreviewUrl, displayBasis, matchBoxes]);
+  }, [mainPreviewUrl, displayBasis, matchBoxes, candidatePoints, missingCandidates]);
 
   useEffect(() => {
     let cancelled = false;
@@ -944,7 +935,9 @@ export default function ReviewPage() {
       });
 
       let sceneMat: any = null;
+      let sceneProcessedGray: any = null;
       let sampleMat: any = null;
+      let sampleProcessedGray: any = null;
 
       try {
         const loadedScene = await imageSrcToMat(cv, capturedImage, compareResolution);
@@ -971,7 +964,9 @@ export default function ReviewPage() {
         if (!sample) {
           setSamplePreviewUrl("");
           setMatchBoxes([]);
-          setWeakBoxes([]);
+          setGridPoints([]);
+          setCandidatePoints([]);
+          setMissingCandidates([]);
           return;
         }
 
@@ -979,7 +974,9 @@ export default function ReviewPage() {
         if (!loadedSample) {
           setSamplePreviewUrl("");
           setMatchBoxes([]);
-          setWeakBoxes([]);
+          setGridPoints([]);
+          setCandidatePoints([]);
+          setMissingCandidates([]);
           return;
         }
 
@@ -991,7 +988,7 @@ export default function ReviewPage() {
             : buildDebugImageFromSrcMat(cv, sampleMat, debugMode)
         );
 
-        const result = runMultiMatch({
+        const strong = runStrongMatches({
           cv,
           sceneSrcMat: sceneMat,
           sampleSrcMat: sampleMat,
@@ -1000,23 +997,59 @@ export default function ReviewPage() {
           debugMode,
           matchMode: matchMethod,
           threshold: matchThreshold,
-          weakThreshold: missingWeakThreshold,
           rotationRange,
           scaleRange,
           shearRange,
           hitLimit,
         });
 
+        sceneProcessedGray = buildProcessedGrayMat(cv, sceneMat, debugMode);
+        sampleProcessedGray = buildProcessedGrayMat(cv, sampleMat, debugMode);
+
+        const grid = buildGridPointsFromStrong(strong);
+        const candidateBoxes: CandidateBox[] = [];
+        const missingBoxes: CandidateBox[] = [];
+
+        for (const gp of grid) {
+          const score = sampleGridPointScore(cv, sceneProcessedGray, sampleProcessedGray, gp);
+
+          const pointWithScore: GridPoint = { ...gp, score };
+          const exists = findExistenceForGridPoint(pointWithScore, strong);
+
+          const box: CandidateBox = {
+            x: clamp01(pointWithScore.cx - pointWithScore.w / 2),
+            y: clamp01(pointWithScore.cy - pointWithScore.h / 2),
+            w: clamp01(pointWithScore.w),
+            h: clamp01(pointWithScore.h),
+            score,
+          };
+
+          if (box.x + box.w > 1) box.x = Math.max(0, 1 - box.w);
+          if (box.y + box.h > 1) box.y = Math.max(0, 1 - box.h);
+
+          if (exists) {
+            continue;
+          } else if (score >= missingCandidateThreshold && score < matchThreshold) {
+            candidateBoxes.push(box);
+          } else {
+            missingBoxes.push(box);
+          }
+        }
+
         if (!cancelled) {
-          setMatchBoxes(result.strong);
-          setWeakBoxes(result.weak);
+          setMatchBoxes(strong);
+          setGridPoints(grid);
+          setCandidatePoints(candidateBoxes);
+          setMissingCandidates(missingOn ? missingBoxes : []);
         }
       } catch (e) {
         console.error(e);
       } finally {
         try {
           sceneMat?.delete?.();
+          sceneProcessedGray?.delete?.();
           sampleMat?.delete?.();
+          sampleProcessedGray?.delete?.();
         } catch {}
         if (!cancelled) setBuildingPreview(false);
       }
@@ -1032,7 +1065,7 @@ export default function ReviewPage() {
     capturedImage,
     debugMode,
     matchThreshold,
-    missingWeakThreshold,
+    missingCandidateThreshold,
     rotationRange,
     scaleRange,
     shearRange,
@@ -1040,12 +1073,8 @@ export default function ReviewPage() {
     hitLimit,
     selectedSampleId,
     samples,
+    missingOn,
   ]);
-
-  const missingCandidates = useMemo(() => {
-    if (!missingOn) return [];
-    return buildGridMissingCandidates(matchBoxes, weakBoxes, missingWeakThreshold);
-  }, [missingOn, matchBoxes, weakBoxes, missingWeakThreshold]);
 
   const handleMissingToggle = () => {
     const next = !missingOn;
@@ -1273,7 +1302,7 @@ export default function ReviewPage() {
             min={UI_THRESHOLD_MIN}
             max={UI_THRESHOLD_MAX}
             step={0.01}
-            value={reversedDraftThreshold}
+            value={UI_THRESHOLD_MAX + UI_THRESHOLD_MIN - draftThreshold}
             onChange={(e) => {
               const raw = Number(e.target.value);
               const restored = UI_THRESHOLD_MAX + UI_THRESHOLD_MIN - raw;
@@ -1295,25 +1324,29 @@ export default function ReviewPage() {
         </div>
 
         <div className="flex items-center gap-3">
-          <div className="text-sm text-zinc-300 shrink-0">欠落弱候補</div>
+          <div className="text-sm text-zinc-300 shrink-0">欠落候補</div>
           <input
             type="range"
             min={0.05}
             max={0.95}
             step={0.01}
-            value={missingWeakThreshold}
+            value={missingCandidateThreshold}
             onChange={(e) =>
-              setMissingWeakThreshold(clamp(Number(Number(e.target.value).toFixed(2)), 0.05, 0.95))
+              setMissingCandidateThreshold(
+                clamp(Number(Number(e.target.value).toFixed(2)), 0.05, 0.95)
+              )
             }
             className="flex-1"
           />
           <div className="text-sm w-12 text-right text-zinc-300">
-            {missingWeakThreshold.toFixed(2)}
+            {missingCandidateThreshold.toFixed(2)}
           </div>
         </div>
 
         <div className="text-[11px] text-zinc-500">
-          {`しきい値 ${draftThreshold.toFixed(2)} / 感度 ${sensitivity} / 実適用 ${matchThreshold.toFixed(3)} / 弱候補 ${missingWeakThreshold.toFixed(2)}`}
+          {`しきい値 ${draftThreshold.toFixed(2)} / 感度 ${sensitivity} / 実適用 ${matchThreshold.toFixed(
+            3
+          )} / 候補点下限 ${missingCandidateThreshold.toFixed(2)}`}
         </div>
 
         <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2">
@@ -1468,21 +1501,34 @@ export default function ReviewPage() {
                 />
               ))}
 
-              {missingOn
-                ? missingCandidates.map((box, i) => (
-                    <div
-                      key={`missing-${i}-${box.x}-${box.y}`}
-                      className="absolute rounded-md pointer-events-none border-[3px] border-dashed border-rose-400"
-                      style={{
-                        left: imageRect.left + imageRect.width * box.x,
-                        top: imageRect.top + imageRect.height * box.y,
-                        width: imageRect.width * box.w,
-                        height: imageRect.height * box.h,
-                      }}
-                      title="欠落候補"
-                    />
-                  ))
-                : null}
+              {candidatePoints.map((box, i) => (
+                <div
+                  key={`candidate-${i}-${box.x}-${box.y}`}
+                  className="absolute rounded-md pointer-events-none border-[2px] border-dashed border-amber-300"
+                  style={{
+                    left: imageRect.left + imageRect.width * box.x,
+                    top: imageRect.top + imageRect.height * box.y,
+                    width: imageRect.width * box.w,
+                    height: imageRect.height * box.h,
+                  }}
+                  title={`候補点 ${box.score.toFixed(3)}`}
+                />
+              ))}
+
+              {missingOn &&
+                missingCandidates.map((box, i) => (
+                  <div
+                    key={`missing-${i}-${box.x}-${box.y}`}
+                    className="absolute rounded-md pointer-events-none border-[3px] border-dashed border-rose-400"
+                    style={{
+                      left: imageRect.left + imageRect.width * box.x,
+                      top: imageRect.top + imageRect.height * box.y,
+                      width: imageRect.width * box.w,
+                      height: imageRect.height * box.h,
+                    }}
+                    title={`欠落候補 ${box.score.toFixed(3)}`}
+                  />
+                ))}
 
               {pendingRecheck ? (
                 <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/35">
@@ -1518,7 +1564,7 @@ export default function ReviewPage() {
               </div>
 
               <div className="absolute right-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10">
-                {`CCOEFF / hits ${matchBoxes.length} / weak ${weakBoxes.length} / missing ${missingCandidates.length}`}
+                {`存在点 ${matchBoxes.length} / 格子点 ${gridPoints.length} / 候補点 ${candidatePoints.length} / 欠落候補 ${missingCandidates.length}`}
               </div>
             </>
           ) : (
@@ -1638,7 +1684,9 @@ export default function ReviewPage() {
                             setSelectedSampleId(null);
                             setSamplePreviewUrl("");
                             setMatchBoxes([]);
-                            setWeakBoxes([]);
+                            setGridPoints([]);
+                            setCandidatePoints([]);
+                            setMissingCandidates([]);
                           }
                         }
                       }}
