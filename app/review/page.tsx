@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "review-stable-06";
+const REVIEW_VERSION = "review-stable-07";
 
 const MAX_SAMPLES = 6;
 const MISSING_KEY = "inspection:missingOn";
@@ -906,6 +906,15 @@ export default function ReviewPage() {
   const sleep = (ms: number) =>
     new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 
+  const dataUrlToFile = async (dataUrl: string, filename: string) => {
+    const response = await fetch(dataUrl);
+    const blob = await response.blob();
+    return new File([blob], filename, {
+      type: blob.type || "image/jpeg",
+      lastModified: Date.now(),
+    });
+  };
+
   const downloadDataUrl = async (dataUrl: string, filename: string) => {
     const a = document.createElement("a");
     a.href = dataUrl;
@@ -972,7 +981,7 @@ export default function ReviewPage() {
 
     try {
       setSavingOnLeave(true);
-      setSaveLeavingMessage("画像を保存しています");
+      setSaveLeavingMessage("共有シートを準備しています");
 
       const now = new Date();
       const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(
@@ -981,19 +990,56 @@ export default function ReviewPage() {
         now.getMinutes()
       ).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
 
+      const files: File[] = [];
+
       if (capturedImage) {
-        await downloadDataUrl(capturedImage, `inspection_raw_${stamp}.jpg`);
+        files.push(await dataUrlToFile(capturedImage, `inspection_raw_${stamp}.jpg`));
       }
 
       const resultDataUrl = await buildResultImageDataUrl();
+      if (resultDataUrl) {
+        files.push(await dataUrlToFile(resultDataUrl, `inspection_result_${stamp}.jpg`));
+      }
+
+      const nav = navigator as Navigator & {
+        canShare?: (data?: ShareData) => boolean;
+      };
+
+      if (
+        files.length > 0 &&
+        typeof nav.share === "function" &&
+        typeof nav.canShare === "function" &&
+        nav.canShare({ files })
+      ) {
+        setSaveLeavingMessage("共有シートを開いています");
+        await nav.share({
+          files,
+          title: "inspection images",
+        });
+        router.push(path);
+        return;
+      }
+
+      setSaveLeavingMessage("共有に未対応のため保存を試みています");
+
+      if (capturedImage) {
+        await downloadDataUrl(capturedImage, `inspection_raw_${stamp}.jpg`);
+      }
       if (resultDataUrl) {
         await downloadDataUrl(resultDataUrl, `inspection_result_${stamp}.jpg`);
       }
 
       await sleep(200);
       router.push(path);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+
+      if (err?.name === "AbortError") {
+        setSavingOnLeave(false);
+        setSaveLeavingMessage("");
+        return;
+      }
+
       alert("画像保存に失敗しました。");
       setSavingOnLeave(false);
       setSaveLeavingMessage("");
