@@ -10,12 +10,11 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "review-stable-10";
+const REVIEW_VERSION = "review-stable-11";
 
 const MAX_SAMPLES = 6;
 const MISSING_KEY = "inspection:missingOn";
 const SAMPLES_KEY = "inspection:samples";
-const MATCH_THRESHOLD_KEY = "inspection:matchThreshold";
 const BASE_THRESHOLD_KEY = "inspection:baseThreshold";
 const SENSITIVITY_KEY = "inspection:sensitivity";
 const ROTATION_RANGE_KEY = "inspection:rotationRange";
@@ -492,14 +491,8 @@ function buildGridPointsFromStrong(strongBoxes: MatchBox[]): GridPoint[] {
   const medianH = median(centers.map((c) => c.h));
   if (!medianW || !medianH) return [];
 
-  const rowCenters = clusterAxis(
-    centers.map((c) => c.cy),
-    medianH * 0.6
-  );
-  const colCenters = clusterAxis(
-    centers.map((c) => c.cx),
-    medianW * 0.6
-  );
+  const rowCenters = clusterAxis(centers.map((c) => c.cy), medianH * 0.6);
+  const colCenters = clusterAxis(centers.map((c) => c.cx), medianW * 0.6);
 
   if (rowCenters.length < 2 || colCenters.length < 2) return [];
 
@@ -519,10 +512,7 @@ function buildGridPointsFromStrong(strongBoxes: MatchBox[]): GridPoint[] {
   return points;
 }
 
-function findExistenceForGridPoint(
-  point: GridPoint,
-  strongBoxes: MatchBox[]
-) {
+function findExistenceForGridPoint(point: GridPoint, strongBoxes: MatchBox[]) {
   return strongBoxes.some((b) => {
     const cx = b.x + b.w / 2;
     const cy = b.y + b.h / 2;
@@ -543,6 +533,8 @@ function sampleGridPointScore(
   const sceneH = sceneProcessedGray.rows;
   const tplW = sampleProcessedGray.cols;
   const tplH = sampleProcessedGray.rows;
+
+  if (tplW >= sceneW || tplH >= sceneH) return 0;
 
   const cxPx = Math.round(point.cx * sceneW);
   const cyPx = Math.round(point.cy * sceneH);
@@ -574,7 +566,7 @@ export default function ReviewPage() {
   const [captureDebugInfo, setCaptureDebugInfo] = useState<CaptureDebugInfo | null>(null);
 
   const [missingOn, setMissingOn] = useState(true);
-  const [missingCandidateThreshold, setMissingCandidateThreshold] = useState(0.30);
+  const [missingCandidateThreshold, setMissingCandidateThreshold] = useState(0.3);
   const [showDeleteFor, setShowDeleteFor] = useState<string | null>(null);
   const [samplesLoaded, setSamplesLoaded] = useState(false);
 
@@ -747,38 +739,6 @@ export default function ReviewPage() {
   }, [compareResolution, samplesLoaded]);
 
   useEffect(() => {
-    localStorage.setItem(MATCH_THRESHOLD_KEY, String(matchThreshold));
-  }, [matchThreshold]);
-
-  useEffect(() => {
-    localStorage.setItem(BASE_THRESHOLD_KEY, String(baseThreshold));
-  }, [baseThreshold]);
-
-  useEffect(() => {
-    localStorage.setItem(SENSITIVITY_KEY, String(sensitivity));
-  }, [sensitivity]);
-
-  useEffect(() => {
-    localStorage.setItem(ROTATION_RANGE_KEY, String(rotationRange));
-  }, [rotationRange]);
-
-  useEffect(() => {
-    localStorage.setItem(SCALE_RANGE_KEY, String(scaleRange));
-  }, [scaleRange]);
-
-  useEffect(() => {
-    localStorage.setItem(SHEAR_RANGE_KEY, String(shearRange));
-  }, [shearRange]);
-
-  useEffect(() => {
-    localStorage.setItem(RESOLUTION_KEY, String(compareResolution));
-  }, [compareResolution]);
-
-  useEffect(() => {
-    localStorage.setItem(HIT_LIMIT_KEY, String(hitLimit));
-  }, [hitLimit]);
-
-  useEffect(() => {
     return () => {
       if (thresholdApplyTimerRef.current !== null) {
         window.clearTimeout(thresholdApplyTimerRef.current);
@@ -811,12 +771,7 @@ export default function ReviewPage() {
   };
 
   const applyDirectThresholdChange = (nextThresholdRaw: number) => {
-    const nextBase = clamp(
-      Number(nextThresholdRaw.toFixed(2)),
-      UI_THRESHOLD_MIN,
-      UI_THRESHOLD_MAX
-    );
-
+    const nextBase = clamp(Number(nextThresholdRaw.toFixed(2)), UI_THRESHOLD_MIN, UI_THRESHOLD_MAX);
     setDraftThreshold(nextBase);
     setBaseThreshold(nextBase);
     setSensitivity(50);
@@ -920,7 +875,7 @@ export default function ReviewPage() {
       window.clearTimeout(t1);
       window.clearTimeout(t2);
     };
-  }, [mainPreviewUrl, displayBasis, matchBoxes, candidatePoints, missingCandidates]);
+  }, [mainPreviewUrl, displayBasis, matchBoxes, candidatePoints, missingCandidates, gridPoints]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1012,7 +967,6 @@ export default function ReviewPage() {
 
         for (const gp of grid) {
           const score = sampleGridPointScore(cv, sceneProcessedGray, sampleProcessedGray, gp);
-
           const pointWithScore: GridPoint = { ...gp, score };
           const exists = findExistenceForGridPoint(pointWithScore, strong);
 
@@ -1027,9 +981,8 @@ export default function ReviewPage() {
           if (box.x + box.w > 1) box.x = Math.max(0, 1 - box.w);
           if (box.y + box.h > 1) box.y = Math.max(0, 1 - box.h);
 
-          if (exists) {
-            continue;
-          } else if (score >= missingCandidateThreshold && score < matchThreshold) {
+          if (exists) continue;
+          if (score >= missingCandidateThreshold && score < matchThreshold) {
             candidateBoxes.push(box);
           } else {
             missingBoxes.push(box);
@@ -1076,6 +1029,14 @@ export default function ReviewPage() {
     missingOn,
   ]);
 
+  const gridLineXs = useMemo(() => {
+    return Array.from(new Set(gridPoints.map((p) => Number(p.cx.toFixed(4))))).sort((a, b) => a - b);
+  }, [gridPoints]);
+
+  const gridLineYs = useMemo(() => {
+    return Array.from(new Set(gridPoints.map((p) => Number(p.cy.toFixed(4))))).sort((a, b) => a - b);
+  }, [gridPoints]);
+
   const handleMissingToggle = () => {
     const next = !missingOn;
     setMissingOn(next);
@@ -1086,8 +1047,7 @@ export default function ReviewPage() {
     applyDirectThresholdChange(draftThreshold + delta);
   };
 
-  const reversedDraftThreshold =
-    UI_THRESHOLD_MAX + UI_THRESHOLD_MIN - draftThreshold;
+  const reversedDraftThreshold = UI_THRESHOLD_MAX + UI_THRESHOLD_MIN - draftThreshold;
 
   const sleep = (ms: number) =>
     new Promise<void>((resolve) => window.setTimeout(resolve, ms));
@@ -1155,10 +1115,37 @@ export default function ReviewPage() {
     });
 
     if (missingOn) {
-      ctx.setLineDash([14, 10]);
-      ctx.lineWidth = Math.max(3, Math.round(Math.min(canvas.width, canvas.height) * 0.004));
-      ctx.strokeStyle = "#fb7185";
+      ctx.strokeStyle = "rgba(255,255,255,0.28)";
+      ctx.lineWidth = 1;
 
+      for (const x of gridLineXs) {
+        const xx = Math.round(x * canvas.width);
+        ctx.beginPath();
+        ctx.moveTo(xx, 0);
+        ctx.lineTo(xx, canvas.height);
+        ctx.stroke();
+      }
+
+      for (const y of gridLineYs) {
+        const yy = Math.round(y * canvas.height);
+        ctx.beginPath();
+        ctx.moveTo(0, yy);
+        ctx.lineTo(canvas.width, yy);
+        ctx.stroke();
+      }
+
+      ctx.setLineDash([10, 8]);
+      ctx.lineWidth = Math.max(2, Math.round(Math.min(canvas.width, canvas.height) * 0.003));
+      ctx.strokeStyle = "#fbbf24";
+      candidatePoints.forEach((box) => {
+        const x = Math.round(box.x * canvas.width);
+        const y = Math.round(box.y * canvas.height);
+        const w = Math.round(box.w * canvas.width);
+        const h = Math.round(box.h * canvas.height);
+        ctx.strokeRect(x, y, w, h);
+      });
+
+      ctx.strokeStyle = "#fb7185";
       missingCandidates.forEach((box) => {
         const x = Math.round(box.x * canvas.width);
         const y = Math.round(box.y * canvas.height);
@@ -1302,7 +1289,7 @@ export default function ReviewPage() {
             min={UI_THRESHOLD_MIN}
             max={UI_THRESHOLD_MAX}
             step={0.01}
-            value={UI_THRESHOLD_MAX + UI_THRESHOLD_MIN - draftThreshold}
+            value={reversedDraftThreshold}
             onChange={(e) => {
               const raw = Number(e.target.value);
               const restored = UI_THRESHOLD_MAX + UI_THRESHOLD_MIN - raw;
@@ -1332,9 +1319,7 @@ export default function ReviewPage() {
             step={0.01}
             value={missingCandidateThreshold}
             onChange={(e) =>
-              setMissingCandidateThreshold(
-                clamp(Number(Number(e.target.value).toFixed(2)), 0.05, 0.95)
-              )
+              setMissingCandidateThreshold(clamp(Number(Number(e.target.value).toFixed(2)), 0.05, 0.95))
             }
             className="flex-1"
           />
@@ -1501,6 +1486,38 @@ export default function ReviewPage() {
                 />
               ))}
 
+              {missingOn &&
+                gridLineXs.map((x, i) => (
+                  <div
+                    key={`grid-x-${i}-${x}`}
+                    className="absolute pointer-events-none"
+                    style={{
+                      left: imageRect.left + imageRect.width * x,
+                      top: imageRect.top,
+                      width: 1,
+                      height: imageRect.height,
+                      background: "rgba(255,255,255,0.28)",
+                    }}
+                    title="格子線"
+                  />
+                ))}
+
+              {missingOn &&
+                gridLineYs.map((y, i) => (
+                  <div
+                    key={`grid-y-${i}-${y}`}
+                    className="absolute pointer-events-none"
+                    style={{
+                      left: imageRect.left,
+                      top: imageRect.top + imageRect.height * y,
+                      width: imageRect.width,
+                      height: 1,
+                      background: "rgba(255,255,255,0.28)",
+                    }}
+                    title="格子線"
+                  />
+                ))}
+
               {candidatePoints.map((box, i) => (
                 <div
                   key={`candidate-${i}-${box.x}-${box.y}`}
@@ -1614,8 +1631,7 @@ export default function ReviewPage() {
       <div className="px-4 pb-3">
         <div className="grid grid-cols-3 gap-3">
           {samples.map((sample) => {
-            const ratio =
-              sample.aspectRatio && sample.aspectRatio > 0 ? sample.aspectRatio : 1;
+            const ratio = sample.aspectRatio && sample.aspectRatio > 0 ? sample.aspectRatio : 1;
             const thumbW = Math.max(40, Math.min(72, Math.round(40 * ratio)));
             const selected = selectedSampleId === sample.id;
 
