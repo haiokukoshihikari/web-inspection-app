@@ -1134,6 +1134,25 @@ export default function ReviewPage() {
         ctx.stroke();
       }
 
+      ctx.strokeStyle = "rgba(255,255,255,0.28)";
+      ctx.lineWidth = 1;
+
+      for (const x of gridLineXs) {
+        const xx = Math.round(x * canvas.width);
+        ctx.beginPath();
+        ctx.moveTo(xx, 0);
+        ctx.lineTo(xx, canvas.height);
+        ctx.stroke();
+      }
+
+      for (const y of gridLineYs) {
+        const yy = Math.round(y * canvas.height);
+        ctx.beginPath();
+        ctx.moveTo(0, yy);
+        ctx.lineTo(canvas.width, yy);
+        ctx.stroke();
+      }
+
       ctx.setLineDash([10, 8]);
       ctx.lineWidth = Math.max(2, Math.round(Math.min(canvas.width, canvas.height) * 0.003));
       ctx.strokeStyle = "#fbbf24";
