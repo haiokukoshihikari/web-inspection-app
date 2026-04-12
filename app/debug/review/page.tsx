@@ -25,6 +25,7 @@ const HIT_LIMIT_KEY = "inspection:hitLimit";
 const AUTO_SAVE_KEY = "inspection:autoSaveOn";
 const MISSING_CANDIDATE_THRESHOLD_KEY = "inspection:missingCandidateThreshold";
 const PENDING_SELECTED_SAMPLE_ID_KEY = "inspection:pendingSelectedSampleId";
+const PROFILE_EXPORT_COUNTER_PREFIX = "inspection:profileExportCounter:";
 
 const UI_THRESHOLD_MIN = 0.25;
 const UI_THRESHOLD_MAX = 0.74;
@@ -1431,6 +1432,63 @@ const drawPolylineCanvas = (
     }
   };
 
+
+  const pad3 = (n: number) => String(n).padStart(3, "0");
+
+  const nextProfileVersion = () => {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, "0");
+    const d = String(now.getDate()).padStart(2, "0");
+    const datePart = `${y}${m}${d}`;
+    const counterKey = `${PROFILE_EXPORT_COUNTER_PREFIX}${datePart}`;
+
+    let next = 1;
+    try {
+      const raw = localStorage.getItem(counterKey);
+      const parsed = raw ? Number(raw) : 0;
+      if (Number.isFinite(parsed) && parsed > 0) next = parsed + 1;
+      localStorage.setItem(counterKey, String(next));
+    } catch {}
+
+    return `${datePart}-${pad3(next)}`;
+  };
+
+  const handleExportProfile = () => {
+    const nameInput = window.prompt("設定名を入力してください", "default");
+    if (nameInput === null) return;
+
+    const profileName = (nameInput || "default").trim() || "default";
+    const version = nextProfileVersion();
+
+    const profile = {
+      profileName,
+      version,
+      baseThreshold: Number(baseThreshold.toFixed(2)),
+      missingCandidateThreshold: Number(missingCandidateThreshold.toFixed(2)),
+      rotationRange,
+      scaleRange,
+      shearRange,
+      compareResolution,
+      hitLimit,
+    };
+
+    const json = JSON.stringify(profile, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+
+    try {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `inspection-profile-${profileName}-${version}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } finally {
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  };
+
   const canAdd = useMemo(() => samples.length < MAX_SAMPLES, [samples.length]);
 
   return (
@@ -1575,6 +1633,13 @@ const drawPolylineCanvas = (
             />
           </button>
         </div>
+
+        <button
+          onClick={handleExportProfile}
+          className="w-full rounded-2xl border border-sky-400/30 bg-sky-500/10 px-4 py-3 text-sm font-medium text-sky-200"
+        >
+          設定を書き出す
+        </button>
 
         <div className="text-xs text-zinc-400">{cvStatus}</div>
         {cvError ? <div className="text-xs text-rose-400">{cvError}</div> : null}
