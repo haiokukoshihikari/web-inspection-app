@@ -24,6 +24,7 @@ const RESOLUTION_KEY = "inspection:compareResolution";
 const HIT_LIMIT_KEY = "inspection:hitLimit";
 const AUTO_SAVE_KEY = "inspection:autoSaveOn";
 const MISSING_CANDIDATE_THRESHOLD_KEY = "inspection:missingCandidateThreshold";
+const PENDING_SELECTED_SAMPLE_ID_KEY = "inspection:pendingSelectedSampleId";
 
 const UI_THRESHOLD_MIN = 0.25;
 const UI_THRESHOLD_MAX = 0.74;
@@ -751,6 +752,8 @@ export default function ReviewPage() {
   const [matchThreshold, setMatchThreshold] = useState(0.5);
   const [draftThreshold, setDraftThreshold] = useState(0.5);
   const [sensitivity, setSensitivity] = useState(50);
+  const [draftMissingCandidateThreshold, setDraftMissingCandidateThreshold] = useState(0.3);
+  const [appliedMissingCandidateThreshold, setAppliedMissingCandidateThreshold] = useState(0.3);
 
   const [rotationRange, setRotationRange] = useState<RotationRangeMode>(0);
   const [scaleRange, setScaleRange] = useState<ScaleRangeMode>(0);
@@ -791,7 +794,9 @@ export default function ReviewPage() {
       if (savedCandidateThreshold !== null) {
         const n = Number(savedCandidateThreshold);
         if (Number.isFinite(n)) {
-          setMissingCandidateThreshold(clamp(Number(n.toFixed(2)), 0.05, 0.95));
+          const nextCandidateThreshold = clamp(Number(n.toFixed(2)), 0.05, 0.95);
+          setDraftMissingCandidateThreshold(nextCandidateThreshold);
+          setAppliedMissingCandidateThreshold(nextCandidateThreshold);
         }
       }
 
@@ -801,7 +806,14 @@ export default function ReviewPage() {
       const savedSamples = localStorage.getItem(SAMPLES_KEY);
       if (savedSamples) {
         const parsed = JSON.parse(savedSamples);
-        if (Array.isArray(parsed)) setSamples(parsed);
+        if (Array.isArray(parsed)) {
+          setSamples(parsed);
+          const pendingSelectedId = sessionStorage.getItem(PENDING_SELECTED_SAMPLE_ID_KEY);
+          if (pendingSelectedId && parsed.some((item: SampleItem) => item.id === pendingSelectedId)) {
+            setSelectedSampleId(pendingSelectedId);
+            sessionStorage.removeItem(PENDING_SELECTED_SAMPLE_ID_KEY);
+          }
+        }
       }
 
       const savedBaseThreshold = localStorage.getItem(BASE_THRESHOLD_KEY);
@@ -872,8 +884,8 @@ export default function ReviewPage() {
   }, [samples, samplesLoaded]);
 
   useEffect(() => {
-    localStorage.setItem(MISSING_CANDIDATE_THRESHOLD_KEY, String(missingCandidateThreshold));
-  }, [missingCandidateThreshold]);
+    localStorage.setItem(MISSING_CANDIDATE_THRESHOLD_KEY, String(appliedMissingCandidateThreshold));
+  }, [appliedMissingCandidateThreshold]);
 
   useEffect(() => {
     if (!samplesLoaded) return;
@@ -910,21 +922,27 @@ export default function ReviewPage() {
     return clamp(Number((base - (sens - 50) * 0.005).toFixed(3)), 0, 0.99);
   };
 
-  const scheduleThresholdApply = (base: number, sens: number) => {
+  const scheduleRecheckApply = (
+    nextBase: number,
+    nextSensitivity: number,
+    nextMissingCandidateThreshold: number
+  ) => {
     if (thresholdApplyTimerRef.current !== null) {
       window.clearTimeout(thresholdApplyTimerRef.current);
     }
 
     setPendingRecheck(true);
+    setBuildingPreview(false);
 
     thresholdApplyTimerRef.current = window.setTimeout(() => {
-      const nextEffective = effectiveThresholdFrom(base, sens);
+      const nextEffective = effectiveThresholdFrom(nextBase, nextSensitivity);
       setPendingRecheck(false);
       setBuildingPreview(true);
 
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           setMatchThreshold(nextEffective);
+          setAppliedMissingCandidateThreshold(nextMissingCandidateThreshold);
         });
       });
     }, 1000);
@@ -935,13 +953,19 @@ export default function ReviewPage() {
     setDraftThreshold(nextBase);
     setBaseThreshold(nextBase);
     setSensitivity(50);
-    scheduleThresholdApply(nextBase, 50);
+    scheduleRecheckApply(nextBase, 50, draftMissingCandidateThreshold);
   };
 
   const applySensitivityChange = (nextSensitivityRaw: number) => {
     const nextSensitivity = clamp(Math.round(nextSensitivityRaw), 0, 100);
     setSensitivity(nextSensitivity);
-    scheduleThresholdApply(baseThreshold, nextSensitivity);
+    scheduleRecheckApply(baseThreshold, nextSensitivity, draftMissingCandidateThreshold);
+  };
+
+  const applyMissingCandidateThresholdChange = (nextThresholdRaw: number) => {
+    const nextThreshold = clamp(Number(nextThresholdRaw.toFixed(2)), 0.05, 0.95);
+    setDraftMissingCandidateThreshold(nextThreshold);
+    scheduleRecheckApply(baseThreshold, sensitivity, nextThreshold);
   };
 
   useEffect(() => {
@@ -1147,7 +1171,7 @@ export default function ReviewPage() {
           if (box.y + box.h > 1) box.y = Math.max(0, 1 - box.h);
 
           if (exists) continue;
-          if (score >= missingCandidateThreshold && score < matchThreshold) {
+          if (score >= appliedMissingCandidateThreshold && score < matchThreshold) {
             candidateBoxes.push(box);
           } else {
             missingBoxes.push(box);
@@ -1185,7 +1209,7 @@ export default function ReviewPage() {
     capturedImage,
     debugMode,
     matchThreshold,
-    missingCandidateThreshold,
+    appliedMissingCandidateThreshold,
     rotationRange,
     scaleRange,
     shearRange,
@@ -1223,6 +1247,14 @@ const drawPolylineCanvas = (
 
   const adjustDraftThreshold = (delta: number) => {
     applyDirectThresholdChange(draftThreshold + delta);
+  };
+
+  const adjustSensitivity = (delta: number) => {
+    applySensitivityChange(sensitivity + delta);
+  };
+
+  const adjustMissingCandidateThreshold = (delta: number) => {
+    applyMissingCandidateThresholdChange(draftMissingCandidateThreshold + delta);
   };
 
   const reversedDraftThreshold = UI_THRESHOLD_MAX + UI_THRESHOLD_MIN - draftThreshold;
@@ -1327,7 +1359,7 @@ const drawPolylineCanvas = (
   const handleLeaveWithAutoSave = async (path: string) => {
     if (savingOnLeave) return;
 
-    if (!autoSaveOn) {
+    if (!autoSaveOn || path !== "/camera") {
       router.push(path);
       return;
     }
@@ -1424,8 +1456,16 @@ const drawPolylineCanvas = (
           </div>
         ) : null}
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           <div className="text-sm text-zinc-300 shrink-0">感度</div>
+
+          <button
+            onClick={() => adjustSensitivity(-1)}
+            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
+          >
+            -
+          </button>
+
           <input
             type="range"
             min={0}
@@ -1435,6 +1475,14 @@ const drawPolylineCanvas = (
             onChange={(e) => applySensitivityChange(Number(e.target.value))}
             className="flex-1"
           />
+
+          <button
+            onClick={() => adjustSensitivity(1)}
+            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
+          >
+            +
+          </button>
+
           <div className="text-sm w-10 text-right text-zinc-300">{sensitivity}</div>
         </div>
 
@@ -1474,28 +1522,44 @@ const drawPolylineCanvas = (
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           <div className="text-sm text-zinc-300 shrink-0">欠落候補</div>
+
+          <button
+            onClick={() => adjustMissingCandidateThreshold(-0.01)}
+            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
+          >
+            -
+          </button>
+
           <input
             type="range"
             min={0.05}
             max={0.95}
             step={0.01}
-            value={missingCandidateThreshold}
+            value={draftMissingCandidateThreshold}
             onChange={(e) =>
-              setMissingCandidateThreshold(clamp(Number(Number(e.target.value).toFixed(2)), 0.05, 0.95))
+              applyMissingCandidateThresholdChange(Number(e.target.value))
             }
             className="flex-1"
           />
+
+          <button
+            onClick={() => adjustMissingCandidateThreshold(0.01)}
+            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
+          >
+            +
+          </button>
+
           <div className="text-sm w-12 text-right text-zinc-300">
-            {missingCandidateThreshold.toFixed(2)}
+            {draftMissingCandidateThreshold.toFixed(2)}
           </div>
         </div>
 
         <div className="text-[11px] text-zinc-500">
           {`しきい値 ${draftThreshold.toFixed(2)} / 感度 ${sensitivity} / 実適用 ${matchThreshold.toFixed(
             3
-          )} / 候補点下限 ${missingCandidateThreshold.toFixed(2)}`}
+          )} / 候補点下限 ${draftMissingCandidateThreshold.toFixed(2)}`}
         </div>
 
         <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2">
@@ -1899,7 +1963,7 @@ const drawPolylineCanvas = (
       <div className="bg-black px-5 pt-2 pb-6">
         <div className="flex items-center justify-between">
           <button
-            onClick={() => void handleLeaveWithAutoSave("/settings")}
+            onClick={() => router.push("/settings")}
             className="w-11 h-11 rounded-full border border-white/15 bg-white/5 flex flex-col items-center justify-center gap-1"
             aria-label="設定"
           >

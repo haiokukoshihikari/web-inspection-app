@@ -5,9 +5,10 @@ import { useRouter } from "next/navigation";
 
 const SAMPLES_KEY = "inspection:samples";
 const RESOLUTION_KEY = "inspection:compareResolution";
+const PENDING_SELECTED_SAMPLE_ID_KEY = "inspection:pendingSelectedSampleId";
 
 const MAX_SAMPLES = 6;
-const PAGE_VERSION = "add-sample-stable-06";
+const PAGE_VERSION = "add-sample-stable-05";
 
 const MIN_BOX_W = 0.08;
 const MAX_BOX_W = 0.8;
@@ -157,6 +158,7 @@ export default function AddSamplePage() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
+  // 見た目の枠は常に中央固定
   const displayBox = useMemo(() => {
     const maxWidth = Math.max(0, baseRect.width);
     const maxHeight = Math.max(0, baseRect.height);
@@ -175,6 +177,7 @@ export default function AddSamplePage() {
     };
   }, [baseRect, safeBoxWidthRatio, safeBoxHeightRatio]);
 
+  // 固定枠が今どの画像座標を見ているかを毎回計算
   const cropRectImage = useMemo(() => {
     if (!compareBasis.width || !compareBasis.height || !baseRect.width || !baseRect.height) {
       return { x: 0, y: 0, width: 0, height: 0 };
@@ -217,6 +220,7 @@ export default function AddSamplePage() {
     b: { x: number; y: number }
   ) => Math.hypot(a.x - b.x, a.y - b.y);
 
+  // 枠は固定なので、画像が枠から外れない範囲でだけ移動・拡大できる
   const clampPan = (
     nextPanX: number,
     nextPanY: number,
@@ -314,9 +318,9 @@ export default function AddSamplePage() {
         dragRef.current.startScale * (dist / dragRef.current.startDistance);
 
       const nextScale = clamp(rawScale, 1, MAX_IMAGE_SCALE);
-      const next = clampPan(dragRef.current.startPanX, dragRef.current.startPanY, nextScale);
-
       setImageScale(nextScale);
+
+      const next = clampPan(imagePanX, imagePanY, nextScale);
       setImagePanX(next.x);
       setImagePanY(next.y);
     }
@@ -350,7 +354,6 @@ export default function AddSamplePage() {
 
   const handleSave = async () => {
     if (!capturedImage || !compareBasis.width || !compareBasis.height) return;
-    if (!frameRef.current || !imgRef.current) return;
 
     const sourceImg = await loadImage(capturedImage);
     const naturalWidth = sourceImg.naturalWidth;
@@ -369,25 +372,10 @@ export default function AddSamplePage() {
 
     compareCtx.drawImage(sourceImg, 0, 0, compareWidth, compareHeight);
 
-    // 実際に表示されている画像位置から逆算する
-    const frameRect = frameRef.current.getBoundingClientRect();
-    const imgRect = imgRef.current.getBoundingClientRect();
-
-    const boxLeftViewport = frameRect.left + displayBox.left;
-    const boxTopViewport = frameRect.top + displayBox.top;
-
-    const cropLeftOnImage = boxLeftViewport - imgRect.left;
-    const cropTopOnImage = boxTopViewport - imgRect.top;
-
-    let srcX = Math.round((cropLeftOnImage / imgRect.width) * compareWidth);
-    let srcY = Math.round((cropTopOnImage / imgRect.height) * compareHeight);
-    let srcW = Math.round((displayBox.width / imgRect.width) * compareWidth);
-    let srcH = Math.round((displayBox.height / imgRect.height) * compareHeight);
-
-    srcX = clamp(srcX, 0, compareWidth - 1);
-    srcY = clamp(srcY, 0, compareHeight - 1);
-    srcW = clamp(srcW, 1, compareWidth - srcX);
-    srcH = clamp(srcH, 1, compareHeight - srcY);
+    const srcX = clamp(cropRectImage.x, 0, compareWidth - 1);
+    const srcY = clamp(cropRectImage.y, 0, compareHeight - 1);
+    const srcW = clamp(cropRectImage.width, 1, compareWidth - srcX);
+    const srcH = clamp(cropRectImage.height, 1, compareHeight - srcY);
 
     const cropCanvas = document.createElement("canvas");
     cropCanvas.width = srcW;
@@ -451,6 +439,7 @@ export default function AddSamplePage() {
     };
 
     localStorage.setItem(SAMPLES_KEY, JSON.stringify([...existing, nextItem]));
+    sessionStorage.setItem(PENDING_SELECTED_SAMPLE_ID_KEY, nextItem.id);
     router.push("/review");
   };
 
@@ -557,10 +546,6 @@ export default function AddSamplePage() {
 
         <div className="text-center text-xs text-zinc-400">
           1本指で画像移動 / 2本指で拡大縮小 / 枠は中央固定
-        </div>
-
-        <div className="text-center text-[11px] text-zinc-500">
-          {`crop x:${cropRectImage.x} y:${cropRectImage.y} w:${cropRectImage.width} h:${cropRectImage.height}`}
         </div>
 
         <div className="flex items-center justify-center gap-3">
