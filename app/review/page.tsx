@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "review-stable-11";
+const REVIEW_VERSION = "review-stable-12";
 
 const MAX_SAMPLES = 6;
 const MISSING_KEY = "inspection:missingOn";
@@ -72,6 +72,17 @@ type CandidateBox = {
   w: number;
   h: number;
   score: number;
+};
+
+type LinePoint = {
+  x: number;
+  y: number;
+};
+
+type GridModel = {
+  points: GridPoint[];
+  rowLines: LinePoint[][];
+  colLines: LinePoint[][];
 };
 
 type CaptureDebugInfo = {
@@ -460,6 +471,7 @@ function runStrongMatches(params: {
   }
 }
 
+
 function clusterAxis(values: number[], tolerance: number) {
   if (values.length === 0) return [];
   const sorted = [...values].sort((a, b) => a - b);
@@ -477,8 +489,118 @@ function clusterAxis(values: number[], tolerance: number) {
   return groups.map((g) => g.reduce((s, v) => s + v, 0) / g.length);
 }
 
-function buildGridPointsFromStrong(strongBoxes: MatchBox[]): GridPoint[] {
-  if (strongBoxes.length < 4) return [];
+function nearestIndex(values: number[], target: number) {
+  if (values.length === 0) return -1;
+  let best = 0;
+  let bestDist = Math.abs(values[0] - target);
+  for (let i = 1; i < values.length; i++) {
+    const d = Math.abs(values[i] - target);
+    if (d < bestDist) {
+      best = i;
+      bestDist = d;
+    }
+  }
+  return best;
+}
+
+function uniqueSortedLine(points: LinePoint[], axis: "x" | "y") {
+  const sorted = [...points].sort((a, b) => (axis === "x" ? a.x - b.x : a.y - b.y));
+  const out: LinePoint[] = [];
+  for (const p of sorted) {
+    const last = out[out.length - 1];
+    if (!last) {
+      out.push(p);
+      continue;
+    }
+    const same =
+      axis === "x"
+        ? Math.abs(last.x - p.x) < 0.0001 && Math.abs(last.y - p.y) < 0.0001
+        : Math.abs(last.y - p.y) < 0.0001 && Math.abs(last.x - p.x) < 0.0001;
+    if (!same) out.push(p);
+  }
+  return out;
+}
+
+function interpolateYAtX(line: LinePoint[], targetX: number) {
+  if (line.length === 0) return 0;
+  if (line.length === 1) return line[0].y;
+
+  const sorted = uniqueSortedLine(line, "x");
+  if (targetX <= sorted[0].x) {
+    const a = sorted[0];
+    const b = sorted[Math.min(1, sorted.length - 1)];
+    const dx = b.x - a.x;
+    if (Math.abs(dx) < 1e-6) return a.y;
+    const t = (targetX - a.x) / dx;
+    return a.y + (b.y - a.y) * t;
+  }
+
+  const last = sorted.length - 1;
+  if (targetX >= sorted[last].x) {
+    const a = sorted[Math.max(0, last - 1)];
+    const b = sorted[last];
+    const dx = b.x - a.x;
+    if (Math.abs(dx) < 1e-6) return b.y;
+    const t = (targetX - a.x) / dx;
+    return a.y + (b.y - a.y) * t;
+  }
+
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const a = sorted[i];
+    const b = sorted[i + 1];
+    if (targetX >= a.x && targetX <= b.x) {
+      const dx = b.x - a.x;
+      if (Math.abs(dx) < 1e-6) return (a.y + b.y) / 2;
+      const t = (targetX - a.x) / dx;
+      return a.y + (b.y - a.y) * t;
+    }
+  }
+
+  return sorted[0].y;
+}
+
+function interpolateXAtY(line: LinePoint[], targetY: number) {
+  if (line.length === 0) return 0;
+  if (line.length === 1) return line[0].x;
+
+  const sorted = uniqueSortedLine(line, "y");
+  if (targetY <= sorted[0].y) {
+    const a = sorted[0];
+    const b = sorted[Math.min(1, sorted.length - 1)];
+    const dy = b.y - a.y;
+    if (Math.abs(dy) < 1e-6) return a.x;
+    const t = (targetY - a.y) / dy;
+    return a.x + (b.x - a.x) * t;
+  }
+
+  const last = sorted.length - 1;
+  if (targetY >= sorted[last].y) {
+    const a = sorted[Math.max(0, last - 1)];
+    const b = sorted[last];
+    const dy = b.y - a.y;
+    if (Math.abs(dy) < 1e-6) return b.x;
+    const t = (targetY - a.y) / dy;
+    return a.x + (b.x - a.x) * t;
+  }
+
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const a = sorted[i];
+    const b = sorted[i + 1];
+    if (targetY >= a.y && targetY <= b.y) {
+      const dy = b.y - a.y;
+      if (Math.abs(dy) < 1e-6) return (a.x + b.x) / 2;
+      const t = (targetY - a.y) / dy;
+      return a.x + (b.x - a.x) * t;
+    }
+  }
+
+  return sorted[0].x;
+}
+
+function buildGridModelFromStrong(strongBoxes: MatchBox[]): GridModel {
+  if (strongBoxes.length < 4) {
+    return { points: [], rowLines: [], colLines: [] };
+  }
 
   const centers = strongBoxes.map((b) => ({
     cx: b.x + b.w / 2,
@@ -489,19 +611,52 @@ function buildGridPointsFromStrong(strongBoxes: MatchBox[]): GridPoint[] {
 
   const medianW = median(centers.map((c) => c.w));
   const medianH = median(centers.map((c) => c.h));
-  if (!medianW || !medianH) return [];
+  if (!medianW || !medianH) {
+    return { points: [], rowLines: [], colLines: [] };
+  }
 
-  const rowCenters = clusterAxis(centers.map((c) => c.cy), medianH * 0.6);
-  const colCenters = clusterAxis(centers.map((c) => c.cx), medianW * 0.6);
+  const rowCenters = clusterAxis(centers.map((c) => c.cy), medianH * 0.7);
+  const colCenters = clusterAxis(centers.map((c) => c.cx), medianW * 0.7);
+  if (rowCenters.length < 2 || colCenters.length < 2) {
+    return { points: [], rowLines: [], colLines: [] };
+  }
 
-  if (rowCenters.length < 2 || colCenters.length < 2) return [];
+  const rowBuckets: LinePoint[][] = rowCenters.map(() => []);
+  const colBuckets: LinePoint[][] = colCenters.map(() => []);
+
+  for (const c of centers) {
+    const rowIdx = nearestIndex(rowCenters, c.cy);
+    const colIdx = nearestIndex(colCenters, c.cx);
+    if (rowIdx >= 0) rowBuckets[rowIdx].push({ x: c.cx, y: c.cy });
+    if (colIdx >= 0) colBuckets[colIdx].push({ x: c.cx, y: c.cy });
+  }
+
+  const rowLines = rowBuckets
+    .map((row) => uniqueSortedLine(row, "x"))
+    .filter((row) => row.length >= 2);
+
+  const colLines = colBuckets
+    .map((col) => uniqueSortedLine(col, "y"))
+    .filter((col) => col.length >= 2);
+
+  if (rowLines.length < 2 || colLines.length < 2) {
+    return { points: [], rowLines, colLines };
+  }
+
+  const colAnchors = colLines.map((line) => median(line.map((p) => p.x)));
+  const rowAnchors = rowLines.map((line) => median(line.map((p) => p.y)));
 
   const points: GridPoint[] = [];
-  for (const cy of rowCenters) {
-    for (const cx of colCenters) {
+  for (let r = 0; r < rowLines.length; r++) {
+    for (let c = 0; c < colLines.length; c++) {
+      const targetX = colAnchors[c];
+      const targetY = rowAnchors[r];
+      const y = interpolateYAtX(rowLines[r], targetX);
+      const x = interpolateXAtY(colLines[c], targetY);
+
       points.push({
-        cx,
-        cy,
+        cx: clamp01(x),
+        cy: clamp01(y),
         w: medianW,
         h: medianH,
         score: 0,
@@ -509,7 +664,7 @@ function buildGridPointsFromStrong(strongBoxes: MatchBox[]): GridPoint[] {
     }
   }
 
-  return points;
+  return { points, rowLines, colLines };
 }
 
 function findExistenceForGridPoint(point: GridPoint, strongBoxes: MatchBox[]) {
@@ -556,6 +711,7 @@ function sampleGridPointScore(
   }
 }
 
+
 export default function ReviewPage() {
   const router = useRouter();
   const frameRef = useRef<HTMLDivElement | null>(null);
@@ -586,6 +742,8 @@ export default function ReviewPage() {
   const [pendingRecheck, setPendingRecheck] = useState(false);
   const [matchBoxes, setMatchBoxes] = useState<MatchBox[]>([]);
   const [gridPoints, setGridPoints] = useState<GridPoint[]>([]);
+  const [rowLines, setRowLines] = useState<LinePoint[][]>([]);
+  const [colLines, setColLines] = useState<LinePoint[][]>([]);
   const [candidatePoints, setCandidatePoints] = useState<CandidateBox[]>([]);
   const [missingCandidates, setMissingCandidates] = useState<CandidateBox[]>([]);
 
@@ -731,6 +889,8 @@ export default function ReviewPage() {
       setSamplePreviewUrl("");
       setMatchBoxes([]);
       setGridPoints([]);
+      setRowLines([]);
+      setColLines([]);
       setCandidatePoints([]);
       setMissingCandidates([]);
       localStorage.removeItem(SAMPLES_KEY);
@@ -875,7 +1035,7 @@ export default function ReviewPage() {
       window.clearTimeout(t1);
       window.clearTimeout(t2);
     };
-  }, [mainPreviewUrl, displayBasis, matchBoxes, candidatePoints, missingCandidates, gridPoints]);
+  }, [mainPreviewUrl, displayBasis, matchBoxes, candidatePoints, missingCandidates, gridPoints, rowLines, colLines]);
 
   useEffect(() => {
     let cancelled = false;
@@ -920,6 +1080,8 @@ export default function ReviewPage() {
           setSamplePreviewUrl("");
           setMatchBoxes([]);
           setGridPoints([]);
+          setRowLines([]);
+          setColLines([]);
           setCandidatePoints([]);
           setMissingCandidates([]);
           return;
@@ -930,6 +1092,8 @@ export default function ReviewPage() {
           setSamplePreviewUrl("");
           setMatchBoxes([]);
           setGridPoints([]);
+          setRowLines([]);
+          setColLines([]);
           setCandidatePoints([]);
           setMissingCandidates([]);
           return;
@@ -961,7 +1125,8 @@ export default function ReviewPage() {
         sceneProcessedGray = buildProcessedGrayMat(cv, sceneMat, debugMode);
         sampleProcessedGray = buildProcessedGrayMat(cv, sampleMat, debugMode);
 
-        const grid = buildGridPointsFromStrong(strong);
+        const gridModel = buildGridModelFromStrong(strong);
+        const grid = gridModel.points;
         const candidateBoxes: CandidateBox[] = [];
         const missingBoxes: CandidateBox[] = [];
 
@@ -992,6 +1157,8 @@ export default function ReviewPage() {
         if (!cancelled) {
           setMatchBoxes(strong);
           setGridPoints(grid);
+          setRowLines(gridModel.rowLines);
+          setColLines(gridModel.colLines);
           setCandidatePoints(candidateBoxes);
           setMissingCandidates(missingOn ? missingBoxes : []);
         }
@@ -1029,13 +1196,24 @@ export default function ReviewPage() {
     missingOn,
   ]);
 
-  const gridLineXs = useMemo(() => {
-    return Array.from(new Set(gridPoints.map((p) => Number(p.cx.toFixed(4))))).sort((a, b) => a - b);
-  }, [gridPoints]);
+  
+const drawPolylineCanvas = (
+    ctx: CanvasRenderingContext2D,
+    points: LinePoint[],
+    width: number,
+    height: number
+  ) => {
+    if (points.length < 2) return;
+    ctx.beginPath();
+    ctx.moveTo(points[0].x * width, points[0].y * height);
+    for (let i = 1; i < points.length; i++) {
+      ctx.lineTo(points[i].x * width, points[i].y * height);
+    }
+    ctx.stroke();
+  };
 
-  const gridLineYs = useMemo(() => {
-    return Array.from(new Set(gridPoints.map((p) => Number(p.cy.toFixed(4))))).sort((a, b) => a - b);
-  }, [gridPoints]);
+  const polylineToSvgPoints = (points: LinePoint[]) =>
+    points.map((p) => `${p.x * imageRect.width},${p.y * imageRect.height}`).join(" ");
 
   const handleMissingToggle = () => {
     const next = !missingOn;
@@ -1117,41 +1295,8 @@ export default function ReviewPage() {
     if (missingOn) {
       ctx.strokeStyle = "rgba(255,255,255,0.28)";
       ctx.lineWidth = 1;
-
-      for (const x of gridLineXs) {
-        const xx = Math.round(x * canvas.width);
-        ctx.beginPath();
-        ctx.moveTo(xx, 0);
-        ctx.lineTo(xx, canvas.height);
-        ctx.stroke();
-      }
-
-      for (const y of gridLineYs) {
-        const yy = Math.round(y * canvas.height);
-        ctx.beginPath();
-        ctx.moveTo(0, yy);
-        ctx.lineTo(canvas.width, yy);
-        ctx.stroke();
-      }
-
-      ctx.strokeStyle = "rgba(255,255,255,0.28)";
-      ctx.lineWidth = 1;
-
-      for (const x of gridLineXs) {
-        const xx = Math.round(x * canvas.width);
-        ctx.beginPath();
-        ctx.moveTo(xx, 0);
-        ctx.lineTo(xx, canvas.height);
-        ctx.stroke();
-      }
-
-      for (const y of gridLineYs) {
-        const yy = Math.round(y * canvas.height);
-        ctx.beginPath();
-        ctx.moveTo(0, yy);
-        ctx.lineTo(canvas.width, yy);
-        ctx.stroke();
-      }
+      rowLines.forEach((line) => drawPolylineCanvas(ctx, line, canvas.width, canvas.height));
+      colLines.forEach((line) => drawPolylineCanvas(ctx, line, canvas.width, canvas.height));
 
       ctx.setLineDash([10, 8]);
       ctx.lineWidth = Math.max(2, Math.round(Math.min(canvas.width, canvas.height) * 0.003));
@@ -1505,37 +1650,41 @@ export default function ReviewPage() {
                 />
               ))}
 
-              {missingOn &&
-                gridLineXs.map((x, i) => (
-                  <div
-                    key={`grid-x-${i}-${x}`}
-                    className="absolute pointer-events-none"
-                    style={{
-                      left: imageRect.left + imageRect.width * x,
-                      top: imageRect.top,
-                      width: 1,
-                      height: imageRect.height,
-                      background: "rgba(255,255,255,0.28)",
-                    }}
-                    title="格子線"
-                  />
-                ))}
-
-              {missingOn &&
-                gridLineYs.map((y, i) => (
-                  <div
-                    key={`grid-y-${i}-${y}`}
-                    className="absolute pointer-events-none"
-                    style={{
-                      left: imageRect.left,
-                      top: imageRect.top + imageRect.height * y,
-                      width: imageRect.width,
-                      height: 1,
-                      background: "rgba(255,255,255,0.28)",
-                    }}
-                    title="格子線"
-                  />
-                ))}
+              {missingOn && (rowLines.length > 0 || colLines.length > 0) ? (
+                <svg
+                  className="absolute pointer-events-none"
+                  style={{
+                    left: imageRect.left,
+                    top: imageRect.top,
+                    width: imageRect.width,
+                    height: imageRect.height,
+                  }}
+                  viewBox={`0 0 ${imageRect.width} ${imageRect.height}`}
+                >
+                  {rowLines.map((line, i) =>
+                    line.length >= 2 ? (
+                      <polyline
+                        key={`row-line-${i}`}
+                        points={polylineToSvgPoints(line)}
+                        fill="none"
+                        stroke="rgba(255,255,255,0.28)"
+                        strokeWidth="1"
+                      />
+                    ) : null
+                  )}
+                  {colLines.map((line, i) =>
+                    line.length >= 2 ? (
+                      <polyline
+                        key={`col-line-${i}`}
+                        points={polylineToSvgPoints(line)}
+                        fill="none"
+                        stroke="rgba(255,255,255,0.28)"
+                        strokeWidth="1"
+                      />
+                    ) : null
+                  )}
+                </svg>
+              ) : null}
 
               {candidatePoints.map((box, i) => (
                 <div
