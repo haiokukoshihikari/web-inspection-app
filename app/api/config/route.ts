@@ -1,5 +1,4 @@
-import { promises as fs } from "fs";
-import path from "path";
+import { get, put } from "@vercel/blob";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
@@ -17,11 +16,7 @@ type InspectionProfile = {
   hitLimit: number;
 };
 
-const CONFIG_PATH = path.join(
-  process.cwd(),
-  "data",
-  "inspection-profile.json"
-);
+const BLOB_PATHNAME = "config/inspection-profile.json";
 
 const DEFAULT_PROFILE: InspectionProfile = {
   profileName: "default",
@@ -41,7 +36,7 @@ function isFiniteNumber(value: unknown): value is number {
 
 function validateProfile(input: unknown): InspectionProfile {
   if (!input || typeof input !== "object") {
-    throw new Error("設定データがオブジェクトではありません。");
+    throw new Error("設定データが不正です。");
   }
 
   const data = input as Record<string, unknown>;
@@ -95,49 +90,61 @@ function validateProfile(input: unknown): InspectionProfile {
   };
 }
 
-async function ensureConfigFileExists() {
-  const dirPath = path.dirname(CONFIG_PATH);
+async function streamToText(
+  stream: ReadableStream<Uint8Array>
+): Promise<string> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
 
-  await fs.mkdir(dirPath, { recursive: true });
-
-  try {
-    await fs.access(CONFIG_PATH);
-  } catch {
-    await fs.writeFile(
-      CONFIG_PATH,
-      JSON.stringify(DEFAULT_PROFILE, null, 2),
-      "utf-8"
-    );
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    if (value) chunks.push(value);
   }
+
+  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const merged = new Uint8Array(totalLength);
+
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  return new TextDecoder().decode(merged);
 }
 
-async function readConfigFile(): Promise<InspectionProfile> {
-  await ensureConfigFileExists();
+async function readConfig(): Promise<InspectionProfile> {
+  const result = await get(BLOB_PATHNAME, { access: "private" });
 
-  const raw = await fs.readFile(CONFIG_PATH, "utf-8");
+  if (!result || result.statusCode !== 200 || !result.stream) {
+    return DEFAULT_PROFILE;
+  }
+
+  const raw = await streamToText(result.stream);
   const parsed = JSON.parse(raw);
 
   return validateProfile(parsed);
 }
 
-async function writeConfigFile(profile: InspectionProfile) {
-  await ensureConfigFileExists();
-
-  await fs.writeFile(CONFIG_PATH, JSON.stringify(profile, null, 2), "utf-8");
+async function writeConfig(profile: InspectionProfile) {
+  await put(BLOB_PATHNAME, JSON.stringify(profile, null, 2), {
+    access: "private",
+    addRandomSuffix: false,
+    allowOverwrite: true,
+    contentType: "application/json; charset=utf-8",
+  });
 }
 
 export async function GET() {
   try {
-    const profile = await readConfigFile();
-
+    const profile = await readConfig();
     return NextResponse.json(profile, { status: 200 });
   } catch (error) {
     console.error("[GET /api/config] failed:", error);
 
     return NextResponse.json(
-      {
-        message: "共有設定の読み込みに失敗しました。",
-      },
+      { message: "共有設定の読み込みに失敗しました。" },
       { status: 500 }
     );
   }
@@ -148,7 +155,7 @@ export async function POST(request: Request) {
     const body = await request.json();
     const profile = validateProfile(body);
 
-    await writeConfigFile(profile);
+    await writeConfig(profile);
 
     return NextResponse.json(
       {
@@ -165,11 +172,6 @@ export async function POST(request: Request) {
         ? error.message
         : "共有設定の保存に失敗しました。";
 
-    return NextResponse.json(
-      {
-        message,
-      },
-      { status: 400 }
-    );
+    return NextResponse.json({ message }, { status: 400 });
   }
 }
