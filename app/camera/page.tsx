@@ -29,6 +29,7 @@ type InspectionProfile = {
 };
 
 const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
+const SAVE_TOAST_KEY = "inspection-save-toast";
 
 function isInspectionProfile(value: unknown): value is InspectionProfile {
   if (!value || typeof value !== "object") return false
@@ -72,6 +73,7 @@ export default function CameraPage() {
   const [isLandscape, setIsLandscape] = useState(false);
   const [configVersion, setConfigVersion] = useState("--");
   const [sharedProfile, setSharedProfile] = useState<InspectionProfile | null>(null);
+  const [saveToast, setSaveToast] = useState("");
 
   const [saveStep, setSaveStep] = useState<SaveStep>("idle");
 
@@ -198,6 +200,26 @@ export default function CameraPage() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    try {
+      const message = sessionStorage.getItem(SAVE_TOAST_KEY);
+      if (!message) return;
+
+      setSaveToast(message);
+      sessionStorage.removeItem(SAVE_TOAST_KEY);
+
+      const timer = window.setTimeout(() => {
+        setSaveToast("");
+      }, 2200);
+
+      return () => {
+        window.clearTimeout(timer);
+      };
+    } catch (error) {
+      console.error("保存トーストの表示に失敗しました", error);
+    }
   }, []);
 
   useEffect(() => {
@@ -615,6 +637,14 @@ export default function CameraPage() {
               {saveStep === "error" && "エラー"}
               {saveStep === "idle" && "待機中"}
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {saveToast ? (
+        <div className="pointer-events-none absolute bottom-24 left-1/2 z-50 -translate-x-1/2">
+          <div className="rounded-full border border-white/10 bg-black/75 px-4 py-2 text-sm text-white shadow-lg">
+            {saveToast}
           </div>
         </div>
       ) : null}

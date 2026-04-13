@@ -1450,6 +1450,7 @@ const drawPolylineCanvas = (
       setSaveLeavingMessage("");
       sessionStorage.setItem(SAVE_TOAST_KEY, JSON.stringify({ message: "保存しました", tone: "success" }));
       await sleep(200);
+      sessionStorage.setItem(SAVE_TOAST_KEY, "保存しました");
       router.push(path);
     } catch (err: any) {
       console.error(err);
