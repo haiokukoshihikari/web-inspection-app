@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
-const PAGE_VERSION = "camera-stable-08";
 
 type SaveStep =
   | "idle"
@@ -41,22 +40,12 @@ export default function CameraPage() {
   const [errorMsg, setErrorMsg] = useState("");
   const [isCapturing, setIsCapturing] = useState(false);
   const [isLandscape, setIsLandscape] = useState(false);
+  const [configVersion, setConfigVersion] = useState("--");
 
   const [saveStep, setSaveStep] = useState<SaveStep>("idle");
-  const [saveLog, setSaveLog] = useState<string[]>([]);
-  const [lastImageInfo, setLastImageInfo] = useState("");
 
-  const pushSaveLog = useCallback((msg: string) => {
-    setSaveLog((prev) => {
-      const next = [...prev, msg];
-      return next.slice(-10);
-    });
-  }, []);
-
-  const resetSaveDebug = useCallback(() => {
+  const resetSaveState = useCallback(() => {
     setSaveStep("idle");
-    setSaveLog([]);
-    setLastImageInfo("");
   }, []);
 
   const stopCamera = useCallback(() => {
@@ -152,6 +141,32 @@ export default function CameraPage() {
   }, [startCamera, stopCamera]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    const loadConfigVersion = async () => {
+      try {
+        const response = await fetch("/api/config", { cache: "no-store" });
+        if (!response.ok) return;
+
+        const data = await response.json();
+        if (cancelled) return;
+
+        if (data && typeof data.version === "string" && data.version.trim()) {
+          setConfigVersion(data.version.trim());
+        }
+      } catch (error) {
+        console.error("設定versionの取得に失敗しました", error);
+      }
+    };
+
+    void loadConfigVersion();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!mountedRef.current) return;
 
     if (restartTimerRef.current !== null) {
@@ -174,10 +189,9 @@ export default function CameraPage() {
       console.error(message, detail);
       setSaveStep("error");
       setErrorMsg(message);
-      pushSaveLog(`ERROR: ${message}`);
       setIsCapturing(false);
     },
-    [pushSaveLog]
+    []
   );
 
   const saveToSessionStorageSafely = useCallback(
@@ -205,7 +219,6 @@ export default function CameraPage() {
 
         const outCtx = outCanvas.getContext("2d");
         if (!outCtx) {
-          pushSaveLog(`resize fail: ctx unavailable / ${attempt.maxSide}`);
           continue;
         }
 
@@ -215,19 +228,13 @@ export default function CameraPage() {
         try {
           dataUrl = outCanvas.toDataURL("image/jpeg", attempt.quality);
         } catch (err) {
-          pushSaveLog(`toDataURL fail: ${attempt.maxSide}`);
           console.error(err);
           continue;
         }
 
         if (!dataUrl || !dataUrl.startsWith("data:image/")) {
-          pushSaveLog(`invalid dataUrl: ${attempt.maxSide}`);
           continue;
         }
-
-        pushSaveLog(
-          `try save: ${outW}x${outH} / q${attempt.quality} / ${dataUrl.length.toLocaleString()} chars`
-        );
 
         try {
           sessionStorage.setItem("capturedImage", dataUrl);
@@ -250,19 +257,18 @@ export default function CameraPage() {
           };
         } catch (err) {
           console.error(err);
-          pushSaveLog(`sessionStorage fail: ${outW}x${outH}`);
         }
       }
 
       return { ok: false as const };
     },
-    [pushSaveLog]
+    []
   );
 
   const handleCapture = async () => {
     if (!videoRef.current || isCapturing || !isReady) return;
 
-    resetSaveDebug();
+    resetSaveState();
 
     const video = videoRef.current;
     const vw = video.videoWidth;
@@ -278,14 +284,11 @@ export default function CameraPage() {
       setErrorMsg("");
 
       setSaveStep("capture_start");
-      pushSaveLog(`capture start: ${vw}x${vh}`);
-      setLastImageInfo(`video: ${vw}x${vh}`);
 
       setSaveStep("canvas_create");
       const canvas = document.createElement("canvas");
       canvas.width = vw;
       canvas.height = vh;
-      pushSaveLog(`canvas created: ${canvas.width}x${canvas.height}`);
 
       const ctx = canvas.getContext("2d");
       if (!ctx) {
@@ -295,10 +298,8 @@ export default function CameraPage() {
 
       setSaveStep("canvas_draw");
       ctx.drawImage(video, 0, 0, vw, vh);
-      pushSaveLog("canvas draw: ok");
 
       setSaveStep("image_resize");
-      pushSaveLog("resize for storage: start");
 
       setSaveStep("sessionstorage_save");
       const saved = saveToSessionStorageSafely(canvas);
@@ -308,13 +309,8 @@ export default function CameraPage() {
         return;
       }
 
-      setLastImageInfo(
-        `video: ${vw}x${vh} / stored: ${saved.width}x${saved.height} / q${saved.quality} / ${saved.length.toLocaleString()} chars`
-      );
-      pushSaveLog(`saved: ${saved.width}x${saved.height}`);
 
       setSaveStep("navigate_review");
-      pushSaveLog("navigate: /review");
       setSaveStep("done");
 
       router.push("/review");
@@ -331,15 +327,12 @@ export default function CameraPage() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    resetSaveDebug();
+    resetSaveState();
 
     try {
       setErrorMsg("");
       setIsCapturing(true);
       setSaveStep("capture_start");
-      pushSaveLog(`file selected: ${file.name}`);
-      pushSaveLog(`file size: ${file.size.toLocaleString()} bytes`);
-      setLastImageInfo(`file: ${file.name} / ${file.size.toLocaleString()} bytes`);
 
       const reader = new FileReader();
 
@@ -367,7 +360,6 @@ export default function CameraPage() {
 
             setSaveStep("canvas_draw");
             ctx.drawImage(img, 0, 0);
-            pushSaveLog(`image loaded: ${img.naturalWidth}x${img.naturalHeight}`);
 
             setSaveStep("image_resize");
             const saved = saveToSessionStorageSafely(canvas);
@@ -390,13 +382,8 @@ export default function CameraPage() {
               sessionStorage.setItem("captureDebugInfo", JSON.stringify(debugInfo));
             } catch {}
 
-            setLastImageInfo(
-              `file image: ${img.naturalWidth}x${img.naturalHeight} / stored: ${saved.width}x${saved.height} / q${saved.quality} / ${saved.length.toLocaleString()} chars`
-            );
-            pushSaveLog(`saved: ${saved.width}x${saved.height}`);
 
             setSaveStep("navigate_review");
-            pushSaveLog("navigate: /review");
             setSaveStep("done");
 
             router.push("/review");
@@ -576,20 +563,6 @@ export default function CameraPage() {
               {saveStep === "error" && "エラー"}
               {saveStep === "idle" && "待機中"}
             </div>
-
-            {lastImageInfo ? (
-              <div className="mt-2 text-[11px] text-zinc-400 break-all">
-                {lastImageInfo}
-              </div>
-            ) : null}
-
-            {saveLog.length > 0 ? (
-              <div className="mt-3 text-left text-[11px] text-zinc-300 bg-black/40 rounded-lg p-2 max-w-[320px]">
-                {saveLog.map((line, index) => (
-                  <div key={`${index}-${line}`}>{line}</div>
-                ))}
-              </div>
-            ) : null}
           </div>
         </div>
       ) : null}
@@ -605,7 +578,7 @@ export default function CameraPage() {
   return (
     <main className="h-[100dvh] bg-black text-white flex flex-col overflow-hidden">
       <div className="fixed right-2 bottom-2 z-[9999] text-[10px] px-2 py-1 rounded bg-black/70 text-zinc-300 border border-white/10 pointer-events-none">
-        {PAGE_VERSION}
+        {configVersion}
       </div>
 
       <input
