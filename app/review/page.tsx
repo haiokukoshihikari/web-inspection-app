@@ -25,7 +25,6 @@ const HIT_LIMIT_KEY = "inspection:hitLimit";
 const AUTO_SAVE_KEY = "inspection:autoSaveOn";
 const MISSING_CANDIDATE_THRESHOLD_KEY = "inspection:missingCandidateThreshold";
 const PENDING_SELECTED_SAMPLE_ID_KEY = "inspection:pendingSelectedSampleId";
-const PROFILE_EXPORT_COUNTER_PREFIX = "inspection:profileExportCounter:";
 
 const UI_THRESHOLD_MIN = 0.25;
 const UI_THRESHOLD_MAX = 0.74;
@@ -58,6 +57,8 @@ type MatchBox = {
   rotationDeg: number;
   scaleFactor: number;
   shearFactor: number;
+  sampleId?: string;
+  displayColor?: string;
 };
 
 type GridPoint = {
@@ -97,6 +98,38 @@ type CaptureDebugInfo = {
   dataUrlLength: number;
 };
 
+type InspectionProfile = {
+  profileName: string;
+  version: string;
+  baseThreshold: number;
+  missingCandidateThreshold: number;
+  rotationRange: number;
+  scaleRange: number;
+  shearRange: number;
+  compareResolution: number;
+  hitLimit: number;
+};
+
+const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
+
+function isInspectionProfile(value: unknown): value is InspectionProfile {
+  if (!value || typeof value !== "object") return false;
+  const data = value as Record<string, unknown>;
+  return (
+    typeof data.profileName === "string" &&
+    typeof data.version === "string" &&
+    typeof data.baseThreshold === "number" &&
+    typeof data.missingCandidateThreshold === "number" &&
+    typeof data.rotationRange === "number" &&
+    typeof data.scaleRange === "number" &&
+    typeof data.shearRange === "number" &&
+    typeof data.compareResolution === "number" &&
+    typeof data.hitLimit === "number"
+  );
+}
+
+const SAMPLE_DELETE_LONG_PRESS_MS = 500;
+
 const DEBUG_MODES: DebugViewMode[] = ["ORIGINAL", "EDGE"];
 const ROTATION_RANGE_OPTIONS: RotationRangeMode[] = [0, 3, 6, 9];
 const SCALE_RANGE_OPTIONS: ScaleRangeMode[] = [0, 5, 10];
@@ -122,7 +155,7 @@ function median(values: number[]) {
 }
 
 function colorFromIndex(index: number) {
-  const colors = ["#38bdf8", "#34d399", "#f59e0b", "#d946ef", "#06b6d4", "#fb7185"];
+  const colors = ["#60a5fa", "#38bdf8", "#22d3ee", "#3b82f6", "#0ea5e9", "#93c5fd"];
   return colors[index % colors.length];
 }
 
@@ -719,9 +752,11 @@ export default function ReviewPage() {
   const frameRef = useRef<HTMLDivElement | null>(null);
   const prevResolutionRef = useRef<CompareResolutionMode | null>(null);
   const thresholdApplyTimerRef = useRef<number | null>(null);
+  const sampleLongPressTimerRef = useRef<number | null>(null);
 
   const [capturedImage, setCapturedImage] = useState("");
   const [captureDebugInfo, setCaptureDebugInfo] = useState<CaptureDebugInfo | null>(null);
+  const [configVersion, setConfigVersion] = useState("--");
 
   const [missingOn, setMissingOn] = useState(true);
   const [missingCandidateThreshold, setMissingCandidateThreshold] = useState(0.3);
@@ -788,18 +823,41 @@ export default function ReviewPage() {
         setCaptureDebugInfo(parsed);
       }
 
+      const sharedProfileRaw = sessionStorage.getItem(PENDING_SHARED_PROFILE_KEY);
+      if (sharedProfileRaw) {
+        try {
+          const parsed = JSON.parse(sharedProfileRaw);
+          if (isInspectionProfile(parsed)) {
+            setConfigVersion(parsed.version.trim() || "--");
+            setBaseThreshold(parsed.baseThreshold);
+            setDraftThreshold(parsed.baseThreshold);
+            setDraftMissingCandidateThreshold(
+              clamp(Number(parsed.missingCandidateThreshold.toFixed(2)), 0.05, 0.95)
+            );
+            setAppliedMissingCandidateThreshold(
+              clamp(Number(parsed.missingCandidateThreshold.toFixed(2)), 0.05, 0.95)
+            );
+            if ([0, 3, 6, 9].includes(parsed.rotationRange as RotationRangeMode)) {
+              setRotationRange(parsed.rotationRange as RotationRangeMode);
+            }
+            if ([0, 5, 10].includes(parsed.scaleRange as ScaleRangeMode)) {
+              setScaleRange(parsed.scaleRange as ScaleRangeMode);
+            }
+            if ([0, 5, 10].includes(parsed.shearRange as ShearRangeMode)) {
+              setShearRange(parsed.shearRange as ShearRangeMode);
+            }
+            if ([1200, 1600, 2000, 2400].includes(parsed.compareResolution as CompareResolutionMode)) {
+              setCompareResolution(parsed.compareResolution as CompareResolutionMode);
+            }
+            if ([30, 60, 100, 300, 9999].includes(parsed.hitLimit as HitLimitMode)) {
+              setHitLimit(parsed.hitLimit as HitLimitMode);
+            }
+          }
+        } catch {}
+      }
+
       const savedMissing = localStorage.getItem(MISSING_KEY);
       if (savedMissing !== null) setMissingOn(savedMissing === "true");
-
-      const savedCandidateThreshold = localStorage.getItem(MISSING_CANDIDATE_THRESHOLD_KEY);
-      if (savedCandidateThreshold !== null) {
-        const n = Number(savedCandidateThreshold);
-        if (Number.isFinite(n)) {
-          const nextCandidateThreshold = clamp(Number(n.toFixed(2)), 0.05, 0.95);
-          setDraftMissingCandidateThreshold(nextCandidateThreshold);
-          setAppliedMissingCandidateThreshold(nextCandidateThreshold);
-        }
-      }
 
       const savedAutoSave = localStorage.getItem(AUTO_SAVE_KEY);
       if (savedAutoSave !== null) setAutoSaveOn(savedAutoSave === "true");
@@ -809,71 +867,18 @@ export default function ReviewPage() {
         const parsed = JSON.parse(savedSamples);
         if (Array.isArray(parsed)) {
           setSamples(parsed);
-          const pendingSelectedId = sessionStorage.getItem(PENDING_SELECTED_SAMPLE_ID_KEY);
-          if (pendingSelectedId && parsed.some((item: SampleItem) => item.id === pendingSelectedId)) {
-            setSelectedSampleId(pendingSelectedId);
-            sessionStorage.removeItem(PENDING_SELECTED_SAMPLE_ID_KEY);
-          }
         }
       }
 
-      const savedBaseThreshold = localStorage.getItem(BASE_THRESHOLD_KEY);
+      sessionStorage.removeItem(PENDING_SELECTED_SAMPLE_ID_KEY);
+
       const savedSensitivity = localStorage.getItem(SENSITIVITY_KEY);
-
-      let initialBaseThreshold = 0.5;
-      if (savedBaseThreshold !== null) {
-        const n = Number(savedBaseThreshold);
-        if (Number.isFinite(n)) {
-          initialBaseThreshold = clamp(n, UI_THRESHOLD_MIN, UI_THRESHOLD_MAX);
-        }
-      }
-
       let initialSensitivity = 50;
       if (savedSensitivity !== null) {
         const n = Number(savedSensitivity);
         if (Number.isFinite(n)) initialSensitivity = clamp(Math.round(n), 0, 100);
       }
-
-      const initialThreshold = clamp(
-        Number((initialBaseThreshold - (initialSensitivity - 50) * 0.005).toFixed(3)),
-        0,
-        0.99
-      );
-
-      setBaseThreshold(initialBaseThreshold);
-      setDraftThreshold(initialBaseThreshold);
       setSensitivity(initialSensitivity);
-      setMatchThreshold(initialThreshold);
-
-      const savedRotationRange = localStorage.getItem(ROTATION_RANGE_KEY);
-      if (savedRotationRange !== null) {
-        const n = Number(savedRotationRange) as RotationRangeMode;
-        if ([0, 3, 6, 9].includes(n)) setRotationRange(n);
-      }
-
-      const savedScaleRange = localStorage.getItem(SCALE_RANGE_KEY);
-      if (savedScaleRange !== null) {
-        const n = Number(savedScaleRange) as ScaleRangeMode;
-        if ([0, 5, 10].includes(n)) setScaleRange(n);
-      }
-
-      const savedShearRange = localStorage.getItem(SHEAR_RANGE_KEY);
-      if (savedShearRange !== null) {
-        const n = Number(savedShearRange) as ShearRangeMode;
-        if ([0, 5, 10].includes(n)) setShearRange(n);
-      }
-
-      const savedResolution = localStorage.getItem(RESOLUTION_KEY);
-      if (savedResolution !== null) {
-        const n = Number(savedResolution) as CompareResolutionMode;
-        if ([1200, 1600, 2000, 2400].includes(n)) setCompareResolution(n);
-      }
-
-      const savedHitLimit = localStorage.getItem(HIT_LIMIT_KEY);
-      if (savedHitLimit !== null) {
-        const n = Number(savedHitLimit) as HitLimitMode;
-        if ([30, 60, 100, 300, 9999].includes(n)) setHitLimit(n);
-      }
     } catch {}
 
     setSamplesLoaded(true);
@@ -889,6 +894,18 @@ export default function ReviewPage() {
   }, [appliedMissingCandidateThreshold]);
 
   useEffect(() => {
+    localStorage.setItem(MISSING_KEY, String(missingOn));
+  }, [missingOn]);
+
+  useEffect(() => {
+    localStorage.setItem(SENSITIVITY_KEY, String(sensitivity));
+  }, [sensitivity]);
+
+  useEffect(() => {
+    localStorage.setItem(AUTO_SAVE_KEY, String(autoSaveOn));
+  }, [autoSaveOn]);
+
+  useEffect(() => {
     if (!samplesLoaded) return;
 
     if (prevResolutionRef.current === null) {
@@ -898,8 +915,6 @@ export default function ReviewPage() {
 
     if (prevResolutionRef.current !== compareResolution) {
       setSamples([]);
-      setSelectedSampleId(null);
-      setSamplePreviewUrl("");
       setMatchBoxes([]);
       setGridPoints([]);
       setRowLines([]);
@@ -915,6 +930,9 @@ export default function ReviewPage() {
     return () => {
       if (thresholdApplyTimerRef.current !== null) {
         window.clearTimeout(thresholdApplyTimerRef.current);
+      }
+      if (sampleLongPressTimerRef.current !== null) {
+        window.clearTimeout(sampleLongPressTimerRef.current);
       }
     };
   }, []);
@@ -1075,9 +1093,8 @@ export default function ReviewPage() {
       });
 
       let sceneMat: any = null;
-      let sceneProcessedGray: any = null;
-      let sampleMat: any = null;
-      let sampleProcessedGray: any = null;
+      let primarySceneProcessedGray: any = null;
+      let primarySampleProcessedGray: any = null;
 
       try {
         const loadedScene = await imageSrcToMat(cv, capturedImage, compareResolution);
@@ -1094,15 +1111,11 @@ export default function ReviewPage() {
             : buildDebugImageFromSrcMat(cv, sceneMat, debugMode)
         );
 
-        const sample = samples.find(
-          (s) =>
-            s.id === selectedSampleId &&
-            !!s.compareUrl &&
-            s.savedResolution === compareResolution
+        const validSamples = samples.filter(
+          (sample) => !!sample.compareUrl && sample.savedResolution === compareResolution
         );
 
-        if (!sample) {
-          setSamplePreviewUrl("");
+        if (validSamples.length === 0) {
           setMatchBoxes([]);
           setGridPoints([]);
           setRowLines([]);
@@ -1112,89 +1125,110 @@ export default function ReviewPage() {
           return;
         }
 
-        const loadedSample = await imageSrcToMat(cv, sample.compareUrl!, compareResolution);
-        if (!loadedSample) {
-          setSamplePreviewUrl("");
-          setMatchBoxes([]);
-          setGridPoints([]);
-          setRowLines([]);
-          setColLines([]);
-          setCandidatePoints([]);
-          setMissingCandidates([]);
-          return;
-        }
+        const allMatches: MatchBox[] = [];
+        let nextGridPoints: GridPoint[] = [];
+        let nextRowLines: LinePoint[][] = [];
+        let nextColLines: LinePoint[][] = [];
+        let nextCandidatePoints: CandidateBox[] = [];
+        let nextMissingCandidates: CandidateBox[] = [];
 
-        sampleMat = loadedSample.srcMat;
+        for (const [sampleIndex, sample] of validSamples.entries()) {
+          const loadedSample = await imageSrcToMat(cv, sample.compareUrl!, compareResolution);
+          if (!loadedSample) continue;
 
-        setSamplePreviewUrl(
-          debugMode === "ORIGINAL"
-            ? sample.compareUrl!
-            : buildDebugImageFromSrcMat(cv, sampleMat, debugMode)
-        );
+          const sampleMat = loadedSample.srcMat;
 
-        const strong = runStrongMatches({
-          cv,
-          sceneSrcMat: sceneMat,
-          sampleSrcMat: sampleMat,
-          sceneWidth: sceneMat.cols,
-          sceneHeight: sceneMat.rows,
-          debugMode,
-          matchMode: matchMethod,
-          threshold: matchThreshold,
-          rotationRange,
-          scaleRange,
-          shearRange,
-          hitLimit,
-        });
+          try {
+            const color = colorFromIndex(sampleIndex);
 
-        sceneProcessedGray = buildProcessedGrayMat(cv, sceneMat, debugMode);
-        sampleProcessedGray = buildProcessedGrayMat(cv, sampleMat, debugMode);
+            const strong = runStrongMatches({
+              cv,
+              sceneSrcMat: sceneMat,
+              sampleSrcMat: sampleMat,
+              sceneWidth: sceneMat.cols,
+              sceneHeight: sceneMat.rows,
+              debugMode,
+              matchMode: matchMethod,
+              threshold: matchThreshold,
+              rotationRange,
+              scaleRange,
+              shearRange,
+              hitLimit,
+            }).map((box) => ({
+              ...box,
+              sampleId: sample.id,
+              displayColor: color,
+              label: `見本${sampleIndex + 1} / ${box.label}`,
+            }));
 
-        const gridModel = buildGridModelFromStrong(strong);
-        const grid = gridModel.points;
-        const candidateBoxes: CandidateBox[] = [];
-        const missingBoxes: CandidateBox[] = [];
+            allMatches.push(...strong);
 
-        for (const gp of grid) {
-          const score = sampleGridPointScore(cv, sceneProcessedGray, sampleProcessedGray, gp);
-          const pointWithScore: GridPoint = { ...gp, score };
-          const exists = findExistenceForGridPoint(pointWithScore, strong);
+            if (sampleIndex === 0) {
+              primarySceneProcessedGray = buildProcessedGrayMat(cv, sceneMat, debugMode);
+              primarySampleProcessedGray = buildProcessedGrayMat(cv, sampleMat, debugMode);
 
-          const box: CandidateBox = {
-            x: clamp01(pointWithScore.cx - pointWithScore.w / 2),
-            y: clamp01(pointWithScore.cy - pointWithScore.h / 2),
-            w: clamp01(pointWithScore.w),
-            h: clamp01(pointWithScore.h),
-            score,
-          };
+              const gridModel = buildGridModelFromStrong(strong);
+              nextGridPoints = gridModel.points;
+              nextRowLines = gridModel.rowLines;
+              nextColLines = gridModel.colLines;
 
-          if (box.x + box.w > 1) box.x = Math.max(0, 1 - box.w);
-          if (box.y + box.h > 1) box.y = Math.max(0, 1 - box.h);
+              const candidateBoxes: CandidateBox[] = [];
+              const missingBoxes: CandidateBox[] = [];
 
-          if (exists) continue;
-          if (score >= appliedMissingCandidateThreshold && score < matchThreshold) {
-            candidateBoxes.push(box);
-          } else {
-            missingBoxes.push(box);
+              for (const gp of gridModel.points) {
+                const score = sampleGridPointScore(
+                  cv,
+                  primarySceneProcessedGray,
+                  primarySampleProcessedGray,
+                  gp
+                );
+                const pointWithScore: GridPoint = { ...gp, score };
+                const exists = findExistenceForGridPoint(pointWithScore, strong);
+
+                const box: CandidateBox = {
+                  x: clamp01(pointWithScore.cx - pointWithScore.w / 2),
+                  y: clamp01(pointWithScore.cy - pointWithScore.h / 2),
+                  w: clamp01(pointWithScore.w),
+                  h: clamp01(pointWithScore.h),
+                  score,
+                };
+
+                if (box.x + box.w > 1) box.x = Math.max(0, 1 - box.w);
+                if (box.y + box.h > 1) box.y = Math.max(0, 1 - box.h);
+
+                if (exists) continue;
+                if (score >= appliedMissingCandidateThreshold && score < matchThreshold) {
+                  candidateBoxes.push(box);
+                } else {
+                  missingBoxes.push(box);
+                }
+              }
+
+              nextCandidatePoints = candidateBoxes;
+              nextMissingCandidates = missingOn ? missingBoxes : [];
+            }
+          } finally {
+            try {
+              sampleMat?.delete?.();
+            } catch {}
           }
         }
 
         if (!cancelled) {
-          setMatchBoxes(strong);
-          setGridPoints(grid);
-          setRowLines(gridModel.rowLines);
-          setColLines(gridModel.colLines);
-          setCandidatePoints(candidateBoxes);
-          setMissingCandidates(missingOn ? missingBoxes : []);
+          setMatchBoxes(allMatches);
+          setGridPoints(nextGridPoints);
+          setRowLines(nextRowLines);
+          setColLines(nextColLines);
+          setCandidatePoints(nextCandidatePoints);
+          setMissingCandidates(nextMissingCandidates);
         }
       } catch (e) {
         console.error(e);
       } finally {
         try {
           sceneMat?.delete?.();
-          sceneProcessedGray?.delete?.();
-          sampleMat?.delete?.();
-          sampleProcessedGray?.delete?.();
+          primarySceneProcessedGray?.delete?.();
+          primarySampleProcessedGray?.delete?.();
         } catch {}
         if (!cancelled) setBuildingPreview(false);
       }
@@ -1216,7 +1250,6 @@ export default function ReviewPage() {
     shearRange,
     compareResolution,
     hitLimit,
-    selectedSampleId,
     samples,
     missingOn,
   ]);
@@ -1306,7 +1339,7 @@ const drawPolylineCanvas = (
       const y = Math.round(box.y * canvas.height);
       const w = Math.round(box.w * canvas.width);
       const h = Math.round(box.h * canvas.height);
-      const color = colorFromIndex(i);
+      const color = box.displayColor || colorFromIndex(i);
 
       ctx.strokeStyle = color;
       ctx.strokeRect(x, y, w, h);
@@ -1333,7 +1366,7 @@ const drawPolylineCanvas = (
 
       ctx.setLineDash([10, 8]);
       ctx.lineWidth = Math.max(2, Math.round(Math.min(canvas.width, canvas.height) * 0.003));
-      ctx.strokeStyle = "#fbbf24";
+      ctx.strokeStyle = "#f87171";
       candidatePoints.forEach((box) => {
         const x = Math.round(box.x * canvas.width);
         const y = Math.round(box.y * canvas.height);
@@ -1402,8 +1435,6 @@ const drawPolylineCanvas = (
           files,
           title: "inspection images",
         });
-        setSavingOnLeave(false);
-        setSaveLeavingMessage("");
         router.push(path);
         return;
       }
@@ -1417,8 +1448,6 @@ const drawPolylineCanvas = (
         await downloadDataUrl(resultDataUrl, `inspection_result_${stamp}.jpg`);
       }
 
-      setSavingOnLeave(false);
-      setSaveLeavingMessage("");
       await sleep(200);
       router.push(path);
     } catch (err: any) {
@@ -1437,66 +1466,31 @@ const drawPolylineCanvas = (
   };
 
 
-  const pad3 = (n: number) => String(n).padStart(3, "0");
+  const canAdd = useMemo(() => samples.length < MAX_SAMPLES, [samples.length]);
 
-  const nextProfileVersion = () => {
-    const now = new Date();
-    const y = now.getFullYear();
-    const m = String(now.getMonth() + 1).padStart(2, "0");
-    const d = String(now.getDate()).padStart(2, "0");
-    const datePart = `${y}${m}${d}`;
-    const counterKey = `${PROFILE_EXPORT_COUNTER_PREFIX}${datePart}`;
 
-    let next = 1;
-    try {
-      const raw = localStorage.getItem(counterKey);
-      const parsed = raw ? Number(raw) : 0;
-      if (Number.isFinite(parsed) && parsed > 0) next = parsed + 1;
-      localStorage.setItem(counterKey, String(next));
-    } catch {}
-
-    return `${datePart}-${pad3(next)}`;
-  };
-
-  const handleExportProfile = () => {
-    const nameInput = window.prompt("設定名を入力してください", "default");
-    if (nameInput === null) return;
-
-    const profileName = (nameInput || "default").trim() || "default";
-    const version = nextProfileVersion();
-
-    const profile = {
-      profileName,
-      version,
-      baseThreshold: Number(baseThreshold.toFixed(2)),
-      missingCandidateThreshold: Number(missingCandidateThreshold.toFixed(2)),
-      rotationRange,
-      scaleRange,
-      shearRange,
-      compareResolution,
-      hitLimit,
-    };
-
-    const json = JSON.stringify(profile, null, 2);
-    const blob = new Blob([json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-
-    try {
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `inspection-profile-${profileName}-${version}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-    } finally {
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  const clearSampleLongPressTimer = () => {
+    if (sampleLongPressTimerRef.current !== null) {
+      window.clearTimeout(sampleLongPressTimerRef.current);
+      sampleLongPressTimerRef.current = null;
     }
   };
 
-  const canAdd = useMemo(() => samples.length < MAX_SAMPLES, [samples.length]);
+  const beginSampleLongPress = (sampleId: string) => {
+    clearSampleLongPressTimer();
+    sampleLongPressTimerRef.current = window.setTimeout(() => {
+      setShowDeleteFor(sampleId);
+      sampleLongPressTimerRef.current = null;
+    }, SAMPLE_DELETE_LONG_PRESS_MS);
+  };
 
   return (
-    <main className="min-h-screen bg-black text-white flex flex-col">
+    <main
+      className="min-h-screen bg-black text-white flex flex-col"
+      onPointerDown={() => {
+        if (showDeleteFor) setShowDeleteFor(null);
+      }}
+    >
       <Script
         src="/opencv/opencv.js"
         strategy="afterInteractive"
@@ -1507,12 +1501,7 @@ const drawPolylineCanvas = (
         }}
       />
 
-      <div className="fixed right-2 bottom-2 z-[9999] text-[10px] px-2 py-1 rounded bg-black/70 text-zinc-300 border border-white/10 pointer-events-none">
-        {REVIEW_VERSION}
-      </div>
-
       <div className="px-4 pt-4 pb-3 border-b border-zinc-800 bg-zinc-950 space-y-3">
-
         <div className="flex items-center gap-2">
           <div className="text-sm text-zinc-300 shrink-0">感度</div>
 
@@ -1543,82 +1532,6 @@ const drawPolylineCanvas = (
           <div className="text-sm w-10 text-right text-zinc-300">{sensitivity}</div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <div className="text-sm text-zinc-300 shrink-0">しきい値</div>
-
-          <button
-            onClick={() => adjustDraftThreshold(-0.01)}
-            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
-          >
-            -
-          </button>
-
-          <input
-            type="range"
-            min={UI_THRESHOLD_MIN}
-            max={UI_THRESHOLD_MAX}
-            step={0.01}
-            value={reversedDraftThreshold}
-            onChange={(e) => {
-              const raw = Number(e.target.value);
-              const restored = UI_THRESHOLD_MAX + UI_THRESHOLD_MIN - raw;
-              applyDirectThresholdChange(restored);
-            }}
-            className="flex-1"
-          />
-
-          <button
-            onClick={() => adjustDraftThreshold(0.01)}
-            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
-          >
-            +
-          </button>
-
-          <div className="text-sm w-12 text-right text-zinc-300">
-            {draftThreshold.toFixed(2)}
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <div className="text-sm text-zinc-300 shrink-0">欠落候補</div>
-
-          <button
-            onClick={() => adjustMissingCandidateThreshold(-0.01)}
-            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
-          >
-            -
-          </button>
-
-          <input
-            type="range"
-            min={0.05}
-            max={0.95}
-            step={0.01}
-            value={draftMissingCandidateThreshold}
-            onChange={(e) =>
-              applyMissingCandidateThresholdChange(Number(e.target.value))
-            }
-            className="flex-1"
-          />
-
-          <button
-            onClick={() => adjustMissingCandidateThreshold(0.01)}
-            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
-          >
-            +
-          </button>
-
-          <div className="text-sm w-12 text-right text-zinc-300">
-            {draftMissingCandidateThreshold.toFixed(2)}
-          </div>
-        </div>
-
-        <div className="text-[11px] text-zinc-500">
-          {`しきい値 ${draftThreshold.toFixed(2)} / 感度 ${sensitivity} / 実適用 ${matchThreshold.toFixed(
-            3
-          )} / 候補点下限 ${draftMissingCandidateThreshold.toFixed(2)}`}
-        </div>
-
         <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2">
           <div className="text-sm">欠落候補</div>
           <button
@@ -1633,113 +1546,7 @@ const drawPolylineCanvas = (
           </button>
         </div>
 
-        <button
-          onClick={handleExportProfile}
-          className="w-full rounded-2xl border border-sky-400/30 bg-sky-500/10 px-4 py-3 text-sm font-medium text-sky-200"
-        >
-          設定を書き出す
-        </button>
-
-        <div className="text-xs text-zinc-400">{cvStatus}</div>
         {cvError ? <div className="text-xs text-rose-400">{cvError}</div> : null}
-      </div>
-
-      <div className="px-4 pt-3 space-y-2">
-        <div className="flex gap-2 overflow-x-auto pb-1">
-          {DEBUG_MODES.map((mode) => (
-            <button
-              key={mode}
-              onClick={() => setDebugMode(mode)}
-              className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
-                debugMode === mode
-                  ? "bg-white text-black border-white"
-                  : "bg-zinc-900 text-zinc-300 border-zinc-700"
-              }`}
-            >
-              {mode}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex gap-2 overflow-x-auto pb-1">
-          {ROTATION_RANGE_OPTIONS.map((v) => (
-            <button
-              key={v}
-              onClick={() => setRotationRange(v)}
-              className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
-                rotationRange === v
-                  ? "bg-sky-300 text-black border-sky-300"
-                  : "bg-zinc-900 text-zinc-300 border-zinc-700"
-              }`}
-            >
-              {v === 0 ? "ROT 0°" : `ROT ±${v}°`}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex gap-2 overflow-x-auto pb-1">
-          {SCALE_RANGE_OPTIONS.map((v) => (
-            <button
-              key={v}
-              onClick={() => setScaleRange(v)}
-              className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
-                scaleRange === v
-                  ? "bg-amber-300 text-black border-amber-300"
-                  : "bg-zinc-900 text-zinc-300 border-zinc-700"
-              }`}
-            >
-              {v === 0 ? "SCALE 0%" : `SCALE ±${v}%`}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex gap-2 overflow-x-auto pb-1">
-          {SHEAR_RANGE_OPTIONS.map((v) => (
-            <button
-              key={v}
-              onClick={() => setShearRange(v)}
-              className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
-                shearRange === v
-                  ? "bg-violet-300 text-black border-violet-300"
-                  : "bg-zinc-900 text-zinc-300 border-zinc-700"
-              }`}
-            >
-              {v === 0 ? "SHEAR 0%" : `SHEAR ±${v}%`}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex gap-2 overflow-x-auto pb-1">
-          {RESOLUTION_OPTIONS.map((v) => (
-            <button
-              key={v}
-              onClick={() => setCompareResolution(v)}
-              className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
-                compareResolution === v
-                  ? "bg-teal-300 text-black border-teal-300"
-                  : "bg-zinc-900 text-zinc-300 border-zinc-700"
-              }`}
-            >
-              {v}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex gap-2 overflow-x-auto pb-1">
-          {HIT_LIMIT_OPTIONS.map((v) => (
-            <button
-              key={v}
-              onClick={() => setHitLimit(v)}
-              className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
-                hitLimit === v
-                  ? "bg-rose-300 text-black border-rose-300"
-                  : "bg-zinc-900 text-zinc-300 border-zinc-700"
-              }`}
-            >
-              {v === 9999 ? "MAX" : `${v}`}
-            </button>
-          ))}
-        </div>
       </div>
 
       <div className="flex-1 p-4 space-y-4">
@@ -1765,14 +1572,14 @@ const drawPolylineCanvas = (
 
               {matchBoxes.map((box, i) => (
                 <div
-                  key={`${i}-${box.x}-${box.y}-${box.score}-${box.rotationDeg}-${box.scaleFactor}-${box.shearFactor}`}
+                  key={`${box.sampleId || "sample"}-${i}-${box.x}-${box.y}-${box.score}-${box.rotationDeg}-${box.scaleFactor}-${box.shearFactor}`}
                   className="absolute border-[3px] rounded-md pointer-events-none"
                   style={{
                     left: imageRect.left + imageRect.width * box.x,
                     top: imageRect.top + imageRect.height * box.y,
                     width: imageRect.width * box.w,
                     height: imageRect.height * box.h,
-                    borderColor: colorFromIndex(i),
+                    borderColor: box.displayColor || colorFromIndex(i),
                   }}
                   title={box.label}
                 />
@@ -1795,7 +1602,7 @@ const drawPolylineCanvas = (
                         key={`row-line-${i}`}
                         points={polylineToSvgPoints(line)}
                         fill="none"
-                        stroke="rgba(255,255,255,0.28)"
+                        stroke="rgba(255,255,255,0.22)"
                         strokeWidth="1"
                       />
                     ) : null
@@ -1806,7 +1613,7 @@ const drawPolylineCanvas = (
                         key={`col-line-${i}`}
                         points={polylineToSvgPoints(line)}
                         fill="none"
-                        stroke="rgba(255,255,255,0.28)"
+                        stroke="rgba(255,255,255,0.22)"
                         strokeWidth="1"
                       />
                     ) : null
@@ -1817,14 +1624,14 @@ const drawPolylineCanvas = (
               {candidatePoints.map((box, i) => (
                 <div
                   key={`candidate-${i}-${box.x}-${box.y}`}
-                  className="absolute rounded-md pointer-events-none border-[2px] border-dashed border-amber-300"
+                  className="absolute rounded-md pointer-events-none border-[2px] border-dashed border-rose-400"
                   style={{
                     left: imageRect.left + imageRect.width * box.x,
                     top: imageRect.top + imageRect.height * box.y,
                     width: imageRect.width * box.w,
                     height: imageRect.height * box.h,
                   }}
-                  title={`候補点 ${box.score.toFixed(3)}`}
+                  title={`欠落候補 ${box.score.toFixed(3)}`}
                 />
               ))}
 
@@ -1856,83 +1663,54 @@ const drawPolylineCanvas = (
                 <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/50">
                   <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
                     <div className="text-lg font-semibold">検査中…</div>
-                    <div className="mt-1 text-sm text-zinc-300">条件変更を反映しています</div>
+                    <div className="mt-1 text-sm text-zinc-300">画像を確認しています</div>
                   </div>
                 </div>
               ) : null}
 
-              <div className="absolute left-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10">
-                {`MAIN: ${debugMode}`}
-              </div>
+              {savingOnLeave ? (
+                <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/55">
+                  <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
+                    <div className="text-lg font-semibold">保存中…</div>
+                    <div className="mt-1 text-sm text-zinc-300">
+                      {saveLeavingMessage || "画像を保存しています"}
+                    </div>
+                  </div>
+                </div>
+              ) : null}
 
               <div className="absolute right-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10">
-                {`存在点 ${matchBoxes.length} / 格子点 ${gridPoints.length} / 候補点 ${candidatePoints.length} / 欠落候補 ${missingCandidates.length}`}
+                {configVersion !== "--" ? configVersion : REVIEW_VERSION}
               </div>
             </>
           ) : (
             <div className="text-zinc-400">まだ撮影画像がありません</div>
           )}
         </div>
-
-        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-3">
-          <div className="text-sm text-zinc-300 mb-2">
-            選択中の見本: {selectedSampleId ? selectedSampleId : "なし"}
-          </div>
-
-          <div className="w-full h-36 rounded-xl border border-zinc-800 bg-zinc-900 flex items-center justify-center overflow-hidden">
-            {samplePreviewUrl ? (
-              <img
-                src={samplePreviewUrl}
-                alt="見本プレビュー"
-                className="max-w-full max-h-full object-contain block"
-              />
-            ) : (
-              <div className="text-zinc-500 text-sm">
-                見本サムネイルをタップするとここに表示
-              </div>
-            )}
-          </div>
-
-          <div className="mt-2 text-[11px] text-zinc-400">SAMPLE: {debugMode}</div>
-
-          {matchBoxes.length > 0 ? (
-            <div className="mt-3 max-h-32 overflow-auto text-[11px] space-y-1 text-zinc-300">
-              {matchBoxes.slice(0, 12).map((box, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <span
-                    className="inline-block w-3 h-3 rounded-full shrink-0"
-                    style={{ backgroundColor: colorFromIndex(i) }}
-                  />
-                  <span className="truncate">
-                    {box.label} / score {box.score.toFixed(3)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </div>
       </div>
 
       <div className="px-4 pb-3">
         <div className="grid grid-cols-3 gap-3">
-          {samples.map((sample) => {
+          {samples.map((sample, sampleIndex) => {
             const ratio = sample.aspectRatio && sample.aspectRatio > 0 ? sample.aspectRatio : 1;
             const thumbW = Math.max(40, Math.min(72, Math.round(40 * ratio)));
-            const selected = selectedSampleId === sample.id;
 
             return (
-              <div key={sample.id} className="relative overflow-visible isolate">
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setSelectedSampleId((prev) => (prev === sample.id ? null : sample.id));
-                  }}
-                  className={`w-full rounded-2xl border px-2 py-2 flex items-center gap-2 min-w-0 ${
-                    selected ? "border-white bg-zinc-800" : "border-zinc-800 bg-zinc-900"
-                  }`}
-                >
+              <div
+                key={sample.id}
+                className="relative overflow-visible isolate"
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  beginSampleLongPress(sample.id);
+                }}
+                onPointerUp={(e) => {
+                  e.stopPropagation();
+                  clearSampleLongPressTimer();
+                }}
+                onPointerLeave={clearSampleLongPressTimer}
+                onPointerCancel={clearSampleLongPressTimer}
+              >
+                <div className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-2 py-2 flex items-center gap-2 min-w-0">
                   {sample.thumbUrl ? (
                     <div
                       className="relative h-10 shrink-0 rounded-lg overflow-hidden border border-white/10 bg-black flex items-center justify-center"
@@ -1940,7 +1718,7 @@ const drawPolylineCanvas = (
                     >
                       <img
                         src={sample.thumbUrl}
-                        alt="見本"
+                        alt={`見本${sampleIndex + 1}`}
                         className="max-w-full max-h-full object-contain"
                       />
                     </div>
@@ -1949,54 +1727,40 @@ const drawPolylineCanvas = (
                   )}
 
                   <div className="min-w-0 flex flex-col items-start">
-                    <div className="text-sm font-semibold truncate">
-                      {selected ? "SELECTED" : "SAMPLE"}
-                    </div>
-                    <div className="text-[10px] leading-none text-zinc-400 mt-1">
-                      TAP TO PREVIEW
+                    <div className="text-sm font-semibold truncate">見本 {sampleIndex + 1}</div>
+                    <div className="mt-1 flex items-center gap-2 text-[10px] text-zinc-400">
+                      <span
+                        className="inline-block h-2.5 w-2.5 rounded-full"
+                        style={{ backgroundColor: colorFromIndex(sampleIndex) }}
+                      />
+                      <span>長押しで削除</span>
                     </div>
                   </div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setShowDeleteFor(showDeleteFor === sample.id ? null : sample.id);
-                  }}
-                  className="absolute top-1 right-1 z-40 w-7 h-7 rounded-full bg-black/60 border border-white/10 text-white"
-                  aria-label="削除メニュー"
-                >
-                  …
-                </button>
+                </div>
 
                 {showDeleteFor === sample.id ? (
-                  <div className="absolute top-10 right-1 z-50">
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        if (window.confirm("削除しますか？")) {
-                          setSamples((prev) => prev.filter((s) => s.id !== sample.id));
-                          setShowDeleteFor(null);
-                          if (selectedSampleId === sample.id) {
-                            setSelectedSampleId(null);
-                            setSamplePreviewUrl("");
-                            setMatchBoxes([]);
-                            setGridPoints([]);
-                            setCandidatePoints([]);
-                            setMissingCandidates([]);
-                          }
-                        }
-                      }}
-                      className="w-10 h-10 rounded-full bg-rose-500 text-white shadow-lg flex items-center justify-center"
-                      aria-label="見本を削除"
-                    >
-                      ×
-                    </button>
-                  </div>
+                  <button
+                    type="button"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      if (window.confirm("削除しますか？")) {
+                        setSamples((prev) => prev.filter((s) => s.id !== sample.id));
+                        setShowDeleteFor(null);
+                        setMatchBoxes([]);
+                        setGridPoints([]);
+                        setCandidatePoints([]);
+                        setMissingCandidates([]);
+                      } else {
+                        setShowDeleteFor(null);
+                      }
+                    }}
+                    className="absolute -top-2 -right-2 z-50 w-7 h-7 rounded-full bg-rose-500 text-white shadow-lg flex items-center justify-center"
+                    aria-label="見本を削除"
+                  >
+                    ×
+                  </button>
                 ) : null}
               </div>
             );
@@ -2004,7 +1768,10 @@ const drawPolylineCanvas = (
 
           {canAdd ? (
             <button
-              onClick={() => router.push("/add-sample")}
+              onClick={(e) => {
+                e.stopPropagation();
+                router.push("/add-sample");
+              }}
               className="w-full h-14 rounded-2xl border border-dashed border-zinc-700 bg-zinc-900 text-2xl text-zinc-300"
             >
               +
@@ -2016,7 +1783,10 @@ const drawPolylineCanvas = (
       <div className="bg-black px-5 pt-2 pb-6">
         <div className="flex items-center justify-between">
           <button
-            onClick={() => router.push("/settings")}
+            onClick={(e) => {
+              e.stopPropagation();
+              router.push("/settings");
+            }}
             className="w-11 h-11 rounded-full border border-white/15 bg-white/5 flex flex-col items-center justify-center gap-1"
             aria-label="設定"
           >
@@ -2028,7 +1798,10 @@ const drawPolylineCanvas = (
           <div className="flex-1" />
 
           <button
-            onClick={() => void handleLeaveWithAutoSave("/camera")}
+            onClick={(e) => {
+              e.stopPropagation();
+              void handleLeaveWithAutoSave("/camera");
+            }}
             className="w-14 h-14 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center shadow-lg active:scale-[0.98]"
             aria-label="再撮影"
             title="再撮影"
