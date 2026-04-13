@@ -25,6 +25,8 @@ const HIT_LIMIT_KEY = "inspection:hitLimit";
 const AUTO_SAVE_KEY = "inspection:autoSaveOn";
 const MISSING_CANDIDATE_THRESHOLD_KEY = "inspection:missingCandidateThreshold";
 const PENDING_SELECTED_SAMPLE_ID_KEY = "inspection:pendingSelectedSampleId";
+const PROFILE_EXPORT_COUNTER_PREFIX = "inspection:profileExportCounter:";
+const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
 
 const UI_THRESHOLD_MIN = 0.25;
 const UI_THRESHOLD_MAX = 0.74;
@@ -85,6 +87,34 @@ type GridModel = {
   rowLines: LinePoint[][];
   colLines: LinePoint[][];
 };
+
+type InspectionProfile = {
+  profileName: string;
+  version: string;
+  baseThreshold: number;
+  missingCandidateThreshold: number;
+  rotationRange: number;
+  scaleRange: number;
+  shearRange: number;
+  compareResolution: number;
+  hitLimit: number;
+};
+
+function isInspectionProfile(value: unknown): value is InspectionProfile {
+  if (!value || typeof value !== "object") return false;
+  const data = value as Record<string, unknown>;
+  return (
+    typeof data.profileName === "string" &&
+    typeof data.version === "string" &&
+    typeof data.baseThreshold === "number" &&
+    typeof data.missingCandidateThreshold === "number" &&
+    typeof data.rotationRange === "number" &&
+    typeof data.scaleRange === "number" &&
+    typeof data.shearRange === "number" &&
+    typeof data.compareResolution === "number" &&
+    typeof data.hitLimit === "number"
+  );
+}
 
 type CaptureDebugInfo = {
   sourceType: "camera" | "file";
@@ -873,6 +903,62 @@ export default function ReviewPage() {
         const n = Number(savedHitLimit) as HitLimitMode;
         if ([30, 60, 100, 300, 9999].includes(n)) setHitLimit(n);
       }
+
+      const pendingSharedProfileRaw = sessionStorage.getItem(PENDING_SHARED_PROFILE_KEY);
+      if (pendingSharedProfileRaw) {
+        try {
+          const pendingSharedProfile = JSON.parse(pendingSharedProfileRaw) as unknown;
+          if (isInspectionProfile(pendingSharedProfile)) {
+            const nextBaseThreshold = clamp(pendingSharedProfile.baseThreshold, UI_THRESHOLD_MIN, UI_THRESHOLD_MAX);
+            const nextMissingCandidateThreshold = clamp(
+              Number(pendingSharedProfile.missingCandidateThreshold.toFixed(2)),
+              0.05,
+              0.95
+            );
+            const nextRotationRange = [0, 3, 6, 9].includes(pendingSharedProfile.rotationRange)
+              ? (pendingSharedProfile.rotationRange as RotationRangeMode)
+              : 0;
+            const nextScaleRange = [0, 5, 10].includes(pendingSharedProfile.scaleRange)
+              ? (pendingSharedProfile.scaleRange as ScaleRangeMode)
+              : 0;
+            const nextShearRange = [0, 5, 10].includes(pendingSharedProfile.shearRange)
+              ? (pendingSharedProfile.shearRange as ShearRangeMode)
+              : 0;
+            const nextCompareResolution = [1200, 1600, 2000, 2400].includes(pendingSharedProfile.compareResolution)
+              ? (pendingSharedProfile.compareResolution as CompareResolutionMode)
+              : 1200;
+            const nextHitLimit = [30, 60, 100, 300, 9999].includes(pendingSharedProfile.hitLimit)
+              ? (pendingSharedProfile.hitLimit as HitLimitMode)
+              : 30;
+            const nextThreshold = clamp(
+              Number((nextBaseThreshold - (initialSensitivity - 50) * 0.005).toFixed(3)),
+              0,
+              0.99
+            );
+
+            setBaseThreshold(nextBaseThreshold);
+            setDraftThreshold(nextBaseThreshold);
+            setMatchThreshold(nextThreshold);
+            setDraftMissingCandidateThreshold(nextMissingCandidateThreshold);
+            setAppliedMissingCandidateThreshold(nextMissingCandidateThreshold);
+            setRotationRange(nextRotationRange);
+            setScaleRange(nextScaleRange);
+            setShearRange(nextShearRange);
+            setCompareResolution(nextCompareResolution);
+            setHitLimit(nextHitLimit);
+
+            localStorage.setItem(BASE_THRESHOLD_KEY, String(nextBaseThreshold));
+            localStorage.setItem(MISSING_CANDIDATE_THRESHOLD_KEY, String(nextMissingCandidateThreshold));
+            localStorage.setItem(ROTATION_RANGE_KEY, String(nextRotationRange));
+            localStorage.setItem(SCALE_RANGE_KEY, String(nextScaleRange));
+            localStorage.setItem(SHEAR_RANGE_KEY, String(nextShearRange));
+            localStorage.setItem(RESOLUTION_KEY, String(nextCompareResolution));
+            localStorage.setItem(HIT_LIMIT_KEY, String(nextHitLimit));
+          }
+        } catch {} finally {
+          sessionStorage.removeItem(PENDING_SHARED_PROFILE_KEY);
+        }
+      }
     } catch {}
 
     setSamplesLoaded(true);
@@ -886,6 +972,38 @@ export default function ReviewPage() {
   useEffect(() => {
     localStorage.setItem(MISSING_CANDIDATE_THRESHOLD_KEY, String(appliedMissingCandidateThreshold));
   }, [appliedMissingCandidateThreshold]);
+
+  useEffect(() => {
+    localStorage.setItem(BASE_THRESHOLD_KEY, String(baseThreshold));
+  }, [baseThreshold]);
+
+  useEffect(() => {
+    localStorage.setItem(SENSITIVITY_KEY, String(sensitivity));
+  }, [sensitivity]);
+
+  useEffect(() => {
+    localStorage.setItem(ROTATION_RANGE_KEY, String(rotationRange));
+  }, [rotationRange]);
+
+  useEffect(() => {
+    localStorage.setItem(SCALE_RANGE_KEY, String(scaleRange));
+  }, [scaleRange]);
+
+  useEffect(() => {
+    localStorage.setItem(SHEAR_RANGE_KEY, String(shearRange));
+  }, [shearRange]);
+
+  useEffect(() => {
+    localStorage.setItem(RESOLUTION_KEY, String(compareResolution));
+  }, [compareResolution]);
+
+  useEffect(() => {
+    localStorage.setItem(HIT_LIMIT_KEY, String(hitLimit));
+  }, [hitLimit]);
+
+  useEffect(() => {
+    localStorage.setItem(AUTO_SAVE_KEY, String(autoSaveOn));
+  }, [autoSaveOn]);
 
   useEffect(() => {
     if (!samplesLoaded) return;
@@ -1431,6 +1549,63 @@ const drawPolylineCanvas = (
     }
   };
 
+
+  const pad3 = (n: number) => String(n).padStart(3, "0");
+
+  const nextProfileVersion = () => {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, "0");
+    const d = String(now.getDate()).padStart(2, "0");
+    const datePart = `${y}${m}${d}`;
+    const counterKey = `${PROFILE_EXPORT_COUNTER_PREFIX}${datePart}`;
+
+    let next = 1;
+    try {
+      const raw = localStorage.getItem(counterKey);
+      const parsed = raw ? Number(raw) : 0;
+      if (Number.isFinite(parsed) && parsed > 0) next = parsed + 1;
+      localStorage.setItem(counterKey, String(next));
+    } catch {}
+
+    return `${datePart}-${pad3(next)}`;
+  };
+
+  const handleExportProfile = () => {
+    const nameInput = window.prompt("設定名を入力してください", "default");
+    if (nameInput === null) return;
+
+    const profileName = (nameInput || "default").trim() || "default";
+    const version = nextProfileVersion();
+
+    const profile = {
+      profileName,
+      version,
+      baseThreshold: Number(baseThreshold.toFixed(2)),
+      missingCandidateThreshold: Number(missingCandidateThreshold.toFixed(2)),
+      rotationRange,
+      scaleRange,
+      shearRange,
+      compareResolution,
+      hitLimit,
+    };
+
+    const json = JSON.stringify(profile, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+
+    try {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `inspection-profile-${profileName}-${version}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } finally {
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  };
+
   const canAdd = useMemo(() => samples.length < MAX_SAMPLES, [samples.length]);
 
   return (
@@ -1575,6 +1750,13 @@ const drawPolylineCanvas = (
             />
           </button>
         </div>
+
+        <button
+          onClick={handleExportProfile}
+          className="w-full rounded-2xl border border-sky-400/30 bg-sky-500/10 px-4 py-3 text-sm font-medium text-sky-200"
+        >
+          設定を書き出す
+        </button>
 
         <div className="text-xs text-zinc-400">{cvStatus}</div>
         {cvError ? <div className="text-xs text-rose-400">{cvError}</div> : null}

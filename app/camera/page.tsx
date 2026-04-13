@@ -16,6 +16,36 @@ type SaveStep =
   | "done"
   | "error";
 
+type InspectionProfile = {
+  profileName: string;
+  version: string;
+  baseThreshold: number;
+  missingCandidateThreshold: number;
+  rotationRange: number;
+  scaleRange: number;
+  shearRange: number;
+  compareResolution: number;
+  hitLimit: number;
+};
+
+const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
+
+function isInspectionProfile(value: unknown): value is InspectionProfile {
+  if (!value || typeof value !== "object") return false
+  const data = value as Record<string, unknown>;
+  return (
+    typeof data.profileName === "string" &&
+    typeof data.version === "string" &&
+    typeof data.baseThreshold === "number" &&
+    typeof data.missingCandidateThreshold === "number" &&
+    typeof data.rotationRange === "number" &&
+    typeof data.scaleRange === "number" &&
+    typeof data.shearRange === "number" &&
+    typeof data.compareResolution === "number" &&
+    typeof data.hitLimit === "number"
+  );
+}
+
 type CaptureDebugInfo = {
   sourceType: "camera" | "file";
   originalWidth: number;
@@ -41,6 +71,7 @@ export default function CameraPage() {
   const [isCapturing, setIsCapturing] = useState(false);
   const [isLandscape, setIsLandscape] = useState(false);
   const [configVersion, setConfigVersion] = useState("--");
+  const [sharedProfile, setSharedProfile] = useState<InspectionProfile | null>(null);
 
   const [saveStep, setSaveStep] = useState<SaveStep>("idle");
 
@@ -143,7 +174,7 @@ export default function CameraPage() {
   useEffect(() => {
     let cancelled = false;
 
-    const loadConfigVersion = async () => {
+    const loadSharedProfile = async () => {
       try {
         const response = await fetch("/api/config", { cache: "no-store" });
         if (!response.ok) return;
@@ -151,15 +182,18 @@ export default function CameraPage() {
         const data = await response.json();
         if (cancelled) return;
 
-        if (data && typeof data.version === "string" && data.version.trim()) {
-          setConfigVersion(data.version.trim());
+        if (isInspectionProfile(data)) {
+          setSharedProfile(data);
+          if (data.version.trim()) {
+            setConfigVersion(data.version.trim());
+          }
         }
       } catch (error) {
-        console.error("設定versionの取得に失敗しました", error);
+        console.error("共有設定の取得に失敗しました", error);
       }
     };
 
-    void loadConfigVersion();
+    void loadSharedProfile();
 
     return () => {
       cancelled = true;
@@ -265,6 +299,20 @@ export default function CameraPage() {
     []
   );
 
+
+  const savePendingSharedProfile = useCallback(() => {
+    try {
+      if (!sharedProfile) {
+        sessionStorage.removeItem(PENDING_SHARED_PROFILE_KEY);
+        return;
+      }
+
+      sessionStorage.setItem(PENDING_SHARED_PROFILE_KEY, JSON.stringify(sharedProfile));
+    } catch (error) {
+      console.error("共有設定の受け渡し保存に失敗しました", error);
+    }
+  }, [sharedProfile]);
+
   const handleCapture = async () => {
     if (!videoRef.current || isCapturing || !isReady) return;
 
@@ -309,6 +357,8 @@ export default function CameraPage() {
         return;
       }
 
+
+      savePendingSharedProfile();
 
       setSaveStep("navigate_review");
       setSaveStep("done");
@@ -382,6 +432,8 @@ export default function CameraPage() {
               sessionStorage.setItem("captureDebugInfo", JSON.stringify(debugInfo));
             } catch {}
 
+
+            savePendingSharedProfile();
 
             setSaveStep("navigate_review");
             setSaveStep("done");
