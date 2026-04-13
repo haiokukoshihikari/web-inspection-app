@@ -1427,14 +1427,12 @@ const drawPolylineCanvas = (
       if (err?.name === "AbortError") {
         setSavingOnLeave(false);
         setSaveLeavingMessage("");
-        setSaveToast(null);
         return;
       }
 
       alert("画像保存に失敗しました。");
       setSavingOnLeave(false);
       setSaveLeavingMessage("");
-      setSaveToast(null);
     }
   };
 
