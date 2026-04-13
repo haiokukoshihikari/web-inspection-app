@@ -128,7 +128,6 @@ function isInspectionProfile(value: unknown): value is InspectionProfile {
   );
 }
 
-const SAMPLE_DELETE_LONG_PRESS_MS = 500;
 
 const DEBUG_MODES: DebugViewMode[] = ["ORIGINAL", "EDGE"];
 const ROTATION_RANGE_OPTIONS: RotationRangeMode[] = [0, 3, 6, 9];
@@ -752,7 +751,6 @@ export default function ReviewPage() {
   const frameRef = useRef<HTMLDivElement | null>(null);
   const prevResolutionRef = useRef<CompareResolutionMode | null>(null);
   const thresholdApplyTimerRef = useRef<number | null>(null);
-  const sampleLongPressTimerRef = useRef<number | null>(null);
 
   const [capturedImage, setCapturedImage] = useState("");
   const [captureDebugInfo, setCaptureDebugInfo] = useState<CaptureDebugInfo | null>(null);
@@ -1469,21 +1467,6 @@ const drawPolylineCanvas = (
   const canAdd = useMemo(() => samples.length < MAX_SAMPLES, [samples.length]);
 
 
-  const clearSampleLongPressTimer = () => {
-    if (sampleLongPressTimerRef.current !== null) {
-      window.clearTimeout(sampleLongPressTimerRef.current);
-      sampleLongPressTimerRef.current = null;
-    }
-  };
-
-  const beginSampleLongPress = (sampleId: string) => {
-    clearSampleLongPressTimer();
-    sampleLongPressTimerRef.current = window.setTimeout(() => {
-      setShowDeleteFor(sampleId);
-      sampleLongPressTimerRef.current = null;
-    }, SAMPLE_DELETE_LONG_PRESS_MS);
-  };
-
   return (
     <main
       className="min-h-screen bg-black text-white flex flex-col"
@@ -1699,16 +1682,10 @@ const drawPolylineCanvas = (
               <div
                 key={sample.id}
                 className="relative overflow-visible isolate"
-                onPointerDown={(e) => {
+                onClick={(e) => {
                   e.stopPropagation();
-                  beginSampleLongPress(sample.id);
+                  setShowDeleteFor((prev) => (prev === sample.id ? null : sample.id));
                 }}
-                onPointerUp={(e) => {
-                  e.stopPropagation();
-                  clearSampleLongPressTimer();
-                }}
-                onPointerLeave={clearSampleLongPressTimer}
-                onPointerCancel={clearSampleLongPressTimer}
               >
                 <div className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-2 py-2 flex items-center gap-2 min-w-0">
                   {sample.thumbUrl ? (
@@ -1733,7 +1710,6 @@ const drawPolylineCanvas = (
                         className="inline-block h-2.5 w-2.5 rounded-full"
                         style={{ backgroundColor: colorFromIndex(sampleIndex) }}
                       />
-                      <span>長押しで削除</span>
                     </div>
                   </div>
                 </div>
