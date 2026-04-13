@@ -97,6 +97,18 @@ type CaptureDebugInfo = {
   dataUrlLength: number;
 };
 
+type InspectionProfile = {
+  profileName: string;
+  version: string;
+  baseThreshold: number;
+  missingCandidateThreshold: number;
+  rotationRange: RotationRangeMode;
+  scaleRange: ScaleRangeMode;
+  shearRange: ShearRangeMode;
+  compareResolution: CompareResolutionMode;
+  hitLimit: HitLimitMode;
+};
+
 const DEBUG_MODES: DebugViewMode[] = ["ORIGINAL", "EDGE"];
 const ROTATION_RANGE_OPTIONS: RotationRangeMode[] = [0, 3, 6, 9];
 const SCALE_RANGE_OPTIONS: ScaleRangeMode[] = [0, 5, 10];
@@ -766,6 +778,7 @@ export default function ReviewPage() {
   const [savingOnLeave, setSavingOnLeave] = useState(false);
   const [saveLeavingMessage, setSaveLeavingMessage] = useState("");
   const [savingProfile, setSavingProfile] = useState(false);
+  const [loadingProfile, setLoadingProfile] = useState(false);
 
   const [displayBasis, setDisplayBasis] = useState({ width: 0, height: 0 });
   const [imageRect, setImageRect] = useState({
@@ -797,6 +810,7 @@ export default function ReviewPage() {
         const n = Number(savedCandidateThreshold);
         if (Number.isFinite(n)) {
           const nextCandidateThreshold = clamp(Number(n.toFixed(2)), 0.05, 0.95);
+          setMissingCandidateThreshold(nextCandidateThreshold);
           setDraftMissingCandidateThreshold(nextCandidateThreshold);
           setAppliedMissingCandidateThreshold(nextCandidateThreshold);
         }
@@ -886,8 +900,41 @@ export default function ReviewPage() {
   }, [samples, samplesLoaded]);
 
   useEffect(() => {
+    setMissingCandidateThreshold(appliedMissingCandidateThreshold);
     localStorage.setItem(MISSING_CANDIDATE_THRESHOLD_KEY, String(appliedMissingCandidateThreshold));
   }, [appliedMissingCandidateThreshold]);
+
+  useEffect(() => {
+    localStorage.setItem(BASE_THRESHOLD_KEY, String(baseThreshold));
+  }, [baseThreshold]);
+
+  useEffect(() => {
+    localStorage.setItem(SENSITIVITY_KEY, String(sensitivity));
+  }, [sensitivity]);
+
+  useEffect(() => {
+    localStorage.setItem(ROTATION_RANGE_KEY, String(rotationRange));
+  }, [rotationRange]);
+
+  useEffect(() => {
+    localStorage.setItem(SCALE_RANGE_KEY, String(scaleRange));
+  }, [scaleRange]);
+
+  useEffect(() => {
+    localStorage.setItem(SHEAR_RANGE_KEY, String(shearRange));
+  }, [shearRange]);
+
+  useEffect(() => {
+    localStorage.setItem(RESOLUTION_KEY, String(compareResolution));
+  }, [compareResolution]);
+
+  useEffect(() => {
+    localStorage.setItem(HIT_LIMIT_KEY, String(hitLimit));
+  }, [hitLimit]);
+
+  useEffect(() => {
+    localStorage.setItem(AUTO_SAVE_KEY, String(autoSaveOn));
+  }, [autoSaveOn]);
 
   useEffect(() => {
     if (!samplesLoaded) return;
@@ -1462,11 +1509,11 @@ const drawPolylineCanvas = (
     const profileName = (nameInput || "default").trim() || "default";
     const version = nextProfileVersion();
 
-    const profile = {
+    const profile: InspectionProfile = {
       profileName,
       version,
       baseThreshold: Number(baseThreshold.toFixed(2)),
-      missingCandidateThreshold: Number(missingCandidateThreshold.toFixed(2)),
+      missingCandidateThreshold: Number(draftMissingCandidateThreshold.toFixed(2)),
       rotationRange,
       scaleRange,
       shearRange,
@@ -1501,6 +1548,79 @@ const drawPolylineCanvas = (
       );
     } finally {
       setSavingProfile(false);
+    }
+  };
+
+  const handleImportProfile = async () => {
+    setLoadingProfile(true);
+
+    try {
+      const response = await fetch("/api/config", {
+        method: "GET",
+        cache: "no-store",
+      });
+
+      const result = await response.json().catch(() => null);
+
+      if (!response.ok || !result) {
+        throw new Error(result?.message || "共有設定の読み込みに失敗しました。");
+      }
+
+      const profile = result as Partial<InspectionProfile>;
+
+      const nextBaseThreshold = clamp(
+        Number(profile.baseThreshold ?? 0.5),
+        UI_THRESHOLD_MIN,
+        UI_THRESHOLD_MAX
+      );
+      const nextMissingCandidateThreshold = clamp(
+        Number(profile.missingCandidateThreshold ?? 0.3),
+        0.05,
+        0.95
+      );
+      const nextRotationRange = [0, 3, 6, 9].includes(Number(profile.rotationRange))
+        ? (Number(profile.rotationRange) as RotationRangeMode)
+        : 0;
+      const nextScaleRange = [0, 5, 10].includes(Number(profile.scaleRange))
+        ? (Number(profile.scaleRange) as ScaleRangeMode)
+        : 0;
+      const nextShearRange = [0, 5, 10].includes(Number(profile.shearRange))
+        ? (Number(profile.shearRange) as ShearRangeMode)
+        : 0;
+      const nextCompareResolution = [1200, 1600, 2000, 2400].includes(Number(profile.compareResolution))
+        ? (Number(profile.compareResolution) as CompareResolutionMode)
+        : 1200;
+      const nextHitLimit = [30, 60, 100, 300, 9999].includes(Number(profile.hitLimit))
+        ? (Number(profile.hitLimit) as HitLimitMode)
+        : 30;
+
+      setBaseThreshold(nextBaseThreshold);
+      setDraftThreshold(nextBaseThreshold);
+      setSensitivity(50);
+      setMatchThreshold(effectiveThresholdFrom(nextBaseThreshold, 50));
+
+      setMissingCandidateThreshold(nextMissingCandidateThreshold);
+      setDraftMissingCandidateThreshold(nextMissingCandidateThreshold);
+      setAppliedMissingCandidateThreshold(nextMissingCandidateThreshold);
+
+      setRotationRange(nextRotationRange);
+      setScaleRange(nextScaleRange);
+      setShearRange(nextShearRange);
+      setCompareResolution(nextCompareResolution);
+      setHitLimit(nextHitLimit);
+
+      alert(
+        `共有設定を読み込みました。\n${profile.profileName ?? "default"} / ${profile.version ?? "-"}`
+      );
+    } catch (error) {
+      console.error(error);
+      alert(
+        error instanceof Error
+          ? error.message
+          : "共有設定の読み込みに失敗しました。"
+      );
+    } finally {
+      setLoadingProfile(false);
     }
   };
 
@@ -1649,13 +1769,23 @@ const drawPolylineCanvas = (
           </button>
         </div>
 
-        <button
-          onClick={handleExportProfile}
-          disabled={savingProfile}
-          className="w-full rounded-2xl border border-sky-400/30 bg-sky-500/10 px-4 py-3 text-sm font-medium text-sky-200 disabled:opacity-50"
-        >
-          {savingProfile ? "共有設定を保存中..." : "共有設定として保存"}
-        </button>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <button
+            onClick={handleExportProfile}
+            disabled={savingProfile || loadingProfile}
+            className="w-full rounded-2xl border border-sky-400/30 bg-sky-500/10 px-4 py-3 text-sm font-medium text-sky-200 disabled:opacity-50"
+          >
+            {savingProfile ? "共有設定を保存中..." : "共有設定として保存"}
+          </button>
+
+          <button
+            onClick={handleImportProfile}
+            disabled={loadingProfile || savingProfile}
+            className="w-full rounded-2xl border border-emerald-400/30 bg-emerald-500/10 px-4 py-3 text-sm font-medium text-emerald-200 disabled:opacity-50"
+          >
+            {loadingProfile ? "共有設定を読込中..." : "共有設定を読み込む"}
+          </button>
+        </div>
 
         <div className="text-xs text-zinc-400">{cvStatus}</div>
         {cvError ? <div className="text-xs text-rose-400">{cvError}</div> : null}
