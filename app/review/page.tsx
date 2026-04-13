@@ -11,6 +11,7 @@ declare global {
 }
 
 const REVIEW_VERSION = "review-stable-12";
+const SAVE_TOAST_KEY = "inspection-save-toast";
 
 const MAX_SAMPLES = 6;
 const MISSING_KEY = "inspection:missingOn";
@@ -26,7 +27,6 @@ const AUTO_SAVE_KEY = "inspection:autoSaveOn";
 const MISSING_CANDIDATE_THRESHOLD_KEY = "inspection:missingCandidateThreshold";
 const PENDING_SELECTED_SAMPLE_ID_KEY = "inspection:pendingSelectedSampleId";
 const PROFILE_EXPORT_COUNTER_PREFIX = "inspection:profileExportCounter:";
-const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
 
 const UI_THRESHOLD_MIN = 0.25;
 const UI_THRESHOLD_MAX = 0.74;
@@ -87,34 +87,6 @@ type GridModel = {
   rowLines: LinePoint[][];
   colLines: LinePoint[][];
 };
-
-type InspectionProfile = {
-  profileName: string;
-  version: string;
-  baseThreshold: number;
-  missingCandidateThreshold: number;
-  rotationRange: number;
-  scaleRange: number;
-  shearRange: number;
-  compareResolution: number;
-  hitLimit: number;
-};
-
-function isInspectionProfile(value: unknown): value is InspectionProfile {
-  if (!value || typeof value !== "object") return false;
-  const data = value as Record<string, unknown>;
-  return (
-    typeof data.profileName === "string" &&
-    typeof data.version === "string" &&
-    typeof data.baseThreshold === "number" &&
-    typeof data.missingCandidateThreshold === "number" &&
-    typeof data.rotationRange === "number" &&
-    typeof data.scaleRange === "number" &&
-    typeof data.shearRange === "number" &&
-    typeof data.compareResolution === "number" &&
-    typeof data.hitLimit === "number"
-  );
-}
 
 type CaptureDebugInfo = {
   sourceType: "camera" | "file";
@@ -794,6 +766,8 @@ export default function ReviewPage() {
   const [autoSaveOn, setAutoSaveOn] = useState(false);
   const [savingOnLeave, setSavingOnLeave] = useState(false);
   const [saveLeavingMessage, setSaveLeavingMessage] = useState("");
+  const [saveToast, setSaveToast] = useState<{ message: string; tone: "info" | "success" } | null>(null);
+  const saveToastTimerRef = useRef<number | null>(null);
 
   const [displayBasis, setDisplayBasis] = useState({ width: 0, height: 0 });
   const [imageRect, setImageRect] = useState({
@@ -903,62 +877,6 @@ export default function ReviewPage() {
         const n = Number(savedHitLimit) as HitLimitMode;
         if ([30, 60, 100, 300, 9999].includes(n)) setHitLimit(n);
       }
-
-      const pendingSharedProfileRaw = sessionStorage.getItem(PENDING_SHARED_PROFILE_KEY);
-      if (pendingSharedProfileRaw) {
-        try {
-          const pendingSharedProfile = JSON.parse(pendingSharedProfileRaw) as unknown;
-          if (isInspectionProfile(pendingSharedProfile)) {
-            const nextBaseThreshold = clamp(pendingSharedProfile.baseThreshold, UI_THRESHOLD_MIN, UI_THRESHOLD_MAX);
-            const nextMissingCandidateThreshold = clamp(
-              Number(pendingSharedProfile.missingCandidateThreshold.toFixed(2)),
-              0.05,
-              0.95
-            );
-            const nextRotationRange = [0, 3, 6, 9].includes(pendingSharedProfile.rotationRange)
-              ? (pendingSharedProfile.rotationRange as RotationRangeMode)
-              : 0;
-            const nextScaleRange = [0, 5, 10].includes(pendingSharedProfile.scaleRange)
-              ? (pendingSharedProfile.scaleRange as ScaleRangeMode)
-              : 0;
-            const nextShearRange = [0, 5, 10].includes(pendingSharedProfile.shearRange)
-              ? (pendingSharedProfile.shearRange as ShearRangeMode)
-              : 0;
-            const nextCompareResolution = [1200, 1600, 2000, 2400].includes(pendingSharedProfile.compareResolution)
-              ? (pendingSharedProfile.compareResolution as CompareResolutionMode)
-              : 1200;
-            const nextHitLimit = [30, 60, 100, 300, 9999].includes(pendingSharedProfile.hitLimit)
-              ? (pendingSharedProfile.hitLimit as HitLimitMode)
-              : 30;
-            const nextThreshold = clamp(
-              Number((nextBaseThreshold - (initialSensitivity - 50) * 0.005).toFixed(3)),
-              0,
-              0.99
-            );
-
-            setBaseThreshold(nextBaseThreshold);
-            setDraftThreshold(nextBaseThreshold);
-            setMatchThreshold(nextThreshold);
-            setDraftMissingCandidateThreshold(nextMissingCandidateThreshold);
-            setAppliedMissingCandidateThreshold(nextMissingCandidateThreshold);
-            setRotationRange(nextRotationRange);
-            setScaleRange(nextScaleRange);
-            setShearRange(nextShearRange);
-            setCompareResolution(nextCompareResolution);
-            setHitLimit(nextHitLimit);
-
-            localStorage.setItem(BASE_THRESHOLD_KEY, String(nextBaseThreshold));
-            localStorage.setItem(MISSING_CANDIDATE_THRESHOLD_KEY, String(nextMissingCandidateThreshold));
-            localStorage.setItem(ROTATION_RANGE_KEY, String(nextRotationRange));
-            localStorage.setItem(SCALE_RANGE_KEY, String(nextScaleRange));
-            localStorage.setItem(SHEAR_RANGE_KEY, String(nextShearRange));
-            localStorage.setItem(RESOLUTION_KEY, String(nextCompareResolution));
-            localStorage.setItem(HIT_LIMIT_KEY, String(nextHitLimit));
-          }
-        } catch {} finally {
-          sessionStorage.removeItem(PENDING_SHARED_PROFILE_KEY);
-        }
-      }
     } catch {}
 
     setSamplesLoaded(true);
@@ -972,38 +890,6 @@ export default function ReviewPage() {
   useEffect(() => {
     localStorage.setItem(MISSING_CANDIDATE_THRESHOLD_KEY, String(appliedMissingCandidateThreshold));
   }, [appliedMissingCandidateThreshold]);
-
-  useEffect(() => {
-    localStorage.setItem(BASE_THRESHOLD_KEY, String(baseThreshold));
-  }, [baseThreshold]);
-
-  useEffect(() => {
-    localStorage.setItem(SENSITIVITY_KEY, String(sensitivity));
-  }, [sensitivity]);
-
-  useEffect(() => {
-    localStorage.setItem(ROTATION_RANGE_KEY, String(rotationRange));
-  }, [rotationRange]);
-
-  useEffect(() => {
-    localStorage.setItem(SCALE_RANGE_KEY, String(scaleRange));
-  }, [scaleRange]);
-
-  useEffect(() => {
-    localStorage.setItem(SHEAR_RANGE_KEY, String(shearRange));
-  }, [shearRange]);
-
-  useEffect(() => {
-    localStorage.setItem(RESOLUTION_KEY, String(compareResolution));
-  }, [compareResolution]);
-
-  useEffect(() => {
-    localStorage.setItem(HIT_LIMIT_KEY, String(hitLimit));
-  }, [hitLimit]);
-
-  useEffect(() => {
-    localStorage.setItem(AUTO_SAVE_KEY, String(autoSaveOn));
-  }, [autoSaveOn]);
 
   useEffect(() => {
     if (!samplesLoaded) return;
@@ -1474,6 +1360,30 @@ const drawPolylineCanvas = (
     return canvas.toDataURL("image/jpeg", 0.92);
   };
 
+  const showSaveToast = (message: string, tone: "info" | "success" = "info", durationMs = 1800) => {
+    if (saveToastTimerRef.current) {
+      window.clearTimeout(saveToastTimerRef.current);
+      saveToastTimerRef.current = null;
+    }
+
+    setSaveToast({ message, tone });
+
+    if (durationMs > 0) {
+      saveToastTimerRef.current = window.setTimeout(() => {
+        setSaveToast(null);
+        saveToastTimerRef.current = null;
+      }, durationMs);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (saveToastTimerRef.current) {
+        window.clearTimeout(saveToastTimerRef.current);
+      }
+    };
+  }, []);
+
   const handleLeaveWithAutoSave = async (path: string) => {
     if (savingOnLeave) return;
 
@@ -1485,6 +1395,7 @@ const drawPolylineCanvas = (
     try {
       setSavingOnLeave(true);
       setSaveLeavingMessage("共有シートを準備しています");
+      showSaveToast("保存中…", "info", 0);
 
       const now = new Date();
       const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(
@@ -1519,6 +1430,9 @@ const drawPolylineCanvas = (
           files,
           title: "inspection images",
         });
+        setSavingOnLeave(false);
+        setSaveLeavingMessage("");
+        sessionStorage.setItem(SAVE_TOAST_KEY, JSON.stringify({ message: "保存しました", tone: "success" }));
         router.push(path);
         return;
       }
@@ -1532,6 +1446,9 @@ const drawPolylineCanvas = (
         await downloadDataUrl(resultDataUrl, `inspection_result_${stamp}.jpg`);
       }
 
+      setSavingOnLeave(false);
+      setSaveLeavingMessage("");
+      sessionStorage.setItem(SAVE_TOAST_KEY, JSON.stringify({ message: "保存しました", tone: "success" }));
       await sleep(200);
       router.push(path);
     } catch (err: any) {
@@ -1540,12 +1457,14 @@ const drawPolylineCanvas = (
       if (err?.name === "AbortError") {
         setSavingOnLeave(false);
         setSaveLeavingMessage("");
+        setSaveToast(null);
         return;
       }
 
       alert("画像保存に失敗しました。");
       setSavingOnLeave(false);
       setSaveLeavingMessage("");
+      setSaveToast(null);
     }
   };
 
@@ -1625,11 +1544,6 @@ const drawPolylineCanvas = (
       </div>
 
       <div className="px-4 pt-4 pb-3 border-b border-zinc-800 bg-zinc-950 space-y-3">
-        {captureDebugInfo ? (
-          <div className="rounded-xl border border-emerald-400/20 bg-emerald-500/10 px-3 py-2 text-[12px] text-emerald-200">
-            {`保存成功: ${captureDebugInfo.storedWidth}x${captureDebugInfo.storedHeight} / q${captureDebugInfo.quality} / 元 ${captureDebugInfo.originalWidth}x${captureDebugInfo.originalHeight}`}
-          </div>
-        ) : null}
 
         <div className="flex items-center gap-2">
           <div className="text-sm text-zinc-300 shrink-0">感度</div>
@@ -1979,13 +1893,21 @@ const drawPolylineCanvas = (
                 </div>
               ) : null}
 
-              {savingOnLeave ? (
-                <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/55">
-                  <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
-                    <div className="text-lg font-semibold">保存中…</div>
-                    <div className="mt-1 text-sm text-zinc-300">
-                      {saveLeavingMessage || "画像を保存しています"}
-                    </div>
+              {saveToast ? (
+                <div className="pointer-events-none absolute left-1/2 bottom-14 z-20 -translate-x-1/2">
+                  <div
+                    className={`min-w-[180px] rounded-full border px-4 py-2 text-center text-sm shadow-lg backdrop-blur-sm transition-opacity ${
+                      saveToast.tone === "success"
+                        ? "border-emerald-400/30 bg-emerald-500/20 text-emerald-100"
+                        : "border-white/15 bg-black/70 text-zinc-100"
+                    }`}
+                  >
+                    <div className="font-medium">{saveToast.message}</div>
+                    {savingOnLeave ? (
+                      <div className="mt-0.5 text-[11px] text-zinc-300">
+                        {saveLeavingMessage || "画像を保存しています"}
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               ) : null}
