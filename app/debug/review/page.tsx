@@ -1596,8 +1596,7 @@ const drawPolylineCanvas = (
 
       setBaseThreshold(nextBaseThreshold);
       setDraftThreshold(nextBaseThreshold);
-      setSensitivity(50);
-      setMatchThreshold(effectiveThresholdFrom(nextBaseThreshold, 50));
+      setMatchThreshold(effectiveThresholdFrom(nextBaseThreshold, sensitivity));
 
       setMissingCandidateThreshold(nextMissingCandidateThreshold);
       setDraftMissingCandidateThreshold(nextMissingCandidateThreshold);
