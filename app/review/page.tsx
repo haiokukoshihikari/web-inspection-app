@@ -929,9 +929,6 @@ export default function ReviewPage() {
       if (thresholdApplyTimerRef.current !== null) {
         window.clearTimeout(thresholdApplyTimerRef.current);
       }
-      if (sampleLongPressTimerRef.current !== null) {
-        window.clearTimeout(sampleLongPressTimerRef.current);
-      }
     };
   }, []);
 
