@@ -1,0 +1,11 @@
+const DEFAULT_PROFILE: InspectionProfile = {
+  profileName: "default",
+  version: "20260412-001",
+  baseThreshold: 0.48,
+  missingCandidateThreshold: 0.31,
+  rotationRange: 3,
+  scaleRange: 5,
+  shearRange: 0,
+  compareResolution: 1600,
+  hitLimit: 100,
+};

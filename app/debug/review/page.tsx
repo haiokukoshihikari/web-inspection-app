@@ -765,6 +765,7 @@ export default function ReviewPage() {
   const [autoSaveOn, setAutoSaveOn] = useState(false);
   const [savingOnLeave, setSavingOnLeave] = useState(false);
   const [saveLeavingMessage, setSaveLeavingMessage] = useState("");
+  const [savingProfile, setSavingProfile] = useState(false);
 
   const [displayBasis, setDisplayBasis] = useState({ width: 0, height: 0 });
   const [imageRect, setImageRect] = useState({
@@ -1454,7 +1455,7 @@ const drawPolylineCanvas = (
     return `${datePart}-${pad3(next)}`;
   };
 
-  const handleExportProfile = () => {
+  const handleExportProfile = async () => {
     const nameInput = window.prompt("設定名を入力してください", "default");
     if (nameInput === null) return;
 
@@ -1473,19 +1474,33 @@ const drawPolylineCanvas = (
       hitLimit,
     };
 
-    const json = JSON.stringify(profile, null, 2);
-    const blob = new Blob([json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
+    setSavingProfile(true);
 
     try {
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `inspection-profile-${profileName}-${version}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+      const response = await fetch("/api/config", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(profile),
+      });
+
+      const result = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(result?.message || "共有設定の保存に失敗しました。");
+      }
+
+      alert(`共有設定を保存しました。\n${profileName} / ${version}`);
+    } catch (error) {
+      console.error(error);
+      alert(
+        error instanceof Error
+          ? error.message
+          : "共有設定の保存に失敗しました。"
+      );
     } finally {
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setSavingProfile(false);
     }
   };
 
@@ -1636,9 +1651,10 @@ const drawPolylineCanvas = (
 
         <button
           onClick={handleExportProfile}
-          className="w-full rounded-2xl border border-sky-400/30 bg-sky-500/10 px-4 py-3 text-sm font-medium text-sky-200"
+          disabled={savingProfile}
+          className="w-full rounded-2xl border border-sky-400/30 bg-sky-500/10 px-4 py-3 text-sm font-medium text-sky-200 disabled:opacity-50"
         >
-          設定を書き出す
+          {savingProfile ? "共有設定を保存中..." : "共有設定として保存"}
         </button>
 
         <div className="text-xs text-zinc-400">{cvStatus}</div>
