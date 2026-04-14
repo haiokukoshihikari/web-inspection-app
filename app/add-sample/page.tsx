@@ -248,6 +248,27 @@ export default function AddSamplePage() {
     return { x: correctedPanX, y: correctedPanY };
   };
 
+
+  const resetGestureState = () => {
+    pointersRef.current = {};
+    dragRef.current = {
+      mode: "none",
+      pointerId: null,
+      startClientX: 0,
+      startClientY: 0,
+      startPanX: imagePanX,
+      startPanY: imagePanY,
+      startScale: imageScale,
+      startDistance: 0,
+    };
+
+    if (frameRef.current) {
+      try {
+        frameRef.current.releasePointerCapture?.(0 as any);
+      } catch {}
+    }
+  };
+
   const onFramePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     pointersRef.current[e.pointerId] = { x: e.clientX, y: e.clientY };
     const keys = Object.keys(pointersRef.current).map(Number);
@@ -463,7 +484,9 @@ export default function AddSamplePage() {
       <div className="flex items-center justify-between px-4 py-4 border-b border-zinc-800 bg-zinc-950">
         <div className="text-base font-medium">見本にしたい部分を囲って下さい</div>
         <button
-          onClick={() => router.push("/review")}
+          onPointerDown={resetGestureState}
+            onTouchStart={resetGestureState}
+            onClick={() => router.push("/review")}
           className="text-sm text-zinc-300"
         >
           戻る
@@ -483,6 +506,8 @@ export default function AddSamplePage() {
           onPointerMove={onFramePointerMove}
           onPointerUp={onFramePointerUp}
           onPointerCancel={onFramePointerUp}
+          onPointerLeave={onFramePointerUp}
+          onLostPointerCapture={onFramePointerUp}
         >
           {capturedImage ? (
             <>
@@ -527,10 +552,13 @@ export default function AddSamplePage() {
               min={8}
               max={80}
               value={Math.round(safeBoxWidthRatio * 100)}
+              onPointerDown={resetGestureState}
+              onTouchStart={resetGestureState}
               onChange={(e) =>
                 setBoxWidthRatio(clamp(Number(e.target.value) / 100, MIN_BOX_W, MAX_BOX_W))
               }
               className="flex-1"
+              style={{ touchAction: "pan-x" }}
             />
             <div className="w-10 text-right text-sm text-zinc-400">
               {Math.round(safeBoxWidthRatio * 100)}
@@ -544,10 +572,13 @@ export default function AddSamplePage() {
               min={6}
               max={60}
               value={Math.round(safeBoxHeightRatio * 100)}
+              onPointerDown={resetGestureState}
+              onTouchStart={resetGestureState}
               onChange={(e) =>
                 setBoxHeightRatio(clamp(Number(e.target.value) / 100, MIN_BOX_H, MAX_BOX_H))
               }
               className="flex-1"
+              style={{ touchAction: "pan-x" }}
             />
             <div className="w-10 text-right text-sm text-zinc-400">
               {Math.round(safeBoxHeightRatio * 100)}
@@ -571,6 +602,8 @@ export default function AddSamplePage() {
             キャンセル
           </button>
           <button
+            onPointerDown={resetGestureState}
+            onTouchStart={resetGestureState}
             onClick={handleSave}
             className="px-6 py-3 rounded-2xl bg-white text-black font-semibold"
           >
