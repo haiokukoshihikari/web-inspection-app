@@ -46,6 +46,7 @@ type SampleItem = {
   compareUrl?: string;
   aspectRatio?: number;
   savedResolution?: CompareResolutionMode;
+  detectionSensitivity?: number;
 };
 
 type MatchBox = {
@@ -770,6 +771,11 @@ export default function ReviewPage() {
   const [savingOnLeave, setSavingOnLeave] = useState(false);
   const [saveLeavingMessage, setSaveLeavingMessage] = useState("");
 
+  const editingSampleId = samples.length === 1 ? samples[0]?.id ?? null : activeSampleId;
+  const editingSample = editingSampleId ? samples.find((s) => s.id === editingSampleId) ?? null : null;
+  const sensitivitySliderEnabled = samples.length === 1 || !!activeSampleId;
+  const displayedSensitivity = editingSample ? clamp(Math.round(editingSample.detectionSensitivity ?? 50), 0, 100) : null;
+
   const [displayBasis, setDisplayBasis] = useState({ width: 0, height: 0 });
   const [imageRect, setImageRect] = useState({
     left: 0,
@@ -890,6 +896,20 @@ export default function ReviewPage() {
   }, [samples, samplesLoaded]);
 
   useEffect(() => {
+    if (!samplesLoaded) return;
+    if (editingSample) {
+      const next = clamp(Math.round(editingSample.detectionSensitivity ?? 50), 0, 100);
+      setSensitivity(next);
+      localStorage.setItem(SENSITIVITY_KEY, String(next));
+      return;
+    }
+
+    if (!sensitivitySliderEnabled) {
+      setSensitivity(50);
+    }
+  }, [editingSample, samplesLoaded, sensitivitySliderEnabled]);
+
+  useEffect(() => {
     localStorage.setItem(MISSING_CANDIDATE_THRESHOLD_KEY, String(appliedMissingCandidateThreshold));
   }, [appliedMissingCandidateThreshold]);
 
@@ -929,6 +949,9 @@ export default function ReviewPage() {
     return clamp(Number((base - (sens - 50) * 0.005).toFixed(3)), 0, 0.99);
   };
 
+  const getSampleSensitivity = (sample: SampleItem | null | undefined) =>
+    clamp(Math.round(sample?.detectionSensitivity ?? 50), 0, 100);
+
   const scheduleRecheckApply = (
     nextBase: number,
     nextSensitivity: number,
@@ -964,8 +987,20 @@ export default function ReviewPage() {
   };
 
   const applySensitivityChange = (nextSensitivityRaw: number) => {
+    if (!editingSampleId) return;
+
     const nextSensitivity = clamp(Math.round(nextSensitivityRaw), 0, 100);
     setSensitivity(nextSensitivity);
+    localStorage.setItem(SENSITIVITY_KEY, String(nextSensitivity));
+
+    setSamples((prev) =>
+      prev.map((sample) =>
+        sample.id === editingSampleId
+          ? { ...sample, detectionSensitivity: nextSensitivity }
+          : sample
+      )
+    );
+
     scheduleRecheckApply(baseThreshold, nextSensitivity, draftMissingCandidateThreshold);
   };
 
@@ -1132,6 +1167,9 @@ export default function ReviewPage() {
 
             loopSampleMat = loadedSample.srcMat;
 
+            const sampleSensitivity = getSampleSensitivity(sample);
+            const sampleThreshold = effectiveThresholdFrom(baseThreshold, sampleSensitivity);
+
             const strong = runStrongMatches({
               cv,
               sceneSrcMat: sceneMat,
@@ -1140,7 +1178,7 @@ export default function ReviewPage() {
               sceneHeight: sceneMat.rows,
               debugMode,
               matchMode: matchMethod,
-              threshold: matchThreshold,
+              threshold: sampleThreshold,
               rotationRange,
               scaleRange,
               shearRange,
@@ -1184,6 +1222,12 @@ export default function ReviewPage() {
           sceneProcessedGray = buildProcessedGrayMat(cv, sceneMat, debugMode);
           selectedSampleProcessedGray = buildProcessedGrayMat(cv, selectedSampleMat, debugMode);
 
+          const selectedSample = validSamples.find((sample) => sample.id === selectedSampleId) ?? null;
+          const selectedMatchThreshold = effectiveThresholdFrom(
+            baseThreshold,
+            getSampleSensitivity(selectedSample)
+          );
+
           const gridModel = buildGridModelFromStrong(selectedStrong);
           const grid = gridModel.points;
           const candidateBoxes: CandidateBox[] = [];
@@ -1206,7 +1250,7 @@ export default function ReviewPage() {
             if (box.y + box.h > 1) box.y = Math.max(0, 1 - box.h);
 
             if (exists) continue;
-            if (score >= appliedMissingCandidateThreshold && score < matchThreshold) {
+            if (score >= appliedMissingCandidateThreshold && score < selectedMatchThreshold) {
               candidateBoxes.push(box);
             } else {
               missingBoxes.push(box);
@@ -1257,6 +1301,7 @@ export default function ReviewPage() {
     debugMode,
     matchThreshold,
     appliedMissingCandidateThreshold,
+    baseThreshold,
     rotationRange,
     scaleRange,
     shearRange,
@@ -1297,6 +1342,7 @@ const drawPolylineCanvas = (
   };
 
   const adjustSensitivity = (delta: number) => {
+    if (!sensitivitySliderEnabled) return;
     applySensitivityChange(sensitivity + delta);
   };
 
@@ -1559,7 +1605,12 @@ const drawPolylineCanvas = (
 
           <button
             onClick={() => adjustSensitivity(-1)}
-            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
+            disabled={!sensitivitySliderEnabled}
+            className={`w-8 h-8 rounded-lg border text-zinc-200 transition ${
+              sensitivitySliderEnabled
+                ? "border-zinc-700 bg-zinc-900"
+                : "border-zinc-800 bg-zinc-950 text-zinc-500"
+            }`}
           >
             -
           </button>
@@ -1569,19 +1620,27 @@ const drawPolylineCanvas = (
             min={0}
             max={100}
             step={1}
-            value={sensitivity}
+            value={displayedSensitivity ?? 50}
+            disabled={!sensitivitySliderEnabled}
             onChange={(e) => applySensitivityChange(Number(e.target.value))}
-            className="flex-1"
+            className={`flex-1 ${sensitivitySliderEnabled ? "" : "opacity-50"}`}
           />
 
           <button
             onClick={() => adjustSensitivity(1)}
-            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
+            disabled={!sensitivitySliderEnabled}
+            className={`w-8 h-8 rounded-lg border text-zinc-200 transition ${
+              sensitivitySliderEnabled
+                ? "border-zinc-700 bg-zinc-900"
+                : "border-zinc-800 bg-zinc-950 text-zinc-500"
+            }`}
           >
             +
           </button>
 
-          <div className="text-sm w-10 text-right text-zinc-300">{sensitivity}</div>
+          <div className={`text-sm w-10 text-right ${sensitivitySliderEnabled ? "text-zinc-300" : "text-zinc-500"}`}>
+            {sensitivitySliderEnabled ? sensitivity : "--"}
+          </div>
         </div>
 
         <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2">
