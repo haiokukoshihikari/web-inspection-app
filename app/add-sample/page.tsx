@@ -96,6 +96,7 @@ export default function AddSamplePage() {
   const [imageScale, setImageScale] = useState(1);
   const [imagePanX, setImagePanX] = useState(0);
   const [imagePanY, setImagePanY] = useState(0);
+  const [isSliderInteracting, setIsSliderInteracting] = useState(false);
 
   useEffect(() => {
     try {
@@ -249,6 +250,7 @@ export default function AddSamplePage() {
   };
 
   const onFramePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (isSliderInteracting) return;
     pointersRef.current[e.pointerId] = { x: e.clientX, y: e.clientY };
     const keys = Object.keys(pointersRef.current).map(Number);
 
@@ -284,6 +286,7 @@ export default function AddSamplePage() {
   };
 
   const onFramePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (isSliderInteracting) return;
     pointersRef.current[e.pointerId] = { x: e.clientX, y: e.clientY };
 
     if (
@@ -323,6 +326,7 @@ export default function AddSamplePage() {
   };
 
   const onFramePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (isSliderInteracting) return;
     delete pointersRef.current[e.pointerId];
     try {
       e.currentTarget.releasePointerCapture(e.pointerId);
@@ -346,6 +350,15 @@ export default function AddSamplePage() {
         startPanY: imagePanY,
       };
     }
+  };
+
+
+  const beginSliderInteraction = () => {
+    setIsSliderInteracting(true);
+  };
+
+  const endSliderInteraction = () => {
+    setIsSliderInteracting(false);
   };
 
   const handleSave = async () => {
@@ -527,6 +540,13 @@ export default function AddSamplePage() {
               min={8}
               max={80}
               value={Math.round(safeBoxWidthRatio * 100)}
+              onPointerDown={beginSliderInteraction}
+              onPointerUp={endSliderInteraction}
+              onPointerCancel={endSliderInteraction}
+              onTouchStart={beginSliderInteraction}
+              onTouchEnd={endSliderInteraction}
+              onTouchCancel={endSliderInteraction}
+              onBlur={endSliderInteraction}
               onChange={(e) =>
                 setBoxWidthRatio(clamp(Number(e.target.value) / 100, MIN_BOX_W, MAX_BOX_W))
               }
@@ -544,6 +564,13 @@ export default function AddSamplePage() {
               min={6}
               max={60}
               value={Math.round(safeBoxHeightRatio * 100)}
+              onPointerDown={beginSliderInteraction}
+              onPointerUp={endSliderInteraction}
+              onPointerCancel={endSliderInteraction}
+              onTouchStart={beginSliderInteraction}
+              onTouchEnd={endSliderInteraction}
+              onTouchCancel={endSliderInteraction}
+              onBlur={endSliderInteraction}
               onChange={(e) =>
                 setBoxHeightRatio(clamp(Number(e.target.value) / 100, MIN_BOX_H, MAX_BOX_H))
               }
