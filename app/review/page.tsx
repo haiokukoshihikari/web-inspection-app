@@ -1786,6 +1786,7 @@ const drawPolylineCanvas = (
           ) : null}
         </div>
       </div>
+      </div>
 
       <div className="bg-black px-5 pt-2 pb-6">
         <div className="flex items-center justify-between">
