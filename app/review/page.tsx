@@ -58,6 +58,8 @@ type MatchBox = {
   rotationDeg: number;
   scaleFactor: number;
   shearFactor: number;
+  sampleId?: string;
+  sampleColorIndex?: number;
 };
 
 type GridPoint = {
@@ -743,6 +745,7 @@ export default function ReviewPage() {
   const [buildingPreview, setBuildingPreview] = useState(false);
   const [pendingRecheck, setPendingRecheck] = useState(false);
   const [matchBoxes, setMatchBoxes] = useState<MatchBox[]>([]);
+  const [sampleHitCounts, setSampleHitCounts] = useState<Record<string, number>>({});
   const [gridPoints, setGridPoints] = useState<GridPoint[]>([]);
   const [rowLines, setRowLines] = useState<LinePoint[][]>([]);
   const [colLines, setColLines] = useState<LinePoint[][]>([]);
@@ -1075,9 +1078,9 @@ export default function ReviewPage() {
       });
 
       let sceneMat: any = null;
+      let selectedSampleMat: any = null;
       let sceneProcessedGray: any = null;
-      let sampleMat: any = null;
-      let sampleProcessedGray: any = null;
+      let selectedSampleProcessedGray: any = null;
 
       try {
         const loadedScene = await imageSrcToMat(cv, capturedImage, compareResolution);
@@ -1094,16 +1097,14 @@ export default function ReviewPage() {
             : buildDebugImageFromSrcMat(cv, sceneMat, debugMode)
         );
 
-        const sample = samples.find(
-          (s) =>
-            s.id === selectedSampleId &&
-            !!s.compareUrl &&
-            s.savedResolution === compareResolution
+        const validSamples = samples.filter(
+          (s) => !!s.compareUrl && s.savedResolution === compareResolution
         );
 
-        if (!sample) {
+        if (validSamples.length === 0) {
           setSamplePreviewUrl("");
           setMatchBoxes([]);
+          setSampleHitCounts({});
           setGridPoints([]);
           setRowLines([]);
           setColLines([]);
@@ -1112,89 +1113,131 @@ export default function ReviewPage() {
           return;
         }
 
-        const loadedSample = await imageSrcToMat(cv, sample.compareUrl!, compareResolution);
-        if (!loadedSample) {
-          setSamplePreviewUrl("");
-          setMatchBoxes([]);
-          setGridPoints([]);
-          setRowLines([]);
-          setColLines([]);
-          setCandidatePoints([]);
-          setMissingCandidates([]);
-          return;
-        }
+        const allStrong: MatchBox[] = [];
+        const counts: Record<string, number> = {};
 
-        sampleMat = loadedSample.srcMat;
+        for (let sampleIndex = 0; sampleIndex < validSamples.length; sampleIndex++) {
+          const sample = validSamples[sampleIndex];
+          let loopSampleMat: any = null;
 
-        setSamplePreviewUrl(
-          debugMode === "ORIGINAL"
-            ? sample.compareUrl!
-            : buildDebugImageFromSrcMat(cv, sampleMat, debugMode)
-        );
+          try {
+            const loadedSample = await imageSrcToMat(cv, sample.compareUrl!, compareResolution);
+            if (!loadedSample) {
+              counts[sample.id] = 0;
+              continue;
+            }
 
-        const strong = runStrongMatches({
-          cv,
-          sceneSrcMat: sceneMat,
-          sampleSrcMat: sampleMat,
-          sceneWidth: sceneMat.cols,
-          sceneHeight: sceneMat.rows,
-          debugMode,
-          matchMode: matchMethod,
-          threshold: matchThreshold,
-          rotationRange,
-          scaleRange,
-          shearRange,
-          hitLimit,
-        });
+            loopSampleMat = loadedSample.srcMat;
 
-        sceneProcessedGray = buildProcessedGrayMat(cv, sceneMat, debugMode);
-        sampleProcessedGray = buildProcessedGrayMat(cv, sampleMat, debugMode);
+            const strong = runStrongMatches({
+              cv,
+              sceneSrcMat: sceneMat,
+              sampleSrcMat: loopSampleMat,
+              sceneWidth: sceneMat.cols,
+              sceneHeight: sceneMat.rows,
+              debugMode,
+              matchMode: matchMethod,
+              threshold: matchThreshold,
+              rotationRange,
+              scaleRange,
+              shearRange,
+              hitLimit,
+            }).map((box) => ({
+              ...box,
+              sampleId: sample.id,
+              sampleColorIndex: sampleIndex,
+            }));
 
-        const gridModel = buildGridModelFromStrong(strong);
-        const grid = gridModel.points;
-        const candidateBoxes: CandidateBox[] = [];
-        const missingBoxes: CandidateBox[] = [];
+            counts[sample.id] = strong.length;
+            allStrong.push(...strong);
 
-        for (const gp of grid) {
-          const score = sampleGridPointScore(cv, sceneProcessedGray, sampleProcessedGray, gp);
-          const pointWithScore: GridPoint = { ...gp, score };
-          const exists = findExistenceForGridPoint(pointWithScore, strong);
+            if (sample.id === selectedSampleId) {
+              selectedSampleMat = loopSampleMat;
+              loopSampleMat = null;
 
-          const box: CandidateBox = {
-            x: clamp01(pointWithScore.cx - pointWithScore.w / 2),
-            y: clamp01(pointWithScore.cy - pointWithScore.h / 2),
-            w: clamp01(pointWithScore.w),
-            h: clamp01(pointWithScore.h),
-            score,
-          };
-
-          if (box.x + box.w > 1) box.x = Math.max(0, 1 - box.w);
-          if (box.y + box.h > 1) box.y = Math.max(0, 1 - box.h);
-
-          if (exists) continue;
-          if (score >= appliedMissingCandidateThreshold && score < matchThreshold) {
-            candidateBoxes.push(box);
-          } else {
-            missingBoxes.push(box);
+              setSamplePreviewUrl(
+                debugMode === "ORIGINAL"
+                  ? sample.compareUrl!
+                  : buildDebugImageFromSrcMat(cv, selectedSampleMat, debugMode)
+              );
+            }
+          } finally {
+            try {
+              loopSampleMat?.delete?.();
+            } catch {}
           }
         }
 
-        if (!cancelled) {
-          setMatchBoxes(strong);
-          setGridPoints(grid);
-          setRowLines(gridModel.rowLines);
-          setColLines(gridModel.colLines);
-          setCandidatePoints(candidateBoxes);
-          setMissingCandidates(missingOn ? missingBoxes : []);
+        if (!selectedSampleId) {
+          setSamplePreviewUrl("");
+        }
+
+        let selectedStrong = allStrong;
+        if (selectedSampleId) {
+          selectedStrong = allStrong.filter((box) => box.sampleId === selectedSampleId);
+        }
+
+        if (selectedSampleMat && selectedStrong.length > 0) {
+          sceneProcessedGray = buildProcessedGrayMat(cv, sceneMat, debugMode);
+          selectedSampleProcessedGray = buildProcessedGrayMat(cv, selectedSampleMat, debugMode);
+
+          const gridModel = buildGridModelFromStrong(selectedStrong);
+          const grid = gridModel.points;
+          const candidateBoxes: CandidateBox[] = [];
+          const missingBoxes: CandidateBox[] = [];
+
+          for (const gp of grid) {
+            const score = sampleGridPointScore(cv, sceneProcessedGray, selectedSampleProcessedGray, gp);
+            const pointWithScore: GridPoint = { ...gp, score };
+            const exists = findExistenceForGridPoint(pointWithScore, selectedStrong);
+
+            const box: CandidateBox = {
+              x: clamp01(pointWithScore.cx - pointWithScore.w / 2),
+              y: clamp01(pointWithScore.cy - pointWithScore.h / 2),
+              w: clamp01(pointWithScore.w),
+              h: clamp01(pointWithScore.h),
+              score,
+            };
+
+            if (box.x + box.w > 1) box.x = Math.max(0, 1 - box.w);
+            if (box.y + box.h > 1) box.y = Math.max(0, 1 - box.h);
+
+            if (exists) continue;
+            if (score >= appliedMissingCandidateThreshold && score < matchThreshold) {
+              candidateBoxes.push(box);
+            } else {
+              missingBoxes.push(box);
+            }
+          }
+
+          if (!cancelled) {
+            setMatchBoxes(allStrong);
+            setSampleHitCounts(counts);
+            setGridPoints(grid);
+            setRowLines(gridModel.rowLines);
+            setColLines(gridModel.colLines);
+            setCandidatePoints(candidateBoxes);
+            setMissingCandidates(missingOn ? missingBoxes : []);
+          }
+        } else {
+          if (!cancelled) {
+            setMatchBoxes(allStrong);
+            setSampleHitCounts(counts);
+            setGridPoints([]);
+            setRowLines([]);
+            setColLines([]);
+            setCandidatePoints([]);
+            setMissingCandidates([]);
+          }
         }
       } catch (e) {
         console.error(e);
       } finally {
         try {
           sceneMat?.delete?.();
+          selectedSampleMat?.delete?.();
           sceneProcessedGray?.delete?.();
-          sampleMat?.delete?.();
-          sampleProcessedGray?.delete?.();
+          selectedSampleProcessedGray?.delete?.();
         } catch {}
         if (!cancelled) setBuildingPreview(false);
       }
@@ -1489,21 +1532,10 @@ const drawPolylineCanvas = (
     }
   };
 
-  const sampleMatchCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const box of matchBoxes) {
-      if (!box.sampleId) continue;
-      counts[box.sampleId] = (counts[box.sampleId] ?? 0) + 1;
-    }
-    return counts;
-  }, [matchBoxes]);
-
-  const highlightedSampleId = showDeleteFor ?? selectedSampleId;
-
   const canAdd = useMemo(() => samples.length < MAX_SAMPLES, [samples.length]);
 
   return (
-    <main className="min-h-screen bg-black text-white flex flex-col" onClick={() => { setShowDeleteFor(null); setSelectedSampleId(null); }}>
+    <main className="min-h-screen bg-black text-white flex flex-col">
       <Script
         src="/opencv/opencv.js"
         strategy="afterInteractive"
@@ -1776,20 +1808,25 @@ const drawPolylineCanvas = (
               />
 
               {matchBoxes.map((box, i) => {
-                const highlighted = !highlightedSampleId || box.sampleId === highlightedSampleId;
+                const hasSelection = !!selectedSampleId;
+                const isSelected = !hasSelection || box.sampleId === selectedSampleId;
+                const borderWidth = hasSelection && !isSelected ? 1 : 3;
+                const opacity = hasSelection && !isSelected ? 0.45 : 1;
+                const borderColor = colorFromIndex(box.sampleColorIndex ?? i);
+
                 return (
                   <div
-                    key={`${i}-${box.x}-${box.y}-${box.score}-${box.rotationDeg}-${box.scaleFactor}-${box.shearFactor}`}
-                    className="absolute rounded-md pointer-events-none border-solid transition-all"
+                    key={`${i}-${box.sampleId ?? "all"}-${box.x}-${box.y}-${box.score}-${box.rotationDeg}-${box.scaleFactor}-${box.shearFactor}`}
+                    className="absolute rounded-md pointer-events-none"
                     style={{
                       left: imageRect.left + imageRect.width * box.x,
                       top: imageRect.top + imageRect.height * box.y,
                       width: imageRect.width * box.w,
                       height: imageRect.height * box.h,
-                      borderColor: box.displayColor || colorFromIndex(i),
-                      borderWidth: highlighted ? 4 : 2,
-                      opacity: highlighted ? 1 : 0.28,
-                      boxShadow: highlighted ? `0 0 0 1px ${box.displayColor || colorFromIndex(i)}` : "none",
+                      borderColor,
+                      borderWidth,
+                      borderStyle: "solid",
+                      opacity,
                     }}
                     title={box.label}
                   />
@@ -1903,28 +1940,75 @@ const drawPolylineCanvas = (
           )}
         </div>
 
-      <div className="px-4 pb-3">
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-3">
+          <div className="text-sm text-zinc-300 mb-2">
+            選択中の見本: {selectedSampleId ? selectedSampleId : "なし"}
+          </div>
+
+          <div className="w-full h-36 rounded-xl border border-zinc-800 bg-zinc-900 flex items-center justify-center overflow-hidden">
+            {samplePreviewUrl ? (
+              <img
+                src={samplePreviewUrl}
+                alt="見本プレビュー"
+                className="max-w-full max-h-full object-contain block"
+              />
+            ) : (
+              <div className="text-zinc-500 text-sm">
+                見本サムネイルをタップするとここに表示
+              </div>
+            )}
+          </div>
+
+          <div className="mt-2 text-[11px] text-zinc-400">SAMPLE: {debugMode}</div>
+
+          {matchBoxes.length > 0 ? (
+            <div className="mt-3 max-h-32 overflow-auto text-[11px] space-y-1 text-zinc-300">
+              {matchBoxes.slice(0, 12).map((box, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <span
+                    className="inline-block w-3 h-3 rounded-full shrink-0"
+                    style={{ backgroundColor: colorFromIndex(i) }}
+                  />
+                  <span className="truncate">
+                    {box.label} / score {box.score.toFixed(3)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="px-4 pb-3" onClick={() => setShowDeleteFor(null)}>
         <div className="grid grid-cols-3 gap-3">
-          {samples.map((sample) => {
+          {samples.map((sample, sampleIndex) => {
             const ratio = sample.aspectRatio && sample.aspectRatio > 0 ? sample.aspectRatio : 1;
             const thumbW = Math.max(40, Math.min(72, Math.round(40 * ratio)));
-            const selected = highlightedSampleId === sample.id;
-            const detectedCount = sampleMatchCounts[sample.id] ?? 0;
+            const selected = selectedSampleId === sample.id;
+            const outlineColor = colorFromIndex(sampleIndex);
+            const hitCount = sampleHitCounts[sample.id] ?? 0;
 
             return (
-              <div key={sample.id} className="relative overflow-visible isolate">
+              <div
+                key={sample.id}
+                className="relative overflow-visible isolate"
+                onClick={(e) => e.stopPropagation()}
+              >
                 <button
                   type="button"
                   onClick={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
-                    const next = highlightedSampleId === sample.id ? null : sample.id;
-                    setSelectedSampleId(next);
-                    setShowDeleteFor(next);
+                    setSelectedSampleId((prev) => {
+                      const next = prev === sample.id ? null : sample.id;
+                      setShowDeleteFor(next ? sample.id : null);
+                      return next;
+                    });
                   }}
                   className={`w-full rounded-2xl border px-2 py-2 flex items-center gap-2 min-w-0 ${
-                    selected ? "border-sky-300 bg-zinc-800" : "border-zinc-800 bg-zinc-900"
+                    selected ? "bg-zinc-800" : "bg-zinc-900"
                   }`}
+                  style={{ borderColor: outlineColor }}
                 >
                   {sample.thumbUrl ? (
                     <div
@@ -1942,17 +2026,12 @@ const drawPolylineCanvas = (
                   )}
 
                   <div className="min-w-0 flex flex-col items-start">
-                    <div className="text-sm font-semibold truncate">
-                      {detectedCount}件
-                    </div>
-                    <div className="text-[10px] leading-none text-zinc-400 mt-1">
-                      検知
-                    </div>
+                    <div className="text-sm font-semibold truncate">{hitCount}件</div>
                   </div>
                 </button>
 
                 {showDeleteFor === sample.id ? (
-                  <div className="absolute top-1 right-1 z-50">
+                  <div className="absolute -top-2 -right-2 z-50">
                     <button
                       type="button"
                       onClick={(e) => {
@@ -1964,6 +2043,10 @@ const drawPolylineCanvas = (
                           if (selectedSampleId === sample.id) {
                             setSelectedSampleId(null);
                             setSamplePreviewUrl("");
+                            setMatchBoxes([]);
+                            setGridPoints([]);
+                            setCandidatePoints([]);
+                            setMissingCandidates([]);
                           }
                         }
                       }}
