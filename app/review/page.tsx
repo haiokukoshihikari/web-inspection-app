@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const REVIEW_VERSION = "review-stable-12";
+const REVIEW_VERSION = "review-production-01";
 
 const MAX_SAMPLES = 6;
 const MISSING_KEY = "inspection:missingOn";
@@ -1551,12 +1551,6 @@ const drawPolylineCanvas = (
       </div>
 
       <div className="px-4 pt-4 pb-3 border-b border-zinc-800 bg-zinc-950 space-y-3">
-        {captureDebugInfo ? (
-          <div className="rounded-xl border border-emerald-400/20 bg-emerald-500/10 px-3 py-2 text-[12px] text-emerald-200">
-            {`保存成功: ${captureDebugInfo.storedWidth}x${captureDebugInfo.storedHeight} / q${captureDebugInfo.quality} / 元 ${captureDebugInfo.originalWidth}x${captureDebugInfo.originalHeight}`}
-          </div>
-        ) : null}
-
         <div className="flex items-center gap-2">
           <div className="text-sm text-zinc-300 shrink-0">感度</div>
 
@@ -1587,82 +1581,6 @@ const drawPolylineCanvas = (
           <div className="text-sm w-10 text-right text-zinc-300">{sensitivity}</div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <div className="text-sm text-zinc-300 shrink-0">しきい値</div>
-
-          <button
-            onClick={() => adjustDraftThreshold(-0.01)}
-            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
-          >
-            -
-          </button>
-
-          <input
-            type="range"
-            min={UI_THRESHOLD_MIN}
-            max={UI_THRESHOLD_MAX}
-            step={0.01}
-            value={reversedDraftThreshold}
-            onChange={(e) => {
-              const raw = Number(e.target.value);
-              const restored = UI_THRESHOLD_MAX + UI_THRESHOLD_MIN - raw;
-              applyDirectThresholdChange(restored);
-            }}
-            className="flex-1"
-          />
-
-          <button
-            onClick={() => adjustDraftThreshold(0.01)}
-            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
-          >
-            +
-          </button>
-
-          <div className="text-sm w-12 text-right text-zinc-300">
-            {draftThreshold.toFixed(2)}
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <div className="text-sm text-zinc-300 shrink-0">欠落候補</div>
-
-          <button
-            onClick={() => adjustMissingCandidateThreshold(-0.01)}
-            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
-          >
-            -
-          </button>
-
-          <input
-            type="range"
-            min={0.05}
-            max={0.95}
-            step={0.01}
-            value={draftMissingCandidateThreshold}
-            onChange={(e) =>
-              applyMissingCandidateThresholdChange(Number(e.target.value))
-            }
-            className="flex-1"
-          />
-
-          <button
-            onClick={() => adjustMissingCandidateThreshold(0.01)}
-            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
-          >
-            +
-          </button>
-
-          <div className="text-sm w-12 text-right text-zinc-300">
-            {draftMissingCandidateThreshold.toFixed(2)}
-          </div>
-        </div>
-
-        <div className="text-[11px] text-zinc-500">
-          {`しきい値 ${draftThreshold.toFixed(2)} / 感度 ${sensitivity} / 実適用 ${matchThreshold.toFixed(
-            3
-          )} / 候補点下限 ${draftMissingCandidateThreshold.toFixed(2)}`}
-        </div>
-
         <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2">
           <div className="text-sm">欠落候補</div>
           <button
@@ -1677,113 +1595,7 @@ const drawPolylineCanvas = (
           </button>
         </div>
 
-        <button
-          onClick={handleExportProfile}
-          className="w-full rounded-2xl border border-sky-400/30 bg-sky-500/10 px-4 py-3 text-sm font-medium text-sky-200"
-        >
-          設定を書き出す
-        </button>
-
-        <div className="text-xs text-zinc-400">{cvStatus}</div>
         {cvError ? <div className="text-xs text-rose-400">{cvError}</div> : null}
-      </div>
-
-      <div className="px-4 pt-3 space-y-2">
-        <div className="flex gap-2 overflow-x-auto pb-1">
-          {DEBUG_MODES.map((mode) => (
-            <button
-              key={mode}
-              onClick={() => setDebugMode(mode)}
-              className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
-                debugMode === mode
-                  ? "bg-white text-black border-white"
-                  : "bg-zinc-900 text-zinc-300 border-zinc-700"
-              }`}
-            >
-              {mode}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex gap-2 overflow-x-auto pb-1">
-          {ROTATION_RANGE_OPTIONS.map((v) => (
-            <button
-              key={v}
-              onClick={() => setRotationRange(v)}
-              className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
-                rotationRange === v
-                  ? "bg-sky-300 text-black border-sky-300"
-                  : "bg-zinc-900 text-zinc-300 border-zinc-700"
-              }`}
-            >
-              {v === 0 ? "ROT 0°" : `ROT ±${v}°`}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex gap-2 overflow-x-auto pb-1">
-          {SCALE_RANGE_OPTIONS.map((v) => (
-            <button
-              key={v}
-              onClick={() => setScaleRange(v)}
-              className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
-                scaleRange === v
-                  ? "bg-amber-300 text-black border-amber-300"
-                  : "bg-zinc-900 text-zinc-300 border-zinc-700"
-              }`}
-            >
-              {v === 0 ? "SCALE 0%" : `SCALE ±${v}%`}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex gap-2 overflow-x-auto pb-1">
-          {SHEAR_RANGE_OPTIONS.map((v) => (
-            <button
-              key={v}
-              onClick={() => setShearRange(v)}
-              className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
-                shearRange === v
-                  ? "bg-violet-300 text-black border-violet-300"
-                  : "bg-zinc-900 text-zinc-300 border-zinc-700"
-              }`}
-            >
-              {v === 0 ? "SHEAR 0%" : `SHEAR ±${v}%`}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex gap-2 overflow-x-auto pb-1">
-          {RESOLUTION_OPTIONS.map((v) => (
-            <button
-              key={v}
-              onClick={() => setCompareResolution(v)}
-              className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
-                compareResolution === v
-                  ? "bg-teal-300 text-black border-teal-300"
-                  : "bg-zinc-900 text-zinc-300 border-zinc-700"
-              }`}
-            >
-              {v}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex gap-2 overflow-x-auto pb-1">
-          {HIT_LIMIT_OPTIONS.map((v) => (
-            <button
-              key={v}
-              onClick={() => setHitLimit(v)}
-              className={`px-3 py-1.5 rounded-full text-xs border whitespace-nowrap ${
-                hitLimit === v
-                  ? "bg-rose-300 text-black border-rose-300"
-                  : "bg-zinc-900 text-zinc-300 border-zinc-700"
-              }`}
-            >
-              {v === 9999 ? "MAX" : `${v}`}
-            </button>
-          ))}
-        </div>
       </div>
 
       <div className="flex-1 p-4 space-y-4">
@@ -1833,56 +1645,6 @@ const drawPolylineCanvas = (
                 );
               })}
 
-              {missingOn && (rowLines.length > 0 || colLines.length > 0) ? (
-                <svg
-                  className="absolute pointer-events-none"
-                  style={{
-                    left: imageRect.left,
-                    top: imageRect.top,
-                    width: imageRect.width,
-                    height: imageRect.height,
-                  }}
-                  viewBox={`0 0 ${imageRect.width} ${imageRect.height}`}
-                >
-                  {rowLines.map((line, i) =>
-                    line.length >= 2 ? (
-                      <polyline
-                        key={`row-line-${i}`}
-                        points={polylineToSvgPoints(line)}
-                        fill="none"
-                        stroke="rgba(255,255,255,0.28)"
-                        strokeWidth="1"
-                      />
-                    ) : null
-                  )}
-                  {colLines.map((line, i) =>
-                    line.length >= 2 ? (
-                      <polyline
-                        key={`col-line-${i}`}
-                        points={polylineToSvgPoints(line)}
-                        fill="none"
-                        stroke="rgba(255,255,255,0.28)"
-                        strokeWidth="1"
-                      />
-                    ) : null
-                  )}
-                </svg>
-              ) : null}
-
-              {candidatePoints.map((box, i) => (
-                <div
-                  key={`candidate-${i}-${box.x}-${box.y}`}
-                  className="absolute rounded-md pointer-events-none border-[2px] border-dashed border-amber-300"
-                  style={{
-                    left: imageRect.left + imageRect.width * box.x,
-                    top: imageRect.top + imageRect.height * box.y,
-                    width: imageRect.width * box.w,
-                    height: imageRect.height * box.h,
-                  }}
-                  title={`候補点 ${box.score.toFixed(3)}`}
-                />
-              ))}
-
               {missingOn &&
                 missingCandidates.map((box, i) => (
                   <div
@@ -1926,58 +1688,11 @@ const drawPolylineCanvas = (
                   </div>
                 </div>
               ) : null}
-
-              <div className="absolute left-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10">
-                {`MAIN: ${debugMode}`}
-              </div>
-
-              <div className="absolute right-3 bottom-3 text-[10px] bg-black/70 px-2 py-1 rounded border border-white/10">
-                {`存在点 ${matchBoxes.length} / 格子点 ${gridPoints.length} / 候補点 ${candidatePoints.length} / 欠落候補 ${missingCandidates.length}`}
-              </div>
             </>
           ) : (
             <div className="text-zinc-400">まだ撮影画像がありません</div>
           )}
         </div>
-
-        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-3">
-          <div className="text-sm text-zinc-300 mb-2">
-            選択中の見本: {selectedSampleId ? selectedSampleId : "なし"}
-          </div>
-
-          <div className="w-full h-36 rounded-xl border border-zinc-800 bg-zinc-900 flex items-center justify-center overflow-hidden">
-            {samplePreviewUrl ? (
-              <img
-                src={samplePreviewUrl}
-                alt="見本プレビュー"
-                className="max-w-full max-h-full object-contain block"
-              />
-            ) : (
-              <div className="text-zinc-500 text-sm">
-                見本サムネイルをタップするとここに表示
-              </div>
-            )}
-          </div>
-
-          <div className="mt-2 text-[11px] text-zinc-400">SAMPLE: {debugMode}</div>
-
-          {matchBoxes.length > 0 ? (
-            <div className="mt-3 max-h-32 overflow-auto text-[11px] space-y-1 text-zinc-300">
-              {matchBoxes.slice(0, 12).map((box, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <span
-                    className="inline-block w-3 h-3 rounded-full shrink-0"
-                    style={{ backgroundColor: colorFromIndex(i) }}
-                  />
-                  <span className="truncate">
-                    {box.label} / score {box.score.toFixed(3)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      </div>
 
       <div className="px-4 pb-3" onClick={() => setShowDeleteFor(null)}>
         <div className="grid grid-cols-3 gap-3">
