@@ -77,6 +77,8 @@ type CandidateBox = {
   w: number;
   h: number;
   score: number;
+  sampleId?: string;
+  sampleColorIndex?: number;
 };
 
 type LinePoint = {
@@ -125,7 +127,7 @@ function median(values: number[]) {
 }
 
 function colorFromIndex(index: number) {
-  const colors = ["#38bdf8", "#34d399", "#f59e0b", "#d946ef", "#06b6d4", "#fb7185"];
+  const colors = ["#38bdf8", "#22d3ee", "#60a5fa", "#67e8f9", "#0ea5e9", "#93c5fd"];
   return colors[index % colors.length];
 }
 
@@ -1213,30 +1215,43 @@ export default function ReviewPage() {
           setSamplePreviewUrl("");
         }
 
-        let selectedStrong = allStrong;
-        if (selectedSampleId) {
-          selectedStrong = allStrong.filter((box) => box.sampleId === selectedSampleId);
-        }
+        const aggregatedGridPoints: GridPoint[] = [];
+      const aggregatedRowLines: LinePoint[][] = [];
+      const aggregatedColLines: LinePoint[][] = [];
+      const aggregatedCandidateBoxes: CandidateBox[] = [];
+      const aggregatedMissingBoxes: CandidateBox[] = [];
 
-        if (selectedSampleMat && selectedStrong.length > 0) {
-          sceneProcessedGray = buildProcessedGrayMat(cv, sceneMat, debugMode);
-          selectedSampleProcessedGray = buildProcessedGrayMat(cv, selectedSampleMat, debugMode);
+      sceneProcessedGray = buildProcessedGrayMat(cv, sceneMat, debugMode);
 
-          const selectedSample = validSamples.find((sample) => sample.id === selectedSampleId) ?? null;
-          const selectedMatchThreshold = effectiveThresholdFrom(
+      for (let sampleIndex = 0; sampleIndex < validSamples.length; sampleIndex++) {
+        const sample = validSamples[sampleIndex];
+        const sampleStrong = allStrong.filter((box) => box.sampleId === sample.id);
+        if (sampleStrong.length === 0 || !sample.compareUrl) continue;
+
+        let loopSampleMatForGrid: any = null;
+        let loopSampleProcessedGray: any = null;
+
+        try {
+          const loadedSample = await imageSrcToMat(cv, sample.compareUrl, compareResolution);
+          if (!loadedSample) continue;
+
+          loopSampleMatForGrid = loadedSample.srcMat;
+          loopSampleProcessedGray = buildProcessedGrayMat(cv, loopSampleMatForGrid, debugMode);
+
+          const sampleMatchThreshold = effectiveThresholdFrom(
             baseThreshold,
-            getSampleSensitivity(selectedSample)
+            getSampleSensitivity(sample)
           );
 
-          const gridModel = buildGridModelFromStrong(selectedStrong);
-          const grid = gridModel.points;
-          const candidateBoxes: CandidateBox[] = [];
-          const missingBoxes: CandidateBox[] = [];
+          const gridModel = buildGridModelFromStrong(sampleStrong);
+          aggregatedGridPoints.push(...gridModel.points);
+          aggregatedRowLines.push(...gridModel.rowLines);
+          aggregatedColLines.push(...gridModel.colLines);
 
-          for (const gp of grid) {
-            const score = sampleGridPointScore(cv, sceneProcessedGray, selectedSampleProcessedGray, gp);
+          for (const gp of gridModel.points) {
+            const score = sampleGridPointScore(cv, sceneProcessedGray, loopSampleProcessedGray, gp);
             const pointWithScore: GridPoint = { ...gp, score };
-            const exists = findExistenceForGridPoint(pointWithScore, selectedStrong);
+            const exists = findExistenceForGridPoint(pointWithScore, sampleStrong);
 
             const box: CandidateBox = {
               x: clamp01(pointWithScore.cx - pointWithScore.w / 2),
@@ -1244,39 +1259,38 @@ export default function ReviewPage() {
               w: clamp01(pointWithScore.w),
               h: clamp01(pointWithScore.h),
               score,
+              sampleId: sample.id,
+              sampleColorIndex: sampleIndex,
             };
 
             if (box.x + box.w > 1) box.x = Math.max(0, 1 - box.w);
             if (box.y + box.h > 1) box.y = Math.max(0, 1 - box.h);
 
             if (exists) continue;
-            if (score >= appliedMissingCandidateThreshold && score < selectedMatchThreshold) {
-              candidateBoxes.push(box);
+
+            if (score >= appliedMissingCandidateThreshold && score < sampleMatchThreshold) {
+              aggregatedCandidateBoxes.push(box);
             } else {
-              missingBoxes.push(box);
+              aggregatedMissingBoxes.push(box);
             }
           }
-
-          if (!cancelled) {
-            setMatchBoxes(allStrong);
-            setSampleHitCounts(counts);
-            setGridPoints(grid);
-            setRowLines(gridModel.rowLines);
-            setColLines(gridModel.colLines);
-            setCandidatePoints(candidateBoxes);
-            setMissingCandidates(missingOn ? missingBoxes : []);
-          }
-        } else {
-          if (!cancelled) {
-            setMatchBoxes(allStrong);
-            setSampleHitCounts(counts);
-            setGridPoints([]);
-            setRowLines([]);
-            setColLines([]);
-            setCandidatePoints([]);
-            setMissingCandidates([]);
-          }
+        } finally {
+          try {
+            loopSampleMatForGrid?.delete?.();
+            loopSampleProcessedGray?.delete?.();
+          } catch {}
         }
+      }
+
+      if (!cancelled) {
+        setMatchBoxes(allStrong);
+        setSampleHitCounts(counts);
+        setGridPoints(aggregatedGridPoints);
+        setRowLines(aggregatedRowLines);
+        setColLines(aggregatedColLines);
+        setCandidatePoints(aggregatedCandidateBoxes);
+        setMissingCandidates(missingOn ? aggregatedMissingBoxes : []);
+      }
       } catch (e) {
         console.error(e);
       } finally {
@@ -1398,7 +1412,7 @@ const drawPolylineCanvas = (
       const y = Math.round(box.y * canvas.height);
       const w = Math.round(box.w * canvas.width);
       const h = Math.round(box.h * canvas.height);
-      const color = colorFromIndex(i);
+      const color = colorFromIndex(box.sampleColorIndex ?? i);
 
       ctx.strokeStyle = color;
       ctx.strokeRect(x, y, w, h);
@@ -1418,23 +1432,10 @@ const drawPolylineCanvas = (
     });
 
     if (missingOn) {
-      ctx.strokeStyle = "rgba(255,255,255,0.28)";
-      ctx.lineWidth = 1;
-      rowLines.forEach((line) => drawPolylineCanvas(ctx, line, canvas.width, canvas.height));
-      colLines.forEach((line) => drawPolylineCanvas(ctx, line, canvas.width, canvas.height));
-
       ctx.setLineDash([10, 8]);
-      ctx.lineWidth = Math.max(2, Math.round(Math.min(canvas.width, canvas.height) * 0.003));
-      ctx.strokeStyle = "#fbbf24";
-      candidatePoints.forEach((box) => {
-        const x = Math.round(box.x * canvas.width);
-        const y = Math.round(box.y * canvas.height);
-        const w = Math.round(box.w * canvas.width);
-        const h = Math.round(box.h * canvas.height);
-        ctx.strokeRect(x, y, w, h);
-      });
-
+      ctx.lineWidth = Math.max(3, Math.round(Math.min(canvas.width, canvas.height) * 0.004));
       ctx.strokeStyle = "#fb7185";
+
       missingCandidates.forEach((box) => {
         const x = Math.round(box.x * canvas.width);
         const y = Math.round(box.y * canvas.height);
@@ -1684,8 +1685,8 @@ const drawPolylineCanvas = (
               {matchBoxes.map((box, i) => {
                 const hasSelection = !!activeSampleId;
                 const isSelected = !hasSelection || box.sampleId === activeSampleId;
-                const borderWidth = hasSelection && !isSelected ? 1 : 3;
-                const opacity = hasSelection && !isSelected ? 0.45 : 1;
+                const borderWidth = hasSelection && !isSelected ? 2 : 3;
+                const opacity = hasSelection && !isSelected ? 0.7 : 1;
                 const borderColor = colorFromIndex(box.sampleColorIndex ?? i);
 
                 return (
@@ -1708,19 +1709,27 @@ const drawPolylineCanvas = (
               })}
 
               {missingOn &&
-                missingCandidates.map((box, i) => (
-                  <div
-                    key={`missing-${i}-${box.x}-${box.y}`}
-                    className="absolute rounded-md pointer-events-none border-[3px] border-dashed border-rose-400"
-                    style={{
-                      left: imageRect.left + imageRect.width * box.x,
-                      top: imageRect.top + imageRect.height * box.y,
-                      width: imageRect.width * box.w,
-                      height: imageRect.height * box.h,
-                    }}
-                    title={`欠落候補 ${box.score.toFixed(3)}`}
-                  />
-                ))}
+                missingCandidates.map((box, i) => {
+                  const hasSelection = !!activeSampleId;
+                  const isSelected = !hasSelection || box.sampleId === activeSampleId;
+                  const borderWidth = hasSelection && !isSelected ? 2 : 3;
+                  const opacity = hasSelection && !isSelected ? 0.7 : 1;
+
+                  return (
+                    <div
+                      key={`missing-${i}-${box.sampleId ?? "all"}-${box.x}-${box.y}`}
+                      className="absolute rounded-md pointer-events-none border-dashed border-rose-400"
+                      style={{
+                        left: imageRect.left + imageRect.width * box.x,
+                        top: imageRect.top + imageRect.height * box.y,
+                        width: imageRect.width * box.w,
+                        height: imageRect.height * box.h,
+                        borderWidth,
+                        opacity,
+                      }}
+                    />
+                  );
+                })}
 
               {pendingRecheck ? (
                 <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/35">
