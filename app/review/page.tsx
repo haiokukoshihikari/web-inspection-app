@@ -25,6 +25,7 @@ const HIT_LIMIT_KEY = "inspection:hitLimit";
 const AUTO_SAVE_KEY = "inspection:autoSaveOn";
 const MISSING_CANDIDATE_THRESHOLD_KEY = "inspection:missingCandidateThreshold";
 const PENDING_SELECTED_SAMPLE_ID_KEY = "inspection:pendingSelectedSampleId";
+const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
 const PROFILE_EXPORT_COUNTER_PREFIX = "inspection:profileExportCounter:";
 
 const UI_THRESHOLD_MIN = 0.25;
@@ -37,6 +38,19 @@ type ScaleRangeMode = 0 | 5 | 10;
 type ShearRangeMode = 0 | 5 | 10;
 type CompareResolutionMode = 1200 | 1600 | 2000 | 2400;
 type HitLimitMode = 30 | 60 | 100 | 300 | 9999;
+
+type InspectionProfile = {
+  profileName: string;
+  version: string;
+  baseThreshold: number;
+  missingCandidateThreshold: number;
+  rotationRange: RotationRangeMode;
+  scaleRange: ScaleRangeMode;
+  shearRange: ShearRangeMode;
+  compareResolution: CompareResolutionMode;
+  hitLimit: HitLimitMode;
+};
+
 
 type SampleItem = {
   id: string;
@@ -830,14 +844,93 @@ export default function ReviewPage() {
         }
       }
 
-      const savedBaseThreshold = localStorage.getItem(BASE_THRESHOLD_KEY);
+      const pendingSharedProfileRaw = sessionStorage.getItem(PENDING_SHARED_PROFILE_KEY);
       const savedSensitivity = localStorage.getItem(SENSITIVITY_KEY);
 
       let initialBaseThreshold = 0.5;
-      if (savedBaseThreshold !== null) {
-        const n = Number(savedBaseThreshold);
-        if (Number.isFinite(n)) {
-          initialBaseThreshold = clamp(n, UI_THRESHOLD_MIN, UI_THRESHOLD_MAX);
+      let initialRotationRange: RotationRangeMode = 0;
+      let initialScaleRange: ScaleRangeMode = 0;
+      let initialShearRange: ShearRangeMode = 0;
+      let initialCompareResolution: CompareResolutionMode = 1200;
+      let initialHitLimit: HitLimitMode = 30;
+
+      if (pendingSharedProfileRaw) {
+        try {
+          const pendingSharedProfile = JSON.parse(pendingSharedProfileRaw) as InspectionProfile;
+
+          if (typeof pendingSharedProfile.baseThreshold === "number") {
+            initialBaseThreshold = clamp(
+              pendingSharedProfile.baseThreshold,
+              UI_THRESHOLD_MIN,
+              UI_THRESHOLD_MAX
+            );
+          }
+
+          if (typeof pendingSharedProfile.missingCandidateThreshold === "number") {
+            const nextCandidateThreshold = clamp(
+              Number(pendingSharedProfile.missingCandidateThreshold.toFixed(2)),
+              0.05,
+              0.95
+            );
+            setDraftMissingCandidateThreshold(nextCandidateThreshold);
+            setAppliedMissingCandidateThreshold(nextCandidateThreshold);
+          }
+
+          if ([0, 3, 6, 9].includes(pendingSharedProfile.rotationRange)) {
+            initialRotationRange = pendingSharedProfile.rotationRange;
+          }
+          if ([0, 5, 10].includes(pendingSharedProfile.scaleRange)) {
+            initialScaleRange = pendingSharedProfile.scaleRange;
+          }
+          if ([0, 5, 10].includes(pendingSharedProfile.shearRange)) {
+            initialShearRange = pendingSharedProfile.shearRange;
+          }
+          if ([1200, 1600, 2000, 2400].includes(pendingSharedProfile.compareResolution)) {
+            initialCompareResolution = pendingSharedProfile.compareResolution;
+          }
+          if ([30, 60, 100, 300, 9999].includes(pendingSharedProfile.hitLimit)) {
+            initialHitLimit = pendingSharedProfile.hitLimit;
+          }
+        } catch (error) {
+          console.error("共有設定の読み込みに失敗しました", error);
+        }
+      } else {
+        const savedBaseThreshold = localStorage.getItem(BASE_THRESHOLD_KEY);
+        if (savedBaseThreshold !== null) {
+          const n = Number(savedBaseThreshold);
+          if (Number.isFinite(n)) {
+            initialBaseThreshold = clamp(n, UI_THRESHOLD_MIN, UI_THRESHOLD_MAX);
+          }
+        }
+
+        const savedRotationRange = localStorage.getItem(ROTATION_RANGE_KEY);
+        if (savedRotationRange !== null) {
+          const n = Number(savedRotationRange) as RotationRangeMode;
+          if ([0, 3, 6, 9].includes(n)) initialRotationRange = n;
+        }
+
+        const savedScaleRange = localStorage.getItem(SCALE_RANGE_KEY);
+        if (savedScaleRange !== null) {
+          const n = Number(savedScaleRange) as ScaleRangeMode;
+          if ([0, 5, 10].includes(n)) initialScaleRange = n;
+        }
+
+        const savedShearRange = localStorage.getItem(SHEAR_RANGE_KEY);
+        if (savedShearRange !== null) {
+          const n = Number(savedShearRange) as ShearRangeMode;
+          if ([0, 5, 10].includes(n)) initialShearRange = n;
+        }
+
+        const savedResolution = localStorage.getItem(RESOLUTION_KEY);
+        if (savedResolution !== null) {
+          const n = Number(savedResolution) as CompareResolutionMode;
+          if ([1200, 1600, 2000, 2400].includes(n)) initialCompareResolution = n;
+        }
+
+        const savedHitLimit = localStorage.getItem(HIT_LIMIT_KEY);
+        if (savedHitLimit !== null) {
+          const n = Number(savedHitLimit) as HitLimitMode;
+          if ([30, 60, 100, 300, 9999].includes(n)) initialHitLimit = n;
         }
       }
 
@@ -857,36 +950,11 @@ export default function ReviewPage() {
       setDraftThreshold(initialBaseThreshold);
       setSensitivity(initialSensitivity);
       setMatchThreshold(initialThreshold);
-
-      const savedRotationRange = localStorage.getItem(ROTATION_RANGE_KEY);
-      if (savedRotationRange !== null) {
-        const n = Number(savedRotationRange) as RotationRangeMode;
-        if ([0, 3, 6, 9].includes(n)) setRotationRange(n);
-      }
-
-      const savedScaleRange = localStorage.getItem(SCALE_RANGE_KEY);
-      if (savedScaleRange !== null) {
-        const n = Number(savedScaleRange) as ScaleRangeMode;
-        if ([0, 5, 10].includes(n)) setScaleRange(n);
-      }
-
-      const savedShearRange = localStorage.getItem(SHEAR_RANGE_KEY);
-      if (savedShearRange !== null) {
-        const n = Number(savedShearRange) as ShearRangeMode;
-        if ([0, 5, 10].includes(n)) setShearRange(n);
-      }
-
-      const savedResolution = localStorage.getItem(RESOLUTION_KEY);
-      if (savedResolution !== null) {
-        const n = Number(savedResolution) as CompareResolutionMode;
-        if ([1200, 1600, 2000, 2400].includes(n)) setCompareResolution(n);
-      }
-
-      const savedHitLimit = localStorage.getItem(HIT_LIMIT_KEY);
-      if (savedHitLimit !== null) {
-        const n = Number(savedHitLimit) as HitLimitMode;
-        if ([30, 60, 100, 300, 9999].includes(n)) setHitLimit(n);
-      }
+      setRotationRange(initialRotationRange);
+      setScaleRange(initialScaleRange);
+      setShearRange(initialShearRange);
+      setCompareResolution(initialCompareResolution);
+      setHitLimit(initialHitLimit);
     } catch {}
 
     setSamplesLoaded(true);
@@ -1860,8 +1928,6 @@ const drawPolylineCanvas = (
           ) : null}
         </div>
       </div>
-      </div>
-
       <div className="bg-black px-5 pt-1 pb-6">
         <div className="flex items-center justify-between">
           <button
