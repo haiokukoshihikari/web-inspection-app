@@ -1056,7 +1056,7 @@ export default function ReviewPage() {
     scheduleRecheckApply(nextBase, 50, draftMissingCandidateThreshold);
   };
 
-  const applySensitivityDraftChange = (nextSensitivityRaw: number) => {
+  const applySensitivityChange = (nextSensitivityRaw: number) => {
     if (!editingSampleId) return;
 
     const nextSensitivity = clamp(Math.round(nextSensitivityRaw), 0, 100);
@@ -1072,9 +1072,36 @@ export default function ReviewPage() {
     );
   };
 
-  const commitSensitivityChange = () => {
+  const beginSensitivityInteraction = () => {
+    if (!sensitivitySliderEnabled) return;
+    if (thresholdApplyTimerRef.current !== null) {
+      window.clearTimeout(thresholdApplyTimerRef.current);
+    }
+    setPendingRecheck(true);
+    setBuildingPreview(false);
+  };
+
+  const commitSensitivityChange = (nextSensitivityRaw: number) => {
     if (!editingSampleId) return;
-    scheduleRecheckApply(baseThreshold, sensitivity, draftMissingCandidateThreshold);
+
+    const nextSensitivity = clamp(Math.round(nextSensitivityRaw), 0, 100);
+
+    if (thresholdApplyTimerRef.current !== null) {
+      window.clearTimeout(thresholdApplyTimerRef.current);
+    }
+
+    thresholdApplyTimerRef.current = window.setTimeout(() => {
+      const nextEffective = effectiveThresholdFrom(baseThreshold, nextSensitivity);
+      setPendingRecheck(false);
+      setBuildingPreview(true);
+
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          setMatchThreshold(nextEffective);
+          setAppliedMissingCandidateThreshold(draftMissingCandidateThreshold);
+        });
+      });
+    }, 1000);
   };
 
   const applyMissingCandidateThresholdChange = (nextThresholdRaw: number) => {
@@ -1428,9 +1455,7 @@ const drawPolylineCanvas = (
 
   const adjustSensitivity = (delta: number) => {
     if (!sensitivitySliderEnabled) return;
-    const nextSensitivity = clamp(Math.round(sensitivity + delta), 0, 100);
-    applySensitivityDraftChange(nextSensitivity);
-    commitSensitivityChange();
+    applySensitivityChange(sensitivity + delta);
   };
 
   const adjustMissingCandidateThreshold = (delta: number) => {
@@ -1692,11 +1717,14 @@ const drawPolylineCanvas = (
             step={1}
             value={displayedSensitivity ?? 50}
             disabled={!sensitivitySliderEnabled}
-            onChange={(e) => applySensitivityDraftChange(Number(e.target.value))}
-            onPointerUp={commitSensitivityChange}
-            onTouchEnd={commitSensitivityChange}
-            onMouseUp={commitSensitivityChange}
-            onBlur={commitSensitivityChange}
+            onPointerDown={beginSensitivityInteraction}
+            onTouchStart={beginSensitivityInteraction}
+            onMouseDown={beginSensitivityInteraction}
+            onChange={(e) => applySensitivityChange(Number(e.target.value))}
+            onPointerUp={(e) => commitSensitivityChange(Number((e.currentTarget as HTMLInputElement).value))}
+            onTouchEnd={(e) => commitSensitivityChange(Number((e.currentTarget as HTMLInputElement).value))}
+            onMouseUp={(e) => commitSensitivityChange(Number((e.currentTarget as HTMLInputElement).value))}
+            onBlur={(e) => commitSensitivityChange(Number((e.currentTarget as HTMLInputElement).value))}
             className={`flex-1 ${sensitivitySliderEnabled ? "" : "opacity-50"}`}
           />
 
