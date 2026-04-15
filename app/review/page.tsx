@@ -25,6 +25,20 @@ const HIT_LIMIT_KEY = "inspection:hitLimit";
 const AUTO_SAVE_KEY = "inspection:autoSaveOn";
 const MISSING_CANDIDATE_THRESHOLD_KEY = "inspection:missingCandidateThreshold";
 const PENDING_SELECTED_SAMPLE_ID_KEY = "inspection:pendingSelectedSampleId";
+const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
+
+type InspectionProfile = {
+  profileName: string;
+  version: string;
+  baseThreshold: number;
+  missingCandidateThreshold: number;
+  rotationRange: 0 | 3 | 6 | 9;
+  scaleRange: 0 | 5 | 10;
+  shearRange: 0 | 5 | 10;
+  compareResolution: 1200 | 1600 | 2000 | 2400;
+  hitLimit: 30 | 60 | 100 | 300 | 9999;
+};
+
 const PROFILE_EXPORT_COUNTER_PREFIX = "inspection:profileExportCounter:";
 
 const UI_THRESHOLD_MIN = 0.25;
@@ -46,6 +60,7 @@ type SampleItem = {
   compareUrl?: string;
   aspectRatio?: number;
   savedResolution?: CompareResolutionMode;
+  detectionSensitivity?: number;
 };
 
 type MatchBox = {
@@ -76,6 +91,8 @@ type CandidateBox = {
   w: number;
   h: number;
   score: number;
+  sampleId?: string;
+  sampleColorIndex?: number;
 };
 
 type LinePoint = {
@@ -124,7 +141,7 @@ function median(values: number[]) {
 }
 
 function colorFromIndex(index: number) {
-  const colors = ["#38bdf8", "#34d399", "#f59e0b", "#d946ef", "#06b6d4", "#fb7185"];
+  const colors = ["#38bdf8", "#22d3ee", "#60a5fa", "#67e8f9", "#0ea5e9", "#93c5fd"];
   return colors[index % colors.length];
 }
 
@@ -770,6 +787,11 @@ export default function ReviewPage() {
   const [savingOnLeave, setSavingOnLeave] = useState(false);
   const [saveLeavingMessage, setSaveLeavingMessage] = useState("");
 
+  const editingSampleId = samples.length === 1 ? samples[0]?.id ?? null : activeSampleId;
+  const editingSample = editingSampleId ? samples.find((s) => s.id === editingSampleId) ?? null : null;
+  const sensitivitySliderEnabled = samples.length === 1 || !!activeSampleId;
+  const displayedSensitivity = editingSample ? clamp(Math.round(editingSample.detectionSensitivity ?? 50), 0, 100) : null;
+
   const [displayBasis, setDisplayBasis] = useState({ width: 0, height: 0 });
   const [imageRect, setImageRect] = useState({
     left: 0,
@@ -822,14 +844,93 @@ export default function ReviewPage() {
         }
       }
 
-      const savedBaseThreshold = localStorage.getItem(BASE_THRESHOLD_KEY);
+      const pendingSharedProfileRaw = sessionStorage.getItem(PENDING_SHARED_PROFILE_KEY);
       const savedSensitivity = localStorage.getItem(SENSITIVITY_KEY);
 
       let initialBaseThreshold = 0.5;
-      if (savedBaseThreshold !== null) {
-        const n = Number(savedBaseThreshold);
-        if (Number.isFinite(n)) {
-          initialBaseThreshold = clamp(n, UI_THRESHOLD_MIN, UI_THRESHOLD_MAX);
+      let initialRotationRange: RotationRangeMode = 0;
+      let initialScaleRange: ScaleRangeMode = 0;
+      let initialShearRange: ShearRangeMode = 0;
+      let initialCompareResolution: CompareResolutionMode = 1200;
+      let initialHitLimit: HitLimitMode = 30;
+
+      if (pendingSharedProfileRaw) {
+        try {
+          const pendingSharedProfile = JSON.parse(pendingSharedProfileRaw) as InspectionProfile;
+
+          if (typeof pendingSharedProfile.baseThreshold === "number") {
+            initialBaseThreshold = clamp(
+              pendingSharedProfile.baseThreshold,
+              UI_THRESHOLD_MIN,
+              UI_THRESHOLD_MAX
+            );
+          }
+
+          if (typeof pendingSharedProfile.missingCandidateThreshold === "number") {
+            const nextCandidateThreshold = clamp(
+              Number(pendingSharedProfile.missingCandidateThreshold.toFixed(2)),
+              0.05,
+              0.95
+            );
+            setDraftMissingCandidateThreshold(nextCandidateThreshold);
+            setAppliedMissingCandidateThreshold(nextCandidateThreshold);
+          }
+
+          if ([0, 3, 6, 9].includes(pendingSharedProfile.rotationRange)) {
+            initialRotationRange = pendingSharedProfile.rotationRange;
+          }
+          if ([0, 5, 10].includes(pendingSharedProfile.scaleRange)) {
+            initialScaleRange = pendingSharedProfile.scaleRange;
+          }
+          if ([0, 5, 10].includes(pendingSharedProfile.shearRange)) {
+            initialShearRange = pendingSharedProfile.shearRange;
+          }
+          if ([1200, 1600, 2000, 2400].includes(pendingSharedProfile.compareResolution)) {
+            initialCompareResolution = pendingSharedProfile.compareResolution;
+          }
+          if ([30, 60, 100, 300, 9999].includes(pendingSharedProfile.hitLimit)) {
+            initialHitLimit = pendingSharedProfile.hitLimit;
+          }
+        } catch (error) {
+          console.error("共有設定の読み込みに失敗しました", error);
+        }
+      } else {
+        const savedBaseThreshold = localStorage.getItem(BASE_THRESHOLD_KEY);
+        if (savedBaseThreshold !== null) {
+          const n = Number(savedBaseThreshold);
+          if (Number.isFinite(n)) {
+            initialBaseThreshold = clamp(n, UI_THRESHOLD_MIN, UI_THRESHOLD_MAX);
+          }
+        }
+
+        const savedRotationRange = localStorage.getItem(ROTATION_RANGE_KEY);
+        if (savedRotationRange !== null) {
+          const n = Number(savedRotationRange) as RotationRangeMode;
+          if ([0, 3, 6, 9].includes(n)) initialRotationRange = n;
+        }
+
+        const savedScaleRange = localStorage.getItem(SCALE_RANGE_KEY);
+        if (savedScaleRange !== null) {
+          const n = Number(savedScaleRange) as ScaleRangeMode;
+          if ([0, 5, 10].includes(n)) initialScaleRange = n;
+        }
+
+        const savedShearRange = localStorage.getItem(SHEAR_RANGE_KEY);
+        if (savedShearRange !== null) {
+          const n = Number(savedShearRange) as ShearRangeMode;
+          if ([0, 5, 10].includes(n)) initialShearRange = n;
+        }
+
+        const savedResolution = localStorage.getItem(RESOLUTION_KEY);
+        if (savedResolution !== null) {
+          const n = Number(savedResolution) as CompareResolutionMode;
+          if ([1200, 1600, 2000, 2400].includes(n)) initialCompareResolution = n;
+        }
+
+        const savedHitLimit = localStorage.getItem(HIT_LIMIT_KEY);
+        if (savedHitLimit !== null) {
+          const n = Number(savedHitLimit) as HitLimitMode;
+          if ([30, 60, 100, 300, 9999].includes(n)) initialHitLimit = n;
         }
       }
 
@@ -849,36 +950,11 @@ export default function ReviewPage() {
       setDraftThreshold(initialBaseThreshold);
       setSensitivity(initialSensitivity);
       setMatchThreshold(initialThreshold);
-
-      const savedRotationRange = localStorage.getItem(ROTATION_RANGE_KEY);
-      if (savedRotationRange !== null) {
-        const n = Number(savedRotationRange) as RotationRangeMode;
-        if ([0, 3, 6, 9].includes(n)) setRotationRange(n);
-      }
-
-      const savedScaleRange = localStorage.getItem(SCALE_RANGE_KEY);
-      if (savedScaleRange !== null) {
-        const n = Number(savedScaleRange) as ScaleRangeMode;
-        if ([0, 5, 10].includes(n)) setScaleRange(n);
-      }
-
-      const savedShearRange = localStorage.getItem(SHEAR_RANGE_KEY);
-      if (savedShearRange !== null) {
-        const n = Number(savedShearRange) as ShearRangeMode;
-        if ([0, 5, 10].includes(n)) setShearRange(n);
-      }
-
-      const savedResolution = localStorage.getItem(RESOLUTION_KEY);
-      if (savedResolution !== null) {
-        const n = Number(savedResolution) as CompareResolutionMode;
-        if ([1200, 1600, 2000, 2400].includes(n)) setCompareResolution(n);
-      }
-
-      const savedHitLimit = localStorage.getItem(HIT_LIMIT_KEY);
-      if (savedHitLimit !== null) {
-        const n = Number(savedHitLimit) as HitLimitMode;
-        if ([30, 60, 100, 300, 9999].includes(n)) setHitLimit(n);
-      }
+      setRotationRange(initialRotationRange);
+      setScaleRange(initialScaleRange);
+      setShearRange(initialShearRange);
+      setCompareResolution(initialCompareResolution);
+      setHitLimit(initialHitLimit);
     } catch {}
 
     setSamplesLoaded(true);
@@ -888,6 +964,20 @@ export default function ReviewPage() {
     if (!samplesLoaded) return;
     localStorage.setItem(SAMPLES_KEY, JSON.stringify(samples));
   }, [samples, samplesLoaded]);
+
+  useEffect(() => {
+    if (!samplesLoaded) return;
+    if (editingSample) {
+      const next = clamp(Math.round(editingSample.detectionSensitivity ?? 50), 0, 100);
+      setSensitivity(next);
+      localStorage.setItem(SENSITIVITY_KEY, String(next));
+      return;
+    }
+
+    if (!sensitivitySliderEnabled) {
+      setSensitivity(50);
+    }
+  }, [editingSample, samplesLoaded, sensitivitySliderEnabled]);
 
   useEffect(() => {
     localStorage.setItem(MISSING_CANDIDATE_THRESHOLD_KEY, String(appliedMissingCandidateThreshold));
@@ -929,6 +1019,9 @@ export default function ReviewPage() {
     return clamp(Number((base - (sens - 50) * 0.005).toFixed(3)), 0, 0.99);
   };
 
+  const getSampleSensitivity = (sample: SampleItem | null | undefined) =>
+    clamp(Math.round(sample?.detectionSensitivity ?? 50), 0, 100);
+
   const scheduleRecheckApply = (
     nextBase: number,
     nextSensitivity: number,
@@ -964,8 +1057,20 @@ export default function ReviewPage() {
   };
 
   const applySensitivityChange = (nextSensitivityRaw: number) => {
+    if (!editingSampleId) return;
+
     const nextSensitivity = clamp(Math.round(nextSensitivityRaw), 0, 100);
     setSensitivity(nextSensitivity);
+    localStorage.setItem(SENSITIVITY_KEY, String(nextSensitivity));
+
+    setSamples((prev) =>
+      prev.map((sample) =>
+        sample.id === editingSampleId
+          ? { ...sample, detectionSensitivity: nextSensitivity }
+          : sample
+      )
+    );
+
     scheduleRecheckApply(baseThreshold, nextSensitivity, draftMissingCandidateThreshold);
   };
 
@@ -1132,6 +1237,9 @@ export default function ReviewPage() {
 
             loopSampleMat = loadedSample.srcMat;
 
+            const sampleSensitivity = getSampleSensitivity(sample);
+            const sampleThreshold = effectiveThresholdFrom(baseThreshold, sampleSensitivity);
+
             const strong = runStrongMatches({
               cv,
               sceneSrcMat: sceneMat,
@@ -1140,7 +1248,7 @@ export default function ReviewPage() {
               sceneHeight: sceneMat.rows,
               debugMode,
               matchMode: matchMethod,
-              threshold: matchThreshold,
+              threshold: sampleThreshold,
               rotationRange,
               scaleRange,
               shearRange,
@@ -1175,24 +1283,43 @@ export default function ReviewPage() {
           setSamplePreviewUrl("");
         }
 
-        let selectedStrong = allStrong;
-        if (selectedSampleId) {
-          selectedStrong = allStrong.filter((box) => box.sampleId === selectedSampleId);
-        }
+        const aggregatedGridPoints: GridPoint[] = [];
+      const aggregatedRowLines: LinePoint[][] = [];
+      const aggregatedColLines: LinePoint[][] = [];
+      const aggregatedCandidateBoxes: CandidateBox[] = [];
+      const aggregatedMissingBoxes: CandidateBox[] = [];
 
-        if (selectedSampleMat && selectedStrong.length > 0) {
-          sceneProcessedGray = buildProcessedGrayMat(cv, sceneMat, debugMode);
-          selectedSampleProcessedGray = buildProcessedGrayMat(cv, selectedSampleMat, debugMode);
+      sceneProcessedGray = buildProcessedGrayMat(cv, sceneMat, debugMode);
 
-          const gridModel = buildGridModelFromStrong(selectedStrong);
-          const grid = gridModel.points;
-          const candidateBoxes: CandidateBox[] = [];
-          const missingBoxes: CandidateBox[] = [];
+      for (let sampleIndex = 0; sampleIndex < validSamples.length; sampleIndex++) {
+        const sample = validSamples[sampleIndex];
+        const sampleStrong = allStrong.filter((box) => box.sampleId === sample.id);
+        if (sampleStrong.length === 0 || !sample.compareUrl) continue;
 
-          for (const gp of grid) {
-            const score = sampleGridPointScore(cv, sceneProcessedGray, selectedSampleProcessedGray, gp);
+        let loopSampleMatForGrid: any = null;
+        let loopSampleProcessedGray: any = null;
+
+        try {
+          const loadedSample = await imageSrcToMat(cv, sample.compareUrl, compareResolution);
+          if (!loadedSample) continue;
+
+          loopSampleMatForGrid = loadedSample.srcMat;
+          loopSampleProcessedGray = buildProcessedGrayMat(cv, loopSampleMatForGrid, debugMode);
+
+          const sampleMatchThreshold = effectiveThresholdFrom(
+            baseThreshold,
+            getSampleSensitivity(sample)
+          );
+
+          const gridModel = buildGridModelFromStrong(sampleStrong);
+          aggregatedGridPoints.push(...gridModel.points);
+          aggregatedRowLines.push(...gridModel.rowLines);
+          aggregatedColLines.push(...gridModel.colLines);
+
+          for (const gp of gridModel.points) {
+            const score = sampleGridPointScore(cv, sceneProcessedGray, loopSampleProcessedGray, gp);
             const pointWithScore: GridPoint = { ...gp, score };
-            const exists = findExistenceForGridPoint(pointWithScore, selectedStrong);
+            const exists = findExistenceForGridPoint(pointWithScore, sampleStrong);
 
             const box: CandidateBox = {
               x: clamp01(pointWithScore.cx - pointWithScore.w / 2),
@@ -1200,39 +1327,38 @@ export default function ReviewPage() {
               w: clamp01(pointWithScore.w),
               h: clamp01(pointWithScore.h),
               score,
+              sampleId: sample.id,
+              sampleColorIndex: sampleIndex,
             };
 
             if (box.x + box.w > 1) box.x = Math.max(0, 1 - box.w);
             if (box.y + box.h > 1) box.y = Math.max(0, 1 - box.h);
 
             if (exists) continue;
-            if (score >= appliedMissingCandidateThreshold && score < matchThreshold) {
-              candidateBoxes.push(box);
+
+            if (score >= appliedMissingCandidateThreshold && score < sampleMatchThreshold) {
+              aggregatedCandidateBoxes.push(box);
             } else {
-              missingBoxes.push(box);
+              aggregatedMissingBoxes.push(box);
             }
           }
-
-          if (!cancelled) {
-            setMatchBoxes(allStrong);
-            setSampleHitCounts(counts);
-            setGridPoints(grid);
-            setRowLines(gridModel.rowLines);
-            setColLines(gridModel.colLines);
-            setCandidatePoints(candidateBoxes);
-            setMissingCandidates(missingOn ? missingBoxes : []);
-          }
-        } else {
-          if (!cancelled) {
-            setMatchBoxes(allStrong);
-            setSampleHitCounts(counts);
-            setGridPoints([]);
-            setRowLines([]);
-            setColLines([]);
-            setCandidatePoints([]);
-            setMissingCandidates([]);
-          }
+        } finally {
+          try {
+            loopSampleMatForGrid?.delete?.();
+            loopSampleProcessedGray?.delete?.();
+          } catch {}
         }
+      }
+
+      if (!cancelled) {
+        setMatchBoxes(allStrong);
+        setSampleHitCounts(counts);
+        setGridPoints(aggregatedGridPoints);
+        setRowLines(aggregatedRowLines);
+        setColLines(aggregatedColLines);
+        setCandidatePoints(aggregatedCandidateBoxes);
+        setMissingCandidates(missingOn ? aggregatedMissingBoxes : []);
+      }
       } catch (e) {
         console.error(e);
       } finally {
@@ -1257,6 +1383,7 @@ export default function ReviewPage() {
     debugMode,
     matchThreshold,
     appliedMissingCandidateThreshold,
+    baseThreshold,
     rotationRange,
     scaleRange,
     shearRange,
@@ -1297,6 +1424,7 @@ const drawPolylineCanvas = (
   };
 
   const adjustSensitivity = (delta: number) => {
+    if (!sensitivitySliderEnabled) return;
     applySensitivityChange(sensitivity + delta);
   };
 
@@ -1352,7 +1480,7 @@ const drawPolylineCanvas = (
       const y = Math.round(box.y * canvas.height);
       const w = Math.round(box.w * canvas.width);
       const h = Math.round(box.h * canvas.height);
-      const color = colorFromIndex(i);
+      const color = colorFromIndex(box.sampleColorIndex ?? i);
 
       ctx.strokeStyle = color;
       ctx.strokeRect(x, y, w, h);
@@ -1372,23 +1500,10 @@ const drawPolylineCanvas = (
     });
 
     if (missingOn) {
-      ctx.strokeStyle = "rgba(255,255,255,0.28)";
-      ctx.lineWidth = 1;
-      rowLines.forEach((line) => drawPolylineCanvas(ctx, line, canvas.width, canvas.height));
-      colLines.forEach((line) => drawPolylineCanvas(ctx, line, canvas.width, canvas.height));
-
       ctx.setLineDash([10, 8]);
-      ctx.lineWidth = Math.max(2, Math.round(Math.min(canvas.width, canvas.height) * 0.003));
-      ctx.strokeStyle = "#fbbf24";
-      candidatePoints.forEach((box) => {
-        const x = Math.round(box.x * canvas.width);
-        const y = Math.round(box.y * canvas.height);
-        const w = Math.round(box.w * canvas.width);
-        const h = Math.round(box.h * canvas.height);
-        ctx.strokeRect(x, y, w, h);
-      });
-
+      ctx.lineWidth = Math.max(3, Math.round(Math.min(canvas.width, canvas.height) * 0.004));
       ctx.strokeStyle = "#fb7185";
+
       missingCandidates.forEach((box) => {
         const x = Math.round(box.x * canvas.width);
         const y = Math.round(box.y * canvas.height);
@@ -1549,17 +1664,18 @@ const drawPolylineCanvas = (
         }}
       />
 
-      <div className="fixed right-2 bottom-2 z-[9999] text-[10px] px-2 py-1 rounded bg-black/70 text-zinc-300 border border-white/10 pointer-events-none">
-        {REVIEW_VERSION}
-      </div>
-
       <div className="px-4 pt-4 pb-3 border-b border-zinc-800 bg-zinc-950 space-y-3">
         <div className="flex items-center gap-2">
-          <div className="text-sm text-zinc-300 shrink-0">感度</div>
+          <div className="text-sm text-zinc-300 shrink-0">検知感度</div>
 
           <button
             onClick={() => adjustSensitivity(-1)}
-            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
+            disabled={!sensitivitySliderEnabled}
+            className={`w-8 h-8 rounded-lg border text-zinc-200 transition ${
+              sensitivitySliderEnabled
+                ? "border-zinc-700 bg-zinc-900"
+                : "border-zinc-800 bg-zinc-950 text-zinc-500"
+            }`}
           >
             -
           </button>
@@ -1569,19 +1685,27 @@ const drawPolylineCanvas = (
             min={0}
             max={100}
             step={1}
-            value={sensitivity}
+            value={displayedSensitivity ?? 50}
+            disabled={!sensitivitySliderEnabled}
             onChange={(e) => applySensitivityChange(Number(e.target.value))}
-            className="flex-1"
+            className={`flex-1 ${sensitivitySliderEnabled ? "" : "opacity-50"}`}
           />
 
           <button
             onClick={() => adjustSensitivity(1)}
-            className="w-8 h-8 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-200"
+            disabled={!sensitivitySliderEnabled}
+            className={`w-8 h-8 rounded-lg border text-zinc-200 transition ${
+              sensitivitySliderEnabled
+                ? "border-zinc-700 bg-zinc-900"
+                : "border-zinc-800 bg-zinc-950 text-zinc-500"
+            }`}
           >
             +
           </button>
 
-          <div className="text-sm w-10 text-right text-zinc-300">{sensitivity}</div>
+          <div className={`text-sm w-10 text-right ${sensitivitySliderEnabled ? "text-zinc-300" : "text-zinc-500"}`}>
+            {sensitivitySliderEnabled ? sensitivity : "--"}
+          </div>
         </div>
 
         <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2">
@@ -1601,11 +1725,11 @@ const drawPolylineCanvas = (
         {cvError ? <div className="text-xs text-rose-400">{cvError}</div> : null}
       </div>
 
-      <div className="flex-1 p-4 space-y-4">
+      <div className="flex-1 px-4 pt-4 pb-2 space-y-3">
         <div
           ref={frameRef}
           className="w-full rounded-[1.5rem] border border-zinc-800 bg-zinc-900 relative overflow-hidden mx-auto flex items-center justify-center"
-          style={{ height: "min(64vh, 72vw, 760px)" }}
+          style={{ height: "min(78vh, 88vw, 980px)" }}
         >
           {mainPreviewUrl ? (
             <>
@@ -1625,8 +1749,8 @@ const drawPolylineCanvas = (
               {matchBoxes.map((box, i) => {
                 const hasSelection = !!activeSampleId;
                 const isSelected = !hasSelection || box.sampleId === activeSampleId;
-                const borderWidth = hasSelection && !isSelected ? 1 : 3;
-                const opacity = hasSelection && !isSelected ? 0.45 : 1;
+                const borderWidth = hasSelection && !isSelected ? 2 : 3;
+                const opacity = hasSelection && !isSelected ? 0.7 : 1;
                 const borderColor = colorFromIndex(box.sampleColorIndex ?? i);
 
                 return (
@@ -1649,19 +1773,27 @@ const drawPolylineCanvas = (
               })}
 
               {missingOn &&
-                missingCandidates.map((box, i) => (
-                  <div
-                    key={`missing-${i}-${box.x}-${box.y}`}
-                    className="absolute rounded-md pointer-events-none border-[3px] border-dashed border-rose-400"
-                    style={{
-                      left: imageRect.left + imageRect.width * box.x,
-                      top: imageRect.top + imageRect.height * box.y,
-                      width: imageRect.width * box.w,
-                      height: imageRect.height * box.h,
-                    }}
-                    title={`欠落候補 ${box.score.toFixed(3)}`}
-                  />
-                ))}
+                missingCandidates.map((box, i) => {
+                  const hasSelection = !!activeSampleId;
+                  const isSelected = !hasSelection || box.sampleId === activeSampleId;
+                  const borderWidth = hasSelection && !isSelected ? 2 : 3;
+                  const opacity = hasSelection && !isSelected ? 0.7 : 1;
+
+                  return (
+                    <div
+                      key={`missing-${i}-${box.sampleId ?? "all"}-${box.x}-${box.y}`}
+                      className="absolute rounded-md pointer-events-none border-dashed border-rose-400"
+                      style={{
+                        left: imageRect.left + imageRect.width * box.x,
+                        top: imageRect.top + imageRect.height * box.y,
+                        width: imageRect.width * box.w,
+                        height: imageRect.height * box.h,
+                        borderWidth,
+                        opacity,
+                      }}
+                    />
+                  );
+                })}
 
               {pendingRecheck ? (
                 <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/35">
@@ -1701,7 +1833,7 @@ const drawPolylineCanvas = (
         <div className="grid grid-cols-3 gap-3">
           {samples.map((sample, sampleIndex) => {
             const ratio = sample.aspectRatio && sample.aspectRatio > 0 ? sample.aspectRatio : 1;
-            const thumbW = Math.max(40, Math.min(72, Math.round(40 * ratio)));
+            const thumbW = Math.max(38, Math.min(58, Math.round(36 * ratio)));
             const selected = activeSampleId === sample.id;
             const outlineColor = colorFromIndex(sampleIndex);
             const hitCount = sampleHitCounts[sample.id] ?? 0;
@@ -1748,7 +1880,7 @@ const drawPolylineCanvas = (
                   )}
 
                   <div className="min-w-0 flex flex-col items-start">
-                    <div className="text-sm font-semibold truncate">{hitCount}件</div>
+                    <div className="text-sm font-semibold leading-none min-w-[1.5rem] text-center tabular-nums">{hitCount}</div>
                   </div>
                 </button>
 
@@ -1798,7 +1930,7 @@ const drawPolylineCanvas = (
       </div>
       </div>
 
-      <div className="bg-black px-5 pt-2 pb-6">
+      <div className="bg-black px-5 pt-1 pb-6">
         <div className="flex items-center justify-between">
           <button
             onClick={() => router.push("/settings")}
