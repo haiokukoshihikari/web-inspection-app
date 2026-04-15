@@ -1860,6 +1860,17 @@ const drawPolylineCanvas = (
           ) : null}
         </div>
       </div>
+      <div className="px-4 pb-2">
+        <div className="rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-[11px] leading-5 text-zinc-300">
+          <div>baseThreshold: {baseThreshold}</div>
+          <div>missingCandidateThreshold: {appliedMissingCandidateThreshold}</div>
+          <div>rotationRange: {rotationRange}</div>
+          <div>scaleRange: {scaleRange}</div>
+          <div>shearRange: {shearRange}</div>
+          <div>compareResolution: {compareResolution}</div>
+          <div>hitLimit: {hitLimit}</div>
+        </div>
+      </div>
       </div>
 
       <div className="bg-black px-5 pt-1 pb-6">
