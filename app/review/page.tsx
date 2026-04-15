@@ -1833,7 +1833,7 @@ const drawPolylineCanvas = (
                 })}
 
               {pendingRecheck ? (
-                <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/35">
+                <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-black/35">
                   <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
                     <div className="text-lg font-semibold">再検査待機中…</div>
                     <div className="mt-1 text-sm text-zinc-300">条件変更の確定待ちです</div>
