@@ -469,12 +469,8 @@ export default function AddSamplePage() {
 
   return (
     <main className="min-h-screen bg-black text-white flex flex-col">
-      <div className="fixed right-2 bottom-2 z-[9999] text-[10px] px-2 py-1 rounded bg-black/70 text-zinc-300 border border-white/10 pointer-events-none">
-        {PAGE_VERSION}
-      </div>
-
       <div className="flex items-center justify-between px-4 py-4 border-b border-zinc-800 bg-zinc-950">
-        <div className="text-base font-medium">見本にしたい部分を囲って下さい</div>
+        <div className="text-base font-medium">見本登録</div>
         <button
           onClick={() => router.push("/review")}
           className="text-sm text-zinc-300"
@@ -483,11 +479,10 @@ export default function AddSamplePage() {
         </button>
       </div>
 
-      <div className="px-4 pt-3 text-xs text-zinc-400">
-        {`解像度 ${compareResolution}`}
-      </div>
-
-      <div className="flex-1 p-4">
+      <div className="flex-1 px-4 pt-3 pb-2">
+        <div className="mb-3 text-sm text-zinc-300">
+          検知したい対象を枠内に収めて下さい
+        </div>
         <div
           ref={frameRef}
           className="w-full max-h-[58vh] rounded-[1.5rem] border border-zinc-800 bg-zinc-900 relative overflow-hidden aspect-[3/4] mx-auto flex items-center justify-center"
@@ -582,15 +577,7 @@ export default function AddSamplePage() {
           </div>
         </div>
 
-        <div className="text-center text-xs text-zinc-400">
-          1本指で画像移動 / 2本指で拡大縮小 / 枠は中央固定
-        </div>
-
-        <div className="text-center text-[11px] text-zinc-500">
-          {`crop x:${cropRectImage.x} y:${cropRectImage.y} w:${cropRectImage.width} h:${cropRectImage.height}`}
-        </div>
-
-        <div className="flex items-center justify-center gap-3">
+        <div className="flex items-center justify-center gap-3 pt-1">
           <button
             onClick={() => router.push("/review")}
             className="px-6 py-3 rounded-2xl border border-zinc-700 bg-zinc-900"
