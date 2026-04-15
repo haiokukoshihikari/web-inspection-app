@@ -1056,7 +1056,7 @@ export default function ReviewPage() {
     scheduleRecheckApply(nextBase, 50, draftMissingCandidateThreshold);
   };
 
-  const applySensitivityChange = (nextSensitivityRaw: number) => {
+  const applySensitivityDraftChange = (nextSensitivityRaw: number) => {
     if (!editingSampleId) return;
 
     const nextSensitivity = clamp(Math.round(nextSensitivityRaw), 0, 100);
@@ -1070,8 +1070,11 @@ export default function ReviewPage() {
           : sample
       )
     );
+  };
 
-    scheduleRecheckApply(baseThreshold, nextSensitivity, draftMissingCandidateThreshold);
+  const commitSensitivityChange = () => {
+    if (!editingSampleId) return;
+    scheduleRecheckApply(baseThreshold, sensitivity, draftMissingCandidateThreshold);
   };
 
   const applyMissingCandidateThresholdChange = (nextThresholdRaw: number) => {
@@ -1425,7 +1428,9 @@ const drawPolylineCanvas = (
 
   const adjustSensitivity = (delta: number) => {
     if (!sensitivitySliderEnabled) return;
-    applySensitivityChange(sensitivity + delta);
+    const nextSensitivity = clamp(Math.round(sensitivity + delta), 0, 100);
+    applySensitivityDraftChange(nextSensitivity);
+    commitSensitivityChange();
   };
 
   const adjustMissingCandidateThreshold = (delta: number) => {
@@ -1687,7 +1692,11 @@ const drawPolylineCanvas = (
             step={1}
             value={displayedSensitivity ?? 50}
             disabled={!sensitivitySliderEnabled}
-            onChange={(e) => applySensitivityChange(Number(e.target.value))}
+            onChange={(e) => applySensitivityDraftChange(Number(e.target.value))}
+            onPointerUp={commitSensitivityChange}
+            onTouchEnd={commitSensitivityChange}
+            onMouseUp={commitSensitivityChange}
+            onBlur={commitSensitivityChange}
             className={`flex-1 ${sensitivitySliderEnabled ? "" : "opacity-50"}`}
           />
 
