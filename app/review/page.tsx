@@ -1070,38 +1070,8 @@ export default function ReviewPage() {
           : sample
       )
     );
-  };
 
-  const beginSensitivityInteraction = () => {
-    if (!sensitivitySliderEnabled) return;
-    if (thresholdApplyTimerRef.current !== null) {
-      window.clearTimeout(thresholdApplyTimerRef.current);
-    }
-    setPendingRecheck(true);
-    setBuildingPreview(false);
-  };
-
-  const commitSensitivityChange = (nextSensitivityRaw: number) => {
-    if (!editingSampleId) return;
-
-    const nextSensitivity = clamp(Math.round(nextSensitivityRaw), 0, 100);
-
-    if (thresholdApplyTimerRef.current !== null) {
-      window.clearTimeout(thresholdApplyTimerRef.current);
-    }
-
-    thresholdApplyTimerRef.current = window.setTimeout(() => {
-      const nextEffective = effectiveThresholdFrom(baseThreshold, nextSensitivity);
-      setPendingRecheck(false);
-      setBuildingPreview(true);
-
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          setMatchThreshold(nextEffective);
-          setAppliedMissingCandidateThreshold(draftMissingCandidateThreshold);
-        });
-      });
-    }, 1000);
+    scheduleRecheckApply(baseThreshold, nextSensitivity, draftMissingCandidateThreshold);
   };
 
   const applyMissingCandidateThresholdChange = (nextThresholdRaw: number) => {
@@ -1717,14 +1687,7 @@ const drawPolylineCanvas = (
             step={1}
             value={displayedSensitivity ?? 50}
             disabled={!sensitivitySliderEnabled}
-            onPointerDown={beginSensitivityInteraction}
-            onTouchStart={beginSensitivityInteraction}
-            onMouseDown={beginSensitivityInteraction}
             onChange={(e) => applySensitivityChange(Number(e.target.value))}
-            onPointerUp={(e) => commitSensitivityChange(Number((e.currentTarget as HTMLInputElement).value))}
-            onTouchEnd={(e) => commitSensitivityChange(Number((e.currentTarget as HTMLInputElement).value))}
-            onMouseUp={(e) => commitSensitivityChange(Number((e.currentTarget as HTMLInputElement).value))}
-            onBlur={(e) => commitSensitivityChange(Number((e.currentTarget as HTMLInputElement).value))}
             className={`flex-1 ${sensitivitySliderEnabled ? "" : "opacity-50"}`}
           />
 
@@ -1833,7 +1796,7 @@ const drawPolylineCanvas = (
                 })}
 
               {pendingRecheck ? (
-                <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-black/35">
+                <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/35">
                   <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
                     <div className="text-lg font-semibold">再検査待機中…</div>
                     <div className="mt-1 text-sm text-zinc-300">条件変更の確定待ちです</div>
