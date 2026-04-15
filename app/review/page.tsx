@@ -830,20 +830,6 @@ export default function ReviewPage() {
       const savedAutoSave = localStorage.getItem(AUTO_SAVE_KEY);
       if (savedAutoSave !== null) setAutoSaveOn(savedAutoSave === "true");
 
-      const savedSamples = localStorage.getItem(SAMPLES_KEY);
-      if (savedSamples) {
-        const parsed = JSON.parse(savedSamples);
-        if (Array.isArray(parsed)) {
-          setSamples(parsed);
-          const pendingSelectedId = sessionStorage.getItem(PENDING_SELECTED_SAMPLE_ID_KEY);
-          if (pendingSelectedId && parsed.some((item: SampleItem) => item.id === pendingSelectedId)) {
-            setSelectedSampleId(pendingSelectedId);
-            setActiveSampleId(pendingSelectedId);
-            sessionStorage.removeItem(PENDING_SELECTED_SAMPLE_ID_KEY);
-          }
-        }
-      }
-
       const pendingSharedProfileRaw = sessionStorage.getItem(PENDING_SHARED_PROFILE_KEY);
       const savedSensitivity = localStorage.getItem(SENSITIVITY_KEY);
 
@@ -934,6 +920,24 @@ export default function ReviewPage() {
         }
       }
 
+      const savedSamples = localStorage.getItem(SAMPLES_KEY);
+      if (savedSamples) {
+        const parsed = JSON.parse(savedSamples);
+        if (Array.isArray(parsed)) {
+          const filtered = parsed.filter((item: SampleItem) => {
+            return !item.savedResolution || item.savedResolution === initialCompareResolution;
+          });
+
+          setSamples(filtered);
+          const pendingSelectedId = sessionStorage.getItem(PENDING_SELECTED_SAMPLE_ID_KEY);
+          if (pendingSelectedId && filtered.some((item: SampleItem) => item.id === pendingSelectedId)) {
+            setSelectedSampleId(pendingSelectedId);
+            setActiveSampleId(pendingSelectedId);
+            sessionStorage.removeItem(PENDING_SELECTED_SAMPLE_ID_KEY);
+          }
+        }
+      }
+
       let initialSensitivity = 50;
       if (savedSensitivity !== null) {
         const n = Number(savedSensitivity);
@@ -955,6 +959,7 @@ export default function ReviewPage() {
       setShearRange(initialShearRange);
       setCompareResolution(initialCompareResolution);
       setHitLimit(initialHitLimit);
+      prevResolutionRef.current = initialCompareResolution;
     } catch {}
 
     setSamplesLoaded(true);
@@ -1796,7 +1801,7 @@ const drawPolylineCanvas = (
                 })}
 
               {pendingRecheck ? (
-                <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/35">
+                <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-black/35">
                   <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
                     <div className="text-lg font-semibold">再検査待機中…</div>
                     <div className="mt-1 text-sm text-zinc-300">条件変更の確定待ちです</div>
