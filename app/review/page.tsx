@@ -1596,13 +1596,9 @@ const drawPolylineCanvas = (
         }}
       />
 
-      <div className="fixed right-2 bottom-2 z-[9999] text-[10px] px-2 py-1 rounded bg-black/70 text-zinc-300 border border-white/10 pointer-events-none">
-        {REVIEW_VERSION}
-      </div>
-
       <div className="px-4 pt-4 pb-3 border-b border-zinc-800 bg-zinc-950 space-y-3">
         <div className="flex items-center gap-2">
-          <div className="text-sm text-zinc-300 shrink-0">感度</div>
+          <div className="text-sm text-zinc-300 shrink-0">検知感度</div>
 
           <button
             onClick={() => adjustSensitivity(-1)}
@@ -1661,11 +1657,11 @@ const drawPolylineCanvas = (
         {cvError ? <div className="text-xs text-rose-400">{cvError}</div> : null}
       </div>
 
-      <div className="flex-1 p-4 space-y-4">
+      <div className="flex-1 px-4 pt-4 pb-2 space-y-3">
         <div
           ref={frameRef}
           className="w-full rounded-[1.5rem] border border-zinc-800 bg-zinc-900 relative overflow-hidden mx-auto flex items-center justify-center"
-          style={{ height: "min(64vh, 72vw, 760px)" }}
+          style={{ height: "min(70vh, 82vw, 860px)" }}
         >
           {mainPreviewUrl ? (
             <>
@@ -1769,7 +1765,7 @@ const drawPolylineCanvas = (
         <div className="grid grid-cols-3 gap-3">
           {samples.map((sample, sampleIndex) => {
             const ratio = sample.aspectRatio && sample.aspectRatio > 0 ? sample.aspectRatio : 1;
-            const thumbW = Math.max(40, Math.min(72, Math.round(40 * ratio)));
+            const thumbW = Math.max(38, Math.min(58, Math.round(36 * ratio)));
             const selected = activeSampleId === sample.id;
             const outlineColor = colorFromIndex(sampleIndex);
             const hitCount = sampleHitCounts[sample.id] ?? 0;
@@ -1816,7 +1812,7 @@ const drawPolylineCanvas = (
                   )}
 
                   <div className="min-w-0 flex flex-col items-start">
-                    <div className="text-sm font-semibold truncate">{hitCount}件</div>
+                    <div className="text-sm font-semibold leading-none min-w-[1.5rem] text-center tabular-nums">{hitCount}</div>
                   </div>
                 </button>
 
@@ -1866,7 +1862,7 @@ const drawPolylineCanvas = (
       </div>
       </div>
 
-      <div className="bg-black px-5 pt-2 pb-6">
+      <div className="bg-black px-5 pt-1 pb-6">
         <div className="flex items-center justify-between">
           <button
             onClick={() => router.push("/settings")}
