@@ -629,8 +629,13 @@ export default function CameraPage() {
 
   return (
     <main className="h-[100dvh] bg-black text-white flex flex-col overflow-hidden">
-      <div className="fixed right-2 bottom-2 z-[9999] text-[10px] px-2 py-1 rounded bg-black/70 text-zinc-300 border border-white/10 pointer-events-none">
-        {configVersion}
+      <div className="fixed right-2 bottom-2 z-[9999] text-[10px] px-2 py-1 rounded bg-black/70 text-zinc-300 border border-white/10 pointer-events-none text-right leading-4">
+        <div>{configVersion}</div>
+        <div className="text-white/70">
+          {sharedProfile
+            ? `res:${sharedProfile.compareResolution} hit:${sharedProfile.hitLimit} rot:${sharedProfile.rotationRange} scale:${sharedProfile.scaleRange} shear:${sharedProfile.shearRange}`
+            : "shared:none"}
+        </div>
       </div>
 
       <input
