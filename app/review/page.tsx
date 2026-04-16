@@ -738,6 +738,7 @@ export default function ReviewPage() {
   const frameRef = useRef<HTMLDivElement | null>(null);
   const prevResolutionRef = useRef<CompareResolutionMode | null>(null);
   const thresholdApplyTimerRef = useRef<number | null>(null);
+  const sensitivitySlidingRef = useRef(false);
 
   const [capturedImage, setCapturedImage] = useState("");
   const [captureDebugInfo, setCaptureDebugInfo] = useState<CaptureDebugInfo | null>(null);
@@ -1075,7 +1076,24 @@ export default function ReviewPage() {
           : sample
       )
     );
+  };
 
+  const beginSensitivitySliding = () => {
+    if (!sensitivitySliderEnabled) return;
+    sensitivitySlidingRef.current = true;
+    if (thresholdApplyTimerRef.current !== null) {
+      window.clearTimeout(thresholdApplyTimerRef.current);
+      thresholdApplyTimerRef.current = null;
+    }
+    setPendingRecheck(true);
+    setBuildingPreview(false);
+  };
+
+  const commitSensitivitySliding = () => {
+    if (!sensitivitySlidingRef.current) return;
+    sensitivitySlidingRef.current = false;
+    if (!editingSampleId) return;
+    const nextSensitivity = clamp(Math.round(displayedSensitivity ?? sensitivity ?? 50), 0, 100);
     scheduleRecheckApply(baseThreshold, nextSensitivity, draftMissingCandidateThreshold);
   };
 
@@ -1692,7 +1710,14 @@ const drawPolylineCanvas = (
             step={1}
             value={displayedSensitivity ?? 50}
             disabled={!sensitivitySliderEnabled}
+            onPointerDown={beginSensitivitySliding}
+            onTouchStart={beginSensitivitySliding}
+            onMouseDown={beginSensitivitySliding}
             onChange={(e) => applySensitivityChange(Number(e.target.value))}
+            onPointerUp={commitSensitivitySliding}
+            onTouchEnd={commitSensitivitySliding}
+            onMouseUp={commitSensitivitySliding}
+            onBlur={commitSensitivitySliding}
             className={`flex-1 ${sensitivitySliderEnabled ? "" : "opacity-50"}`}
           />
 
