@@ -738,6 +738,19 @@ export default function ReviewPage() {
   const frameRef = useRef<HTMLDivElement | null>(null);
   const prevResolutionRef = useRef<CompareResolutionMode | null>(null);
   const thresholdApplyTimerRef = useRef<number | null>(null);
+  const recheckTraceRef = useRef<{ id: number; startedAt: number } | null>(null);
+
+  const logRecheck = useCallback((phase: string, detail?: Record<string, unknown>) => {
+    const now = performance.now();
+    const trace = recheckTraceRef.current;
+    const elapsed = trace ? Math.round(now - trace.startedAt) : null;
+    console.log("[review-recheck]", {
+      phase,
+      traceId: trace?.id ?? null,
+      elapsedMs: elapsed,
+      ...(detail ?? {}),
+    });
+  }, []);
   const sensitivitySlidingRef = useRef(false);
   const sensitivityDraftRef = useRef<number | null>(null);
 
@@ -1047,7 +1060,17 @@ export default function ReviewPage() {
   ) => {
     if (thresholdApplyTimerRef.current !== null) {
       window.clearTimeout(thresholdApplyTimerRef.current);
+      logRecheck("schedule-cleared");
     }
+
+    const nextTraceId = (recheckTraceRef.current?.id ?? 0) + 1;
+    recheckTraceRef.current = { id: nextTraceId, startedAt: performance.now() };
+
+    logRecheck("schedule-created", {
+      nextBase,
+      nextSensitivity,
+      nextMissingCandidateThreshold,
+    });
 
     setPendingRecheck(true);
     setRecheckPhase("waiting");
@@ -1055,12 +1078,17 @@ export default function ReviewPage() {
 
     thresholdApplyTimerRef.current = window.setTimeout(() => {
       const nextEffective = effectiveThresholdFrom(nextBase, nextSensitivity);
+      logRecheck("timer-fired", {
+        nextEffective,
+      });
+
       setPendingRecheck(false);
       setBuildingPreview(true);
       setRecheckPhase("running");
 
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
+          logRecheck("apply-threshold-state");
           setMatchThreshold(nextEffective);
           setAppliedMissingCandidateThreshold(nextMissingCandidateThreshold);
         });
@@ -1238,6 +1266,14 @@ export default function ReviewPage() {
       const cv = window.cv;
       if (!cv) return;
 
+      logRecheck("build-start", {
+        compareResolution,
+        hitLimit,
+        sampleCount: samples.length,
+        matchThreshold,
+        missingOn,
+      });
+
       await new Promise<void>((resolve) => {
         requestAnimationFrame(() => resolve());
       });
@@ -1252,6 +1288,10 @@ export default function ReviewPage() {
         if (!loadedScene) return;
 
         sceneMat = loadedScene.srcMat;
+        logRecheck("scene-loaded", {
+          cols: sceneMat.cols,
+          rows: sceneMat.rows,
+        });
 
         if (cancelled) return;
 
@@ -1266,7 +1306,12 @@ export default function ReviewPage() {
           (s) => !!s.compareUrl && s.savedResolution === compareResolution
         );
 
+        logRecheck("valid-samples-ready", {
+          validSampleCount: validSamples.length,
+        });
+
         if (validSamples.length === 0) {
+          logRecheck("no-valid-samples");
           setSamplePreviewUrl("");
           setMatchBoxes([]);
           setSampleHitCounts({});
@@ -1408,6 +1453,12 @@ export default function ReviewPage() {
       }
 
       if (!cancelled) {
+        logRecheck("state-apply-start", {
+          strongCount: allStrong.length,
+          gridCount: aggregatedGridPoints.length,
+          candidateCount: aggregatedCandidateBoxes.length,
+          missingCount: aggregatedMissingBoxes.length,
+        });
         setMatchBoxes(allStrong);
         setSampleHitCounts(counts);
         setGridPoints(aggregatedGridPoints);
@@ -1428,6 +1479,7 @@ export default function ReviewPage() {
         if (!cancelled) {
           requestAnimationFrame(() => {
             requestAnimationFrame(() => {
+              logRecheck("overlay-clear");
               setBuildingPreview(false);
               setRecheckPhase("idle");
             });
