@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Script from "next/script";
 import { useRouter } from "next/navigation";
 
@@ -753,6 +753,7 @@ export default function ReviewPage() {
   }, []);
   const sensitivitySlidingRef = useRef(false);
   const sensitivityDraftRef = useRef<number | null>(null);
+  const pendingSensitivityCommitRef = useRef<{ sampleId: string; value: number } | null>(null);
 
   const [capturedImage, setCapturedImage] = useState("");
   const [captureDebugInfo, setCaptureDebugInfo] = useState<CaptureDebugInfo | null>(null);
@@ -806,17 +807,7 @@ export default function ReviewPage() {
   const editingSampleId = samples.length === 1 ? samples[0]?.id ?? null : activeSampleId;
   const editingSample = editingSampleId ? samples.find((s) => s.id === editingSampleId) ?? null : null;
   const sensitivitySliderEnabled = samples.length === 1 || !!activeSampleId;
-  const displayedSensitivity = editingSample
-    ? clamp(
-        Math.round(
-          sensitivitySlidingRef.current && sensitivityDraftRef.current !== null
-            ? sensitivityDraftRef.current
-            : editingSample.detectionSensitivity ?? 50
-        ),
-        0,
-        100
-      )
-    : null;
+  const displayedSensitivity = sensitivitySliderEnabled ? clamp(Math.round(sensitivity ?? 50), 0, 100) : null;
 
   const [displayBasis, setDisplayBasis] = useState({ width: 0, height: 0 });
   const [imageRect, setImageRect] = useState({
@@ -1086,8 +1077,21 @@ export default function ReviewPage() {
       setBuildingPreview(true);
       setRecheckPhase("running");
 
+      thresholdApplyTimerRef.current = null;
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
+          const pendingSensitivityCommit = pendingSensitivityCommitRef.current;
+          if (pendingSensitivityCommit) {
+            setSamples((prev) =>
+              prev.map((sample) =>
+                sample.id === pendingSensitivityCommit.sampleId
+                  ? { ...sample, detectionSensitivity: pendingSensitivityCommit.value }
+                  : sample
+              )
+            );
+            pendingSensitivityCommitRef.current = null;
+          }
+
           logRecheck("apply-threshold-state");
           setMatchThreshold(nextEffective);
           setAppliedMissingCandidateThreshold(nextMissingCandidateThreshold);
@@ -1115,7 +1119,7 @@ export default function ReviewPage() {
   const beginSensitivitySliding = () => {
     if (!sensitivitySliderEnabled || !editingSampleId) return;
     sensitivitySlidingRef.current = true;
-    sensitivityDraftRef.current = clamp(Math.round(displayedSensitivity ?? sensitivity ?? 50), 0, 100);
+    sensitivityDraftRef.current = clamp(Math.round(sensitivity ?? 50), 0, 100);
 
     if (thresholdApplyTimerRef.current !== null) {
       window.clearTimeout(thresholdApplyTimerRef.current);
@@ -1140,14 +1144,10 @@ export default function ReviewPage() {
 
     setSensitivity(nextSensitivity);
     localStorage.setItem(SENSITIVITY_KEY, String(nextSensitivity));
-
-    setSamples((prev) =>
-      prev.map((sample) =>
-        sample.id === editingSampleId
-          ? { ...sample, detectionSensitivity: nextSensitivity }
-          : sample
-      )
-    );
+    pendingSensitivityCommitRef.current = {
+      sampleId: editingSampleId,
+      value: nextSensitivity,
+    };
 
     scheduleRecheckApply(baseThreshold, nextSensitivity, draftMissingCandidateThreshold);
   };
@@ -1162,6 +1162,7 @@ export default function ReviewPage() {
     if (!sensitivitySliderEnabled || !editingSampleId) {
       sensitivitySlidingRef.current = false;
       sensitivityDraftRef.current = null;
+      pendingSensitivityCommitRef.current = null;
     }
   }, [editingSampleId, sensitivitySliderEnabled]);
 
