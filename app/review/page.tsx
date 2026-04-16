@@ -739,6 +739,7 @@ export default function ReviewPage() {
   const prevResolutionRef = useRef<CompareResolutionMode | null>(null);
   const thresholdApplyTimerRef = useRef<number | null>(null);
   const sensitivitySlidingRef = useRef(false);
+  const sensitivityDraftRef = useRef<number | null>(null);
 
   const [capturedImage, setCapturedImage] = useState("");
   const [captureDebugInfo, setCaptureDebugInfo] = useState<CaptureDebugInfo | null>(null);
@@ -791,7 +792,17 @@ export default function ReviewPage() {
   const editingSampleId = samples.length === 1 ? samples[0]?.id ?? null : activeSampleId;
   const editingSample = editingSampleId ? samples.find((s) => s.id === editingSampleId) ?? null : null;
   const sensitivitySliderEnabled = samples.length === 1 || !!activeSampleId;
-  const displayedSensitivity = editingSample ? clamp(Math.round(editingSample.detectionSensitivity ?? 50), 0, 100) : null;
+  const displayedSensitivity = editingSample
+    ? clamp(
+        Math.round(
+          sensitivitySlidingRef.current && sensitivityDraftRef.current !== null
+            ? sensitivityDraftRef.current
+            : editingSample.detectionSensitivity ?? 50
+        ),
+        0,
+        100
+      )
+    : null;
 
   const [displayBasis, setDisplayBasis] = useState({ width: 0, height: 0 });
   const [imageRect, setImageRect] = useState({
@@ -1066,21 +1077,15 @@ export default function ReviewPage() {
     if (!editingSampleId) return;
 
     const nextSensitivity = clamp(Math.round(nextSensitivityRaw), 0, 100);
+    sensitivityDraftRef.current = nextSensitivity;
     setSensitivity(nextSensitivity);
-    localStorage.setItem(SENSITIVITY_KEY, String(nextSensitivity));
-
-    setSamples((prev) =>
-      prev.map((sample) =>
-        sample.id === editingSampleId
-          ? { ...sample, detectionSensitivity: nextSensitivity }
-          : sample
-      )
-    );
   };
 
   const beginSensitivitySliding = () => {
-    if (!sensitivitySliderEnabled) return;
+    if (!sensitivitySliderEnabled || !editingSampleId) return;
     sensitivitySlidingRef.current = true;
+    sensitivityDraftRef.current = clamp(Math.round(displayedSensitivity ?? sensitivity ?? 50), 0, 100);
+
     if (thresholdApplyTimerRef.current !== null) {
       window.clearTimeout(thresholdApplyTimerRef.current);
       thresholdApplyTimerRef.current = null;
@@ -1093,7 +1098,25 @@ export default function ReviewPage() {
     if (!sensitivitySlidingRef.current) return;
     sensitivitySlidingRef.current = false;
     if (!editingSampleId) return;
-    const nextSensitivity = clamp(Math.round(displayedSensitivity ?? sensitivity ?? 50), 0, 100);
+
+    const nextSensitivity = clamp(
+      Math.round(sensitivityDraftRef.current ?? displayedSensitivity ?? sensitivity ?? 50),
+      0,
+      100
+    );
+    sensitivityDraftRef.current = null;
+
+    setSensitivity(nextSensitivity);
+    localStorage.setItem(SENSITIVITY_KEY, String(nextSensitivity));
+
+    setSamples((prev) =>
+      prev.map((sample) =>
+        sample.id === editingSampleId
+          ? { ...sample, detectionSensitivity: nextSensitivity }
+          : sample
+      )
+    );
+
     scheduleRecheckApply(baseThreshold, nextSensitivity, draftMissingCandidateThreshold);
   };
 
@@ -1102,6 +1125,13 @@ export default function ReviewPage() {
     setDraftMissingCandidateThreshold(nextThreshold);
     scheduleRecheckApply(baseThreshold, sensitivity, nextThreshold);
   };
+
+  useEffect(() => {
+    if (!sensitivitySliderEnabled || !editingSampleId) {
+      sensitivitySlidingRef.current = false;
+      sensitivityDraftRef.current = null;
+    }
+  }, [editingSampleId, sensitivitySliderEnabled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1715,7 +1745,9 @@ const drawPolylineCanvas = (
             onMouseDown={beginSensitivitySliding}
             onChange={(e) => applySensitivityChange(Number(e.target.value))}
             onPointerUp={commitSensitivitySliding}
+            onPointerCancel={commitSensitivitySliding}
             onTouchEnd={commitSensitivitySliding}
+            onTouchCancel={commitSensitivitySliding}
             onMouseUp={commitSensitivitySliding}
             onBlur={commitSensitivitySliding}
             className={`flex-1 ${sensitivitySliderEnabled ? "" : "opacity-50"}`}
