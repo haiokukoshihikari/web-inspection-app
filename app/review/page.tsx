@@ -1855,7 +1855,7 @@ const drawPolylineCanvas = (
         <div
           ref={frameRef}
           className="w-full rounded-[1.5rem] border border-zinc-800 bg-zinc-900 relative overflow-hidden mx-auto flex items-center justify-center"
-          style={{ height: "min(84vh, 92vw, 1120px)" }}
+          style={{ height: "min(88vh, 96vw, 1240px)" }}
         >
           {mainPreviewUrl ? (
             <>
