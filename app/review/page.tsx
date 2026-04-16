@@ -739,6 +739,7 @@ export default function ReviewPage() {
   const prevResolutionRef = useRef<CompareResolutionMode | null>(null);
   const thresholdApplyTimerRef = useRef<number | null>(null);
   const sensitivitySlidingRef = useRef(false);
+  const sensitivityDraftRef = useRef<number | null>(null);
 
   const [capturedImage, setCapturedImage] = useState("");
   const [captureDebugInfo, setCaptureDebugInfo] = useState<CaptureDebugInfo | null>(null);
@@ -763,7 +764,7 @@ export default function ReviewPage() {
   const [samplePreviewUrl, setSamplePreviewUrl] = useState("");
   const [buildingPreview, setBuildingPreview] = useState(false);
   const [pendingRecheck, setPendingRecheck] = useState(false);
-  const [recheckOverlayPhase, setRecheckOverlayPhase] = useState<"pending" | "running">("pending");
+  const [recheckPhase, setRecheckPhase] = useState<"idle" | "waiting" | "running">("idle");
   const [matchBoxes, setMatchBoxes] = useState<MatchBox[]>([]);
   const [sampleHitCounts, setSampleHitCounts] = useState<Record<string, number>>({});
   const [gridPoints, setGridPoints] = useState<GridPoint[]>([]);
@@ -792,7 +793,17 @@ export default function ReviewPage() {
   const editingSampleId = samples.length === 1 ? samples[0]?.id ?? null : activeSampleId;
   const editingSample = editingSampleId ? samples.find((s) => s.id === editingSampleId) ?? null : null;
   const sensitivitySliderEnabled = samples.length === 1 || !!activeSampleId;
-  const displayedSensitivity = editingSample ? clamp(Math.round(editingSample.detectionSensitivity ?? 50), 0, 100) : null;
+  const displayedSensitivity = editingSample
+    ? clamp(
+        Math.round(
+          sensitivitySlidingRef.current && sensitivityDraftRef.current !== null
+            ? sensitivityDraftRef.current
+            : editingSample.detectionSensitivity ?? 50
+        ),
+        0,
+        100
+      )
+    : null;
 
   const [displayBasis, setDisplayBasis] = useState({ width: 0, height: 0 });
   const [imageRect, setImageRect] = useState({
@@ -1039,14 +1050,14 @@ export default function ReviewPage() {
     }
 
     setPendingRecheck(true);
-    setRecheckOverlayPhase("pending");
+    setRecheckPhase("waiting");
     setBuildingPreview(false);
 
     thresholdApplyTimerRef.current = window.setTimeout(() => {
       const nextEffective = effectiveThresholdFrom(nextBase, nextSensitivity);
       setPendingRecheck(false);
-      setRecheckOverlayPhase("running");
       setBuildingPreview(true);
+      setRecheckPhase("running");
 
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
@@ -1069,6 +1080,36 @@ export default function ReviewPage() {
     if (!editingSampleId) return;
 
     const nextSensitivity = clamp(Math.round(nextSensitivityRaw), 0, 100);
+    sensitivityDraftRef.current = nextSensitivity;
+    setSensitivity(nextSensitivity);
+  };
+
+  const beginSensitivitySliding = () => {
+    if (!sensitivitySliderEnabled || !editingSampleId) return;
+    sensitivitySlidingRef.current = true;
+    sensitivityDraftRef.current = clamp(Math.round(displayedSensitivity ?? sensitivity ?? 50), 0, 100);
+
+    if (thresholdApplyTimerRef.current !== null) {
+      window.clearTimeout(thresholdApplyTimerRef.current);
+      thresholdApplyTimerRef.current = null;
+    }
+    setPendingRecheck(true);
+    setRecheckPhase("waiting");
+    setBuildingPreview(false);
+  };
+
+  const commitSensitivitySliding = () => {
+    if (!sensitivitySlidingRef.current) return;
+    sensitivitySlidingRef.current = false;
+    if (!editingSampleId) return;
+
+    const nextSensitivity = clamp(
+      Math.round(sensitivityDraftRef.current ?? displayedSensitivity ?? sensitivity ?? 50),
+      0,
+      100
+    );
+    sensitivityDraftRef.current = null;
+
     setSensitivity(nextSensitivity);
     localStorage.setItem(SENSITIVITY_KEY, String(nextSensitivity));
 
@@ -1079,26 +1120,7 @@ export default function ReviewPage() {
           : sample
       )
     );
-  };
 
-  const beginSensitivitySliding = () => {
-    if (!sensitivitySliderEnabled) return;
-    sensitivitySlidingRef.current = true;
-    if (thresholdApplyTimerRef.current !== null) {
-      window.clearTimeout(thresholdApplyTimerRef.current);
-      thresholdApplyTimerRef.current = null;
-    }
-    setPendingRecheck(true);
-    setRecheckOverlayPhase("pending");
-    setBuildingPreview(false);
-  };
-
-  const commitSensitivitySliding = () => {
-    if (!sensitivitySlidingRef.current) return;
-    sensitivitySlidingRef.current = false;
-    if (!editingSampleId) return;
-    setRecheckOverlayPhase("running");
-    const nextSensitivity = clamp(Math.round(displayedSensitivity ?? sensitivity ?? 50), 0, 100);
     scheduleRecheckApply(baseThreshold, nextSensitivity, draftMissingCandidateThreshold);
   };
 
@@ -1107,6 +1129,13 @@ export default function ReviewPage() {
     setDraftMissingCandidateThreshold(nextThreshold);
     scheduleRecheckApply(baseThreshold, sensitivity, nextThreshold);
   };
+
+  useEffect(() => {
+    if (!sensitivitySliderEnabled || !editingSampleId) {
+      sensitivitySlidingRef.current = false;
+      sensitivityDraftRef.current = null;
+    }
+  }, [editingSampleId, sensitivitySliderEnabled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1396,7 +1425,14 @@ export default function ReviewPage() {
           sceneProcessedGray?.delete?.();
           selectedSampleProcessedGray?.delete?.();
         } catch {}
-        if (!cancelled) setBuildingPreview(false);
+        if (!cancelled) {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              setBuildingPreview(false);
+              setRecheckPhase("idle");
+            });
+          });
+        }
       }
     }
 
@@ -1720,7 +1756,9 @@ const drawPolylineCanvas = (
             onMouseDown={beginSensitivitySliding}
             onChange={(e) => applySensitivityChange(Number(e.target.value))}
             onPointerUp={commitSensitivitySliding}
+            onPointerCancel={commitSensitivitySliding}
             onTouchEnd={commitSensitivitySliding}
+            onTouchCancel={commitSensitivitySliding}
             onMouseUp={commitSensitivitySliding}
             onBlur={commitSensitivitySliding}
             className={`flex-1 ${sensitivitySliderEnabled ? "" : "opacity-50"}`}
@@ -1833,12 +1871,8 @@ const drawPolylineCanvas = (
               {pendingRecheck ? (
                 <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-black/35">
                   <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
-                    <div className="text-lg font-semibold">
-                      {recheckOverlayPhase === "running" ? "検査中…" : "再検査待機中…"}
-                    </div>
-                    <div className="mt-1 text-sm text-zinc-300">
-                      {recheckOverlayPhase === "running" ? "条件変更を反映しています" : "条件変更の確定待ちです"}
-                    </div>
+                    <div className="text-lg font-semibold">{recheckPhase === "running" ? "検査中…" : "再検査待機中…"}</div>
+                    <div className="mt-1 text-sm text-zinc-300">{recheckPhase === "running" ? "条件変更を反映しています" : "条件変更の確定待ちです"}</div>
                   </div>
                 </div>
               ) : null}
