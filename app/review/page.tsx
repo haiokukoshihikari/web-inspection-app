@@ -739,6 +739,7 @@ export default function ReviewPage() {
   const prevResolutionRef = useRef<CompareResolutionMode | null>(null);
   const thresholdApplyTimerRef = useRef<number | null>(null);
   const sensitivitySlidingRef = useRef(false);
+  const sensitivityDraftRef = useRef<number | null>(null);
 
   const [capturedImage, setCapturedImage] = useState("");
   const [captureDebugInfo, setCaptureDebugInfo] = useState<CaptureDebugInfo | null>(null);
@@ -775,7 +776,6 @@ export default function ReviewPage() {
   const [matchThreshold, setMatchThreshold] = useState(0.5);
   const [draftThreshold, setDraftThreshold] = useState(0.5);
   const [sensitivity, setSensitivity] = useState(50);
-  const [sliderDraftSensitivity, setSliderDraftSensitivity] = useState<number | null>(null);
   const [draftMissingCandidateThreshold, setDraftMissingCandidateThreshold] = useState(0.3);
   const [appliedMissingCandidateThreshold, setAppliedMissingCandidateThreshold] = useState(0.3);
 
@@ -793,7 +793,15 @@ export default function ReviewPage() {
   const editingSample = editingSampleId ? samples.find((s) => s.id === editingSampleId) ?? null : null;
   const sensitivitySliderEnabled = samples.length === 1 || !!activeSampleId;
   const displayedSensitivity = editingSample
-    ? clamp(Math.round(sliderDraftSensitivity ?? editingSample.detectionSensitivity ?? 50), 0, 100)
+    ? clamp(
+        Math.round(
+          sensitivitySlidingRef.current && sensitivityDraftRef.current !== null
+            ? sensitivityDraftRef.current
+            : editingSample.detectionSensitivity ?? 50
+        ),
+        0,
+        100
+      )
     : null;
 
   const [displayBasis, setDisplayBasis] = useState({ width: 0, height: 0 });
@@ -978,16 +986,12 @@ export default function ReviewPage() {
     if (!samplesLoaded) return;
     if (editingSample) {
       const next = clamp(Math.round(editingSample.detectionSensitivity ?? 50), 0, 100);
-      if (!sensitivitySlidingRef.current) {
-        setSliderDraftSensitivity(null);
-      }
       setSensitivity(next);
       localStorage.setItem(SENSITIVITY_KEY, String(next));
       return;
     }
 
     if (!sensitivitySliderEnabled) {
-      setSliderDraftSensitivity(null);
       setSensitivity(50);
     }
   }, [editingSample, samplesLoaded, sensitivitySliderEnabled]);
@@ -1071,18 +1075,21 @@ export default function ReviewPage() {
 
   const applySensitivityChange = (nextSensitivityRaw: number) => {
     if (!editingSampleId) return;
+
     const nextSensitivity = clamp(Math.round(nextSensitivityRaw), 0, 100);
-    setSliderDraftSensitivity(nextSensitivity);
+    sensitivityDraftRef.current = nextSensitivity;
+    setSensitivity(nextSensitivity);
   };
 
   const beginSensitivitySliding = () => {
     if (!sensitivitySliderEnabled || !editingSampleId) return;
     sensitivitySlidingRef.current = true;
+    sensitivityDraftRef.current = clamp(Math.round(displayedSensitivity ?? sensitivity ?? 50), 0, 100);
+
     if (thresholdApplyTimerRef.current !== null) {
       window.clearTimeout(thresholdApplyTimerRef.current);
       thresholdApplyTimerRef.current = null;
     }
-    setSliderDraftSensitivity(clamp(Math.round(displayedSensitivity ?? sensitivity ?? 50), 0, 100));
     setPendingRecheck(true);
     setBuildingPreview(false);
   };
@@ -1090,20 +1097,18 @@ export default function ReviewPage() {
   const commitSensitivitySliding = () => {
     if (!sensitivitySlidingRef.current) return;
     sensitivitySlidingRef.current = false;
-    if (!editingSampleId) {
-      setSliderDraftSensitivity(null);
-      setPendingRecheck(false);
-      return;
-    }
+    if (!editingSampleId) return;
 
     const nextSensitivity = clamp(
-      Math.round(sliderDraftSensitivity ?? displayedSensitivity ?? sensitivity ?? 50),
+      Math.round(sensitivityDraftRef.current ?? displayedSensitivity ?? sensitivity ?? 50),
       0,
       100
     );
+    sensitivityDraftRef.current = null;
 
     setSensitivity(nextSensitivity);
     localStorage.setItem(SENSITIVITY_KEY, String(nextSensitivity));
+
     setSamples((prev) =>
       prev.map((sample) =>
         sample.id === editingSampleId
@@ -1111,7 +1116,7 @@ export default function ReviewPage() {
           : sample
       )
     );
-    setSliderDraftSensitivity(null);
+
     scheduleRecheckApply(baseThreshold, nextSensitivity, draftMissingCandidateThreshold);
   };
 
@@ -1120,6 +1125,13 @@ export default function ReviewPage() {
     setDraftMissingCandidateThreshold(nextThreshold);
     scheduleRecheckApply(baseThreshold, sensitivity, nextThreshold);
   };
+
+  useEffect(() => {
+    if (!sensitivitySliderEnabled || !editingSampleId) {
+      sensitivitySlidingRef.current = false;
+      sensitivityDraftRef.current = null;
+    }
+  }, [editingSampleId, sensitivitySliderEnabled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1855,7 +1867,7 @@ const drawPolylineCanvas = (
               ) : null}
 
               {buildingPreview ? (
-                <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-black/50">
+                <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/50">
                   <div className="px-5 py-3 rounded-2xl border border-white/15 bg-black/70 text-center">
                     <div className="text-lg font-semibold">検査中…</div>
                     <div className="mt-1 text-sm text-zinc-300">条件変更を反映しています</div>
