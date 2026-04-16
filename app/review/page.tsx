@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Script from "next/script";
 import { useRouter } from "next/navigation";
 
@@ -1855,7 +1855,7 @@ const drawPolylineCanvas = (
         <div
           ref={frameRef}
           className="w-full rounded-[1.5rem] border border-zinc-800 bg-zinc-900 relative overflow-hidden mx-auto flex items-center justify-center"
-          style={{ height: "min(78vh, 88vw, 980px)" }}
+          style={{ height: "min(84vh, 92vw, 1120px)" }}
         >
           {mainPreviewUrl ? (
             <>
