@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 
 const SAMPLES_KEY = "inspection:samples";
 const RESOLUTION_KEY = "inspection:compareResolution";
+const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
 
 const MAX_SAMPLES = 6;
 const PAGE_VERSION = "add-sample-stable-06";
@@ -16,6 +17,19 @@ const MAX_BOX_H = 0.6;
 const MAX_IMAGE_SCALE = 2.5;
 
 type CompareResolutionMode = 1200 | 1600 | 2000 | 2400;
+
+type InspectionProfile = {
+  profileName: string;
+  version: string;
+  baseThreshold: number;
+  missingCandidateThreshold: number;
+  rotationRange: number;
+  scaleRange: number;
+  shearRange: number;
+  compareResolution: number;
+  hitLimit: number;
+};
+
 
 type SampleItem = {
   id: string;
@@ -96,13 +110,27 @@ export default function AddSamplePage() {
   const [imageScale, setImageScale] = useState(1);
   const [imagePanX, setImagePanX] = useState(0);
   const [imagePanY, setImagePanY] = useState(0);
-  const [isSliderInteracting, setIsSliderInteracting] = useState(false);
 
   useEffect(() => {
     try {
       const stored = sessionStorage.getItem("capturedImage");
       if (stored && stored.startsWith("data:image/")) {
         setCapturedImage(stored);
+      }
+
+      const pendingSharedProfileRaw = sessionStorage.getItem(PENDING_SHARED_PROFILE_KEY);
+      if (pendingSharedProfileRaw) {
+        try {
+          const pendingSharedProfile = JSON.parse(pendingSharedProfileRaw) as InspectionProfile;
+          const n = Number(pendingSharedProfile.compareResolution) as CompareResolutionMode;
+          if ([1200, 1600, 2000, 2400].includes(n)) {
+            setCompareResolution(n);
+            localStorage.setItem(RESOLUTION_KEY, String(n));
+            return;
+          }
+        } catch (error) {
+          console.error("共有設定の解像度読み込みに失敗しました", error);
+        }
       }
 
       const savedRes = localStorage.getItem(RESOLUTION_KEY);
@@ -250,7 +278,6 @@ export default function AddSamplePage() {
   };
 
   const onFramePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (isSliderInteracting) return;
     pointersRef.current[e.pointerId] = { x: e.clientX, y: e.clientY };
     const keys = Object.keys(pointersRef.current).map(Number);
 
@@ -286,7 +313,6 @@ export default function AddSamplePage() {
   };
 
   const onFramePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (isSliderInteracting) return;
     pointersRef.current[e.pointerId] = { x: e.clientX, y: e.clientY };
 
     if (
@@ -326,7 +352,6 @@ export default function AddSamplePage() {
   };
 
   const onFramePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (isSliderInteracting) return;
     delete pointersRef.current[e.pointerId];
     try {
       e.currentTarget.releasePointerCapture(e.pointerId);
@@ -350,15 +375,6 @@ export default function AddSamplePage() {
         startPanY: imagePanY,
       };
     }
-  };
-
-
-  const beginSliderInteraction = () => {
-    setIsSliderInteracting(true);
-  };
-
-  const endSliderInteraction = () => {
-    setIsSliderInteracting(false);
   };
 
   const handleSave = async () => {
@@ -469,8 +485,12 @@ export default function AddSamplePage() {
 
   return (
     <main className="min-h-screen bg-black text-white flex flex-col">
+      <div className="fixed right-2 bottom-2 z-[9999] text-[10px] px-2 py-1 rounded bg-black/70 text-zinc-300 border border-white/10 pointer-events-none">
+        {PAGE_VERSION}
+      </div>
+
       <div className="flex items-center justify-between px-4 py-4 border-b border-zinc-800 bg-zinc-950">
-        <div className="text-base font-medium">見本登録</div>
+        <div className="text-base font-medium">見本にしたい部分を囲って下さい</div>
         <button
           onClick={() => router.push("/review")}
           className="text-sm text-zinc-300"
@@ -479,10 +499,11 @@ export default function AddSamplePage() {
         </button>
       </div>
 
-      <div className="flex-1 px-4 pt-3 pb-2">
-        <div className="mb-3 text-sm text-zinc-300">
-          検知したい対象を枠内に収めて下さい
-        </div>
+      <div className="px-4 pt-3 text-xs text-zinc-400">
+        {`解像度 ${compareResolution}`}
+      </div>
+
+      <div className="flex-1 p-4">
         <div
           ref={frameRef}
           className="w-full max-h-[58vh] rounded-[1.5rem] border border-zinc-800 bg-zinc-900 relative overflow-hidden aspect-[3/4] mx-auto flex items-center justify-center"
@@ -535,13 +556,6 @@ export default function AddSamplePage() {
               min={8}
               max={80}
               value={Math.round(safeBoxWidthRatio * 100)}
-              onPointerDown={beginSliderInteraction}
-              onPointerUp={endSliderInteraction}
-              onPointerCancel={endSliderInteraction}
-              onTouchStart={beginSliderInteraction}
-              onTouchEnd={endSliderInteraction}
-              onTouchCancel={endSliderInteraction}
-              onBlur={endSliderInteraction}
               onChange={(e) =>
                 setBoxWidthRatio(clamp(Number(e.target.value) / 100, MIN_BOX_W, MAX_BOX_W))
               }
@@ -559,13 +573,6 @@ export default function AddSamplePage() {
               min={6}
               max={60}
               value={Math.round(safeBoxHeightRatio * 100)}
-              onPointerDown={beginSliderInteraction}
-              onPointerUp={endSliderInteraction}
-              onPointerCancel={endSliderInteraction}
-              onTouchStart={beginSliderInteraction}
-              onTouchEnd={endSliderInteraction}
-              onTouchCancel={endSliderInteraction}
-              onBlur={endSliderInteraction}
               onChange={(e) =>
                 setBoxHeightRatio(clamp(Number(e.target.value) / 100, MIN_BOX_H, MAX_BOX_H))
               }
@@ -577,7 +584,15 @@ export default function AddSamplePage() {
           </div>
         </div>
 
-        <div className="flex items-center justify-center gap-3 pt-1">
+        <div className="text-center text-xs text-zinc-400">
+          1本指で画像移動 / 2本指で拡大縮小 / 枠は中央固定
+        </div>
+
+        <div className="text-center text-[11px] text-zinc-500">
+          {`crop x:${cropRectImage.x} y:${cropRectImage.y} w:${cropRectImage.width} h:${cropRectImage.height}`}
+        </div>
+
+        <div className="flex items-center justify-center gap-3">
           <button
             onClick={() => router.push("/review")}
             className="px-6 py-3 rounded-2xl border border-zinc-700 bg-zinc-900"
