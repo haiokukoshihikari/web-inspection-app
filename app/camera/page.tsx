@@ -629,16 +629,6 @@ export default function CameraPage() {
 
   return (
     <main className="h-[100dvh] bg-black text-white flex flex-col overflow-hidden">
-      <div className="fixed inset-x-2 top-24 z-[99999] rounded-xl bg-red-900/95 text-white border border-white/20 px-3 py-3 text-[13px] leading-6 pointer-events-none">
-      <div>CAMERA DEBUG OVERLAY</div>
-      <div>version: {configVersion}</div>
-      <div>
-        {sharedProfile
-          ? `res:${sharedProfile.compareResolution} hit:${sharedProfile.hitLimit} rot:${sharedProfile.rotationRange} scale:${sharedProfile.scaleRange} shear:${sharedProfile.shearRange}`
-          : "shared:none"}
-      </div>
-    </div>
-
       <input
         ref={fileInputRef}
         type="file"
