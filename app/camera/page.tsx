@@ -26,20 +26,23 @@ type InspectionProfile = {
   shearRange: number;
   compareResolution: number;
   hitLimit: number;
+  liveGuideThresholdOffset?: number;
+  liveGuideIntervalMs?: number;
 };
 
 const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
 
 const SAMPLES_KEY = "inspection:samples";
-const LIVE_CHECK_INTERVAL_MS = 1500;
+const LIVE_GUIDE_THRESHOLD_OFFSET_KEY = "inspection:liveGuideThresholdOffset";
+const LIVE_GUIDE_INTERVAL_KEY = "inspection:liveGuideIntervalMs";
+const DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET = 0.12;
+const DEFAULT_LIVE_GUIDE_INTERVAL_MS = 1500;
 const LIVE_MAX_BOXES = 2;
 const LIVE_ROI_WIDTH_RATIO = 0.7;
 const LIVE_ROI_HEIGHT_RATIO = 0.4;
 const LIVE_PROCESS_LONG_SIDE = 640;
 const LIVE_TEMPLATE_LONG_SIDE = 64;
 const LIVE_SEARCH_STEP = 4;
-const LIVE_HIGH_SCORE_THRESHOLD = 0.72;
-const LIVE_EARLY_STOP_THRESHOLD = 0.8;
 
 type SampleItem = {
   id: string;
@@ -47,8 +50,10 @@ type SampleItem = {
   color: string;
   thumbUrl?: string;
   compareUrl?: string;
+  cameraCompareUrl?: string;
   aspectRatio?: number;
   savedResolution?: number;
+  cameraBaseLongSide?: number;
   detectionSensitivity?: number;
 };
 
@@ -179,6 +184,9 @@ export default function CameraPage() {
   const [saveStep, setSaveStep] = useState<SaveStep>("idle");
   const [liveBoxes, setLiveBoxes] = useState<LiveBox[]>([]);
   const [liveGuideActive, setLiveGuideActive] = useState(false);
+  const [liveGuideThresholdOffset, setLiveGuideThresholdOffset] = useState(DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET);
+  const [liveGuideIntervalMs, setLiveGuideIntervalMs] = useState(DEFAULT_LIVE_GUIDE_INTERVAL_MS);
+  const [liveProcessInfo, setLiveProcessInfo] = useState("");
   const liveTemplateRef = useRef<{ sample: SampleItem; gray: Float32Array; width: number; height: number; rawWidth: number; rawHeight: number } | null>(null);
   const liveRunningRef = useRef(false);
   const liveTimerRef = useRef<number | null>(null);
@@ -308,6 +316,34 @@ export default function CameraPage() {
     };
   }, []);
 
+  useEffect(() => {
+    try {
+      const savedOffset = localStorage.getItem(LIVE_GUIDE_THRESHOLD_OFFSET_KEY);
+      const savedInterval = localStorage.getItem(LIVE_GUIDE_INTERVAL_KEY);
+
+      if (savedOffset !== null) {
+        const n = Number(savedOffset);
+        if (Number.isFinite(n)) {
+          setLiveGuideThresholdOffset(clamp(Number(n.toFixed(2)), -0.25, 0.25));
+        }
+      } else if (typeof sharedProfile?.liveGuideThresholdOffset === "number") {
+        setLiveGuideThresholdOffset(clamp(Number(sharedProfile.liveGuideThresholdOffset.toFixed(2)), -0.25, 0.25));
+      }
+
+      if (savedInterval !== null) {
+        const n = Number(savedInterval);
+        if (Number.isFinite(n)) {
+          setLiveGuideIntervalMs(clamp(Math.round(n), 500, 5000));
+        }
+      } else if (typeof sharedProfile?.liveGuideIntervalMs === "number") {
+        setLiveGuideIntervalMs(clamp(Math.round(sharedProfile.liveGuideIntervalMs), 500, 5000));
+      }
+    } catch (error) {
+      console.error("ライブ簡易検査設定の読み込みに失敗しました", error);
+    }
+  }, [sharedProfile]);
+
+
 
   useEffect(() => {
     let cancelled = false;
@@ -331,7 +367,7 @@ export default function CameraPage() {
         }
 
         const sample = parsed[0] as SampleItem;
-        const src = sample.compareUrl || sample.thumbUrl;
+        const src = sample.cameraCompareUrl || sample.compareUrl || sample.thumbUrl;
         if (!src) {
           liveTemplateRef.current = null;
           setLiveBoxes([]);
@@ -407,10 +443,11 @@ export default function CameraPage() {
       const roiY = Math.round((ph - roiH) / 2);
 
       const gray = edgeNormalize(toGrayArray(ctx, pw, ph), pw, ph);
+      setLiveProcessInfo(`${pw}x${ph} / tpl ${tpl.width}x${tpl.height}`);
       const results: LiveBox[] = [];
       const matchThreshold = sampleSensitivityThreshold(tpl.sample);
-      const highThreshold = Math.max(LIVE_HIGH_SCORE_THRESHOLD, 1 - matchThreshold * 0.6);
-      const earlyThreshold = Math.max(LIVE_EARLY_STOP_THRESHOLD, highThreshold + 0.04);
+      const highThreshold = clamp(Number((matchThreshold + liveGuideThresholdOffset).toFixed(2)), 0.35, 0.95);
+      const earlyThreshold = clamp(Number((highThreshold + 0.06).toFixed(2)), 0.4, 0.99);
 
       for (let y = roiY; y <= roiY + roiH - tpl.height; y += LIVE_SEARCH_STEP) {
         for (let x = roiX; x <= roiX + roiW - tpl.width; x += LIVE_SEARCH_STEP) {
@@ -446,7 +483,7 @@ export default function CameraPage() {
     } finally {
       liveRunningRef.current = false;
     }
-  }, [isCapturing, isReady]);
+  }, [isCapturing, isReady, liveGuideThresholdOffset]);
 
   useEffect(() => {
     if (liveTimerRef.current !== null) {
@@ -458,7 +495,7 @@ export default function CameraPage() {
 
     liveTimerRef.current = window.setInterval(() => {
       void runLiveCheck();
-    }, LIVE_CHECK_INTERVAL_MS);
+    }, liveGuideIntervalMs);
 
     void runLiveCheck();
 
@@ -468,7 +505,7 @@ export default function CameraPage() {
         liveTimerRef.current = null;
       }
     };
-  }, [isReady, runLiveCheck]);
+  }, [isReady, runLiveCheck, liveGuideIntervalMs]);
 
   useEffect(() => {
     if (!mountedRef.current) return;
