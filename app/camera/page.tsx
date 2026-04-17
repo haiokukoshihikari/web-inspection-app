@@ -31,7 +31,7 @@ type InspectionProfile = {
 const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
 
 const SAMPLES_KEY = "inspection:samples";
-const LIVE_CHECK_INTERVAL_MS = 2500;
+const LIVE_CHECK_INTERVAL_MS = 1500;
 const LIVE_MAX_BOXES = 2;
 const LIVE_ROI_WIDTH_RATIO = 0.7;
 const LIVE_ROI_HEIGHT_RATIO = 0.4;
