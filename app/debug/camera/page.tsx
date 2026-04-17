@@ -188,7 +188,7 @@ export default function DebugCameraPage() {
   const [liveGuideIntervalMs, setLiveGuideIntervalMs] = useState(DEFAULT_LIVE_GUIDE_INTERVAL_MS);
   const [liveProcessInfo, setLiveProcessInfo] = useState("");
   const [liveGuideSavedMsg, setLiveGuideSavedMsg] = useState("");
-  const firstSample = samples[0] ?? null;
+  const [firstSamplePreviewUrl, setFirstSamplePreviewUrl] = useState("");
   const [cameraTemplateInfo, setCameraTemplateInfo] = useState<{ width: number; height: number } | null>(null);
   const liveTemplateRef = useRef<{ sample: SampleItem; gray: Float32Array; width: number; height: number; rawWidth: number; rawHeight: number } | null>(null);
   const liveRunningRef = useRef(false);
@@ -294,12 +294,31 @@ export default function DebugCameraPage() {
     let cancelled = false;
 
     async function loadCameraTemplateInfo() {
-      if (!firstSample?.cameraCompareUrl) {
-        setCameraTemplateInfo(null);
-        return;
-      }
-
       try {
+        const raw = localStorage.getItem(SAMPLES_KEY);
+        if (!raw) {
+          setFirstSamplePreviewUrl("");
+          setCameraTemplateInfo(null);
+          return;
+        }
+
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed) || parsed.length === 0) {
+          setFirstSamplePreviewUrl("");
+          setCameraTemplateInfo(null);
+          return;
+        }
+
+        const sample = parsed[0] as SampleItem;
+        const src = sample.cameraCompareUrl || sample.compareUrl || sample.thumbUrl || "";
+        if (!src) {
+          setFirstSamplePreviewUrl("");
+          setCameraTemplateInfo(null);
+          return;
+        }
+
+        setFirstSamplePreviewUrl(src);
+
         const img = new Image();
         img.onload = () => {
           if (!cancelled) {
@@ -312,9 +331,12 @@ export default function DebugCameraPage() {
         img.onerror = () => {
           if (!cancelled) setCameraTemplateInfo(null);
         };
-        img.src = firstSample.cameraCompareUrl;
+        img.src = src;
       } catch {
-        if (!cancelled) setCameraTemplateInfo(null);
+        if (!cancelled) {
+          setFirstSamplePreviewUrl("");
+          setCameraTemplateInfo(null);
+        }
       }
     }
 
@@ -323,7 +345,7 @@ export default function DebugCameraPage() {
     return () => {
       cancelled = true;
     };
-  }, [firstSample?.cameraCompareUrl]);
+  }, [configVersion]);
 
   useEffect(() => {
     let cancelled = false;
