@@ -30,6 +30,36 @@ type InspectionProfile = {
 
 const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
 
+const SAMPLES_KEY = "inspection:samples";
+const LIVE_CHECK_INTERVAL_MS = 2500;
+const LIVE_MAX_BOXES = 2;
+const LIVE_ROI_WIDTH_RATIO = 0.7;
+const LIVE_ROI_HEIGHT_RATIO = 0.4;
+const LIVE_PROCESS_LONG_SIDE = 640;
+const LIVE_TEMPLATE_LONG_SIDE = 64;
+const LIVE_SEARCH_STEP = 4;
+const LIVE_HIGH_SCORE_THRESHOLD = 0.72;
+const LIVE_EARLY_STOP_THRESHOLD = 0.8;
+
+type SampleItem = {
+  id: string;
+  count: number;
+  color: string;
+  thumbUrl?: string;
+  compareUrl?: string;
+  aspectRatio?: number;
+  savedResolution?: number;
+  detectionSensitivity?: number;
+};
+
+type LiveBox = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  score: number;
+};
+
 function isInspectionProfile(value: unknown): value is InspectionProfile {
   if (!value || typeof value !== "object") return false
   const data = value as Record<string, unknown>;
@@ -56,6 +86,79 @@ type CaptureDebugInfo = {
   dataUrlLength: number;
 };
 
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function dataUrlToImage(dataUrl: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = (e) => reject(e);
+    img.src = dataUrl;
+  });
+}
+
+function toGrayArray(ctx: CanvasRenderingContext2D, width: number, height: number) {
+  const imageData = ctx.getImageData(0, 0, width, height).data;
+  const out = new Float32Array(width * height);
+  for (let i = 0, j = 0; i < imageData.length; i += 4, j++) {
+    out[j] = imageData[i] * 0.299 + imageData[i + 1] * 0.587 + imageData[i + 2] * 0.114;
+  }
+  return out;
+}
+
+function edgeNormalize(gray: Float32Array, width: number, height: number) {
+  const out = new Float32Array(width * height);
+  let sum = 0;
+  let sumSq = 0;
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const idx = y * width + x;
+      const gx = gray[idx + 1] - gray[idx - 1];
+      const gy = gray[idx + width] - gray[idx - width];
+      const mag = Math.sqrt(gx * gx + gy * gy);
+      out[idx] = mag;
+      sum += mag;
+      sumSq += mag * mag;
+    }
+  }
+  const n = Math.max(1, (width - 2) * (height - 2));
+  const mean = sum / n;
+  const variance = Math.max(1e-6, sumSq / n - mean * mean);
+  const std = Math.sqrt(variance);
+  for (let i = 0; i < out.length; i++) out[i] = (out[i] - mean) / std;
+  return out;
+}
+
+function computeNcc(
+  scene: Float32Array,
+  sceneWidth: number,
+  tpl: Float32Array,
+  tplWidth: number,
+  tplHeight: number,
+  startX: number,
+  startY: number
+) {
+  let sum = 0;
+  let count = 0;
+  for (let y = 1; y < tplHeight - 1; y += 2) {
+    const sceneRow = (startY + y) * sceneWidth + startX;
+    const tplRow = y * tplWidth;
+    for (let x = 1; x < tplWidth - 1; x += 2) {
+      sum += scene[sceneRow + x] * tpl[tplRow + x];
+      count++;
+    }
+  }
+  return count > 0 ? sum / count : -1;
+}
+
+function sampleSensitivityThreshold(sample: SampleItem | null | undefined) {
+  const sens = clamp(Math.round(sample?.detectionSensitivity ?? 50), 0, 100);
+  return clamp(Number((0.5 - (sens - 50) * 0.005).toFixed(3)), 0, 0.99);
+}
+
 export default function CameraPage() {
   const router = useRouter();
 
@@ -74,6 +177,11 @@ export default function CameraPage() {
   const [sharedProfile, setSharedProfile] = useState<InspectionProfile | null>(null);
 
   const [saveStep, setSaveStep] = useState<SaveStep>("idle");
+  const [liveBoxes, setLiveBoxes] = useState<LiveBox[]>([]);
+  const [liveGuideActive, setLiveGuideActive] = useState(false);
+  const liveTemplateRef = useRef<{ sample: SampleItem; gray: Float32Array; width: number; height: number; rawWidth: number; rawHeight: number } | null>(null);
+  const liveRunningRef = useRef(false);
+  const liveTimerRef = useRef<number | null>(null);
 
   const resetSaveState = useCallback(() => {
     setSaveStep("idle");
@@ -199,6 +307,168 @@ export default function CameraPage() {
       cancelled = true;
     };
   }, []);
+
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadLiveTemplate = async () => {
+      try {
+        const raw = localStorage.getItem(SAMPLES_KEY);
+        if (!raw) {
+          liveTemplateRef.current = null;
+          setLiveBoxes([]);
+          setLiveGuideActive(false);
+          return;
+        }
+
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed) || parsed.length === 0) {
+          liveTemplateRef.current = null;
+          setLiveBoxes([]);
+          setLiveGuideActive(false);
+          return;
+        }
+
+        const sample = parsed[0] as SampleItem;
+        const src = sample.compareUrl || sample.thumbUrl;
+        if (!src) {
+          liveTemplateRef.current = null;
+          setLiveBoxes([]);
+          setLiveGuideActive(false);
+          return;
+        }
+
+        const img = await dataUrlToImage(src);
+        if (cancelled) return;
+
+        const longSide = Math.max(img.naturalWidth, img.naturalHeight);
+        const scale = Math.min(1, LIVE_TEMPLATE_LONG_SIDE / Math.max(1, longSide));
+        const width = Math.max(16, Math.round(img.naturalWidth * scale));
+        const height = Math.max(16, Math.round(img.naturalHeight * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.drawImage(img, 0, 0, width, height);
+        const gray = edgeNormalize(toGrayArray(ctx, width, height), width, height);
+        liveTemplateRef.current = { sample, gray, width, height, rawWidth: img.naturalWidth, rawHeight: img.naturalHeight };
+        setLiveGuideActive(true);
+      } catch (error) {
+        console.error('ライブ簡易検査の見本読み込みに失敗しました', error);
+        liveTemplateRef.current = null;
+        setLiveGuideActive(false);
+      }
+    };
+
+    void loadLiveTemplate();
+    const handleStorage = () => { void loadLiveTemplate(); };
+    window.addEventListener('storage', handleStorage);
+    window.addEventListener('focus', handleStorage);
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener('storage', handleStorage);
+      window.removeEventListener('focus', handleStorage);
+    };
+  }, []);
+
+  const runLiveCheck = useCallback(async () => {
+    if (liveRunningRef.current || isCapturing || !isReady) return;
+    const video = videoRef.current;
+    const tpl = liveTemplateRef.current;
+    if (!video || !tpl) {
+      setLiveBoxes([]);
+      return;
+    }
+
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    if (!vw || !vh) return;
+
+    liveRunningRef.current = true;
+    try {
+      const longSide = Math.max(vw, vh);
+      const scale = Math.min(1, LIVE_PROCESS_LONG_SIDE / Math.max(1, longSide));
+      const pw = Math.max(160, Math.round(vw * scale));
+      const ph = Math.max(120, Math.round(vh * scale));
+
+      const canvas = document.createElement('canvas');
+      canvas.width = pw;
+      canvas.height = ph;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return;
+      ctx.drawImage(video, 0, 0, pw, ph);
+
+      const roiW = Math.max(tpl.width + 4, Math.round(pw * LIVE_ROI_WIDTH_RATIO));
+      const roiH = Math.max(tpl.height + 4, Math.round(ph * LIVE_ROI_HEIGHT_RATIO));
+      const roiX = Math.round((pw - roiW) / 2);
+      const roiY = Math.round((ph - roiH) / 2);
+
+      const gray = edgeNormalize(toGrayArray(ctx, pw, ph), pw, ph);
+      const results: LiveBox[] = [];
+      const matchThreshold = sampleSensitivityThreshold(tpl.sample);
+      const highThreshold = Math.max(LIVE_HIGH_SCORE_THRESHOLD, 1 - matchThreshold * 0.6);
+      const earlyThreshold = Math.max(LIVE_EARLY_STOP_THRESHOLD, highThreshold + 0.04);
+
+      for (let y = roiY; y <= roiY + roiH - tpl.height; y += LIVE_SEARCH_STEP) {
+        for (let x = roiX; x <= roiX + roiW - tpl.width; x += LIVE_SEARCH_STEP) {
+          const score = computeNcc(gray, pw, tpl.gray, tpl.width, tpl.height, x, y);
+          if (score < highThreshold) continue;
+
+          const box: LiveBox = {
+            x: x / pw,
+            y: y / ph,
+            w: tpl.width / pw,
+            h: tpl.height / ph,
+            score,
+          };
+
+          const overlaps = results.some((r) => {
+            const x1 = Math.max(r.x, box.x);
+            const y1 = Math.max(r.y, box.y);
+            const x2 = Math.min(r.x + r.w, box.x + box.w);
+            const y2 = Math.min(r.y + r.h, box.y + box.h);
+            const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+            const union = r.w * r.h + box.w * box.h - inter;
+            return union > 0 && inter / union > 0.35;
+          });
+          if (!overlaps) results.push(box);
+          if (results.length >= LIVE_MAX_BOXES && score >= earlyThreshold) break;
+        }
+        if (results.length >= LIVE_MAX_BOXES) break;
+      }
+
+      setLiveBoxes(results.slice(0, LIVE_MAX_BOXES));
+    } catch (error) {
+      console.error('ライブ簡易検査エラー', error);
+    } finally {
+      liveRunningRef.current = false;
+    }
+  }, [isCapturing, isReady]);
+
+  useEffect(() => {
+    if (liveTimerRef.current !== null) {
+      window.clearInterval(liveTimerRef.current);
+      liveTimerRef.current = null;
+    }
+
+    if (!isReady) return;
+
+    liveTimerRef.current = window.setInterval(() => {
+      void runLiveCheck();
+    }, LIVE_CHECK_INTERVAL_MS);
+
+    void runLiveCheck();
+
+    return () => {
+      if (liveTimerRef.current !== null) {
+        window.clearInterval(liveTimerRef.current);
+        liveTimerRef.current = null;
+      }
+    };
+  }, [isReady, runLiveCheck]);
 
   useEffect(() => {
     if (!mountedRef.current) return;
@@ -588,6 +858,29 @@ export default function CameraPage() {
             transform: "translateY(-0.5px)",
           }}
         />
+
+        <div
+          className={`absolute rounded-xl border ${liveGuideActive ? "border-cyan-400/40" : "border-white/20"}`}
+          style={{
+            width: `${LIVE_ROI_WIDTH_RATIO * 100}%`,
+            height: `${LIVE_ROI_HEIGHT_RATIO * 100}%`,
+            left: `${(1 - LIVE_ROI_WIDTH_RATIO) * 50}%`,
+            top: `${(1 - LIVE_ROI_HEIGHT_RATIO) * 50}%`,
+          }}
+        />
+
+        {liveBoxes.map((box, index) => (
+          <div
+            key={`live-box-${index}-${box.x}-${box.y}`}
+            className="absolute rounded-md border-[3px] border-sky-400"
+            style={{
+              left: `${box.x * 100}%`,
+              top: `${box.y * 100}%`,
+              width: `${box.w * 100}%`,
+              height: `${box.h * 100}%`,
+            }}
+          />
+        ))}
       </div>
 
       {!isReady && !errorMsg ? (
