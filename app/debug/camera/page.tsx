@@ -65,6 +65,44 @@ type LiveBox = {
   score: number;
 };
 
+type Rect = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
+
+function calcContainRect(
+  containerWidth: number,
+  containerHeight: number,
+  contentWidth: number,
+  contentHeight: number
+): Rect {
+  if (!containerWidth || !containerHeight || !contentWidth || !contentHeight) {
+    return { left: 0, top: 0, width: 0, height: 0 };
+  }
+
+  const contentRatio = contentWidth / contentHeight;
+  const containerRatio = containerWidth / containerHeight;
+
+  let width = containerWidth;
+  let height = containerHeight;
+
+  if (contentRatio > containerRatio) {
+    height = width / contentRatio;
+  } else {
+    width = height * contentRatio;
+  }
+
+  return {
+    left: (containerWidth - width) / 2,
+    top: (containerHeight - height) / 2,
+    width,
+    height,
+  };
+}
+
+
 function isInspectionProfile(value: unknown): value is InspectionProfile {
   if (!value || typeof value !== "object") return false
   const data = value as Record<string, unknown>;
@@ -169,6 +207,7 @@ export default function DebugCameraPage() {
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const previewFrameRef = useRef<HTMLDivElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const restartTimerRef = useRef<number | null>(null);
   const startingRef = useRef(false);
@@ -190,9 +229,26 @@ export default function DebugCameraPage() {
   const [liveGuideSavedMsg, setLiveGuideSavedMsg] = useState("");
   const [firstSamplePreviewUrl, setFirstSamplePreviewUrl] = useState("");
   const [cameraTemplateInfo, setCameraTemplateInfo] = useState<{ width: number; height: number } | null>(null);
+  const [videoDisplayRect, setVideoDisplayRect] = useState<Rect>({ left: 0, top: 0, width: 0, height: 0 });
   const liveTemplateRef = useRef<{ sample: SampleItem; gray: Float32Array; width: number; height: number; rawWidth: number; rawHeight: number } | null>(null);
   const liveRunningRef = useRef(false);
   const liveTimerRef = useRef<number | null>(null);
+
+
+  const updateVideoDisplayRect = useCallback(() => {
+    const frame = previewFrameRef.current;
+    const video = videoRef.current;
+    if (!frame || !video) return;
+
+    const frameRect = frame.getBoundingClientRect();
+    const next = calcContainRect(
+      frameRect.width,
+      frameRect.height,
+      video.videoWidth || frameRect.width,
+      video.videoHeight || frameRect.height
+    );
+    setVideoDisplayRect(next);
+  }, []);
 
   const resetSaveState = useCallback(() => {
     setSaveStep("idle");
@@ -258,6 +314,7 @@ export default function DebugCameraPage() {
 
       setErrorMsg("");
       setIsReady(true);
+      window.setTimeout(() => updateVideoDisplayRect(), 0);
     } catch (err) {
       console.error(err);
       if (!mountedRef.current) return;
@@ -570,6 +627,17 @@ export default function DebugCameraPage() {
       }
     };
   }, [isReady, runLiveCheck, liveGuideIntervalMs]);
+
+  useEffect(() => {
+    const handleResize = () => updateVideoDisplayRect();
+    window.addEventListener("resize", handleResize);
+    window.addEventListener("orientationchange", handleResize);
+    handleResize();
+    return () => {
+      window.removeEventListener("resize", handleResize);
+      window.removeEventListener("orientationchange", handleResize);
+    };
+  }, [updateVideoDisplayRect, isLandscape, isReady]);
 
   useEffect(() => {
     if (!mountedRef.current) return;
@@ -1060,32 +1128,34 @@ export default function DebugCameraPage() {
   );
 
   const PreviewArea = (
-    <div className="relative w-full h-full bg-black flex items-center justify-center overflow-hidden">
+    <div ref={previewFrameRef} className="relative w-full h-full bg-black flex items-center justify-center overflow-hidden">
       <video
         ref={videoRef}
         className="w-full h-full object-contain bg-black"
         playsInline
         muted
         autoPlay
+        onLoadedMetadata={updateVideoDisplayRect}
+        onCanPlay={updateVideoDisplayRect}
       />
 
       <div className="absolute inset-0 pointer-events-none">
         <div
           className="absolute border border-white/70 rounded-md"
           style={{
-            width: "75%",
-            height: "75%",
-            left: "12.5%",
-            top: "12.5%",
+            width: videoDisplayRect.width * 0.75,
+            height: videoDisplayRect.height * 0.75,
+            left: videoDisplayRect.left + videoDisplayRect.width * 0.125,
+            top: videoDisplayRect.top + videoDisplayRect.height * 0.125,
           }}
         />
         <div
           className="absolute bg-white/45"
           style={{
             width: "1px",
-            height: "75%",
-            left: "50%",
-            top: "12.5%",
+            height: videoDisplayRect.height * 0.75,
+            left: videoDisplayRect.left + videoDisplayRect.width * 0.5,
+            top: videoDisplayRect.top + videoDisplayRect.height * 0.125,
             transform: "translateX(-0.5px)",
           }}
         />
@@ -1093,9 +1163,9 @@ export default function DebugCameraPage() {
           className="absolute bg-white/45"
           style={{
             height: "1px",
-            width: "75%",
-            left: "12.5%",
-            top: "50%",
+            width: videoDisplayRect.width * 0.75,
+            left: videoDisplayRect.left + videoDisplayRect.width * 0.125,
+            top: videoDisplayRect.top + videoDisplayRect.height * 0.5,
             transform: "translateY(-0.5px)",
           }}
         />
@@ -1103,10 +1173,10 @@ export default function DebugCameraPage() {
         <div
           className={`absolute rounded-xl border ${liveGuideActive ? "border-cyan-400/40" : "border-white/20"}`}
           style={{
-            width: `${LIVE_ROI_WIDTH_RATIO * 100}%`,
-            height: `${LIVE_ROI_HEIGHT_RATIO * 100}%`,
-            left: `${(1 - LIVE_ROI_WIDTH_RATIO) * 50}%`,
-            top: `${(1 - LIVE_ROI_HEIGHT_RATIO) * 50}%`,
+            width: videoDisplayRect.width * LIVE_ROI_WIDTH_RATIO,
+            height: videoDisplayRect.height * LIVE_ROI_HEIGHT_RATIO,
+            left: videoDisplayRect.left + videoDisplayRect.width * ((1 - LIVE_ROI_WIDTH_RATIO) / 2),
+            top: videoDisplayRect.top + videoDisplayRect.height * ((1 - LIVE_ROI_HEIGHT_RATIO) / 2),
           }}
         />
 
@@ -1115,10 +1185,10 @@ export default function DebugCameraPage() {
             key={`live-box-${index}-${box.x}-${box.y}`}
             className="absolute rounded-md border-[3px] border-sky-400"
             style={{
-              left: `${box.x * 100}%`,
-              top: `${box.y * 100}%`,
-              width: `${box.w * 100}%`,
-              height: `${box.h * 100}%`,
+              left: videoDisplayRect.left + videoDisplayRect.width * box.x,
+              top: videoDisplayRect.top + videoDisplayRect.height * box.y,
+              width: videoDisplayRect.width * box.w,
+              height: videoDisplayRect.height * box.h,
             }}
           />
         ))}
