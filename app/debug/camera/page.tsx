@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
-const PAGE_VERSION = "camera-stable-08";
 
 type SaveStep =
   | "idle"
@@ -17,6 +16,71 @@ type SaveStep =
   | "done"
   | "error";
 
+type InspectionProfile = {
+  profileName: string;
+  version: string;
+  baseThreshold: number;
+  missingCandidateThreshold: number;
+  rotationRange: number;
+  scaleRange: number;
+  shearRange: number;
+  compareResolution: number;
+  hitLimit: number;
+  liveGuideThresholdOffset?: number;
+  liveGuideIntervalMs?: number;
+};
+
+const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
+
+const SAMPLES_KEY = "inspection:samples";
+const LIVE_GUIDE_THRESHOLD_OFFSET_KEY = "inspection:liveGuideThresholdOffset";
+const LIVE_GUIDE_INTERVAL_KEY = "inspection:liveGuideIntervalMs";
+const DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET = 0.12;
+const DEFAULT_LIVE_GUIDE_INTERVAL_MS = 1500;
+const LIVE_MAX_BOXES = 2;
+const LIVE_ROI_WIDTH_RATIO = 0.7;
+const LIVE_ROI_HEIGHT_RATIO = 0.4;
+const LIVE_PROCESS_LONG_SIDE = 640;
+const LIVE_TEMPLATE_LONG_SIDE = 64;
+const LIVE_SEARCH_STEP = 4;
+
+type SampleItem = {
+  id: string;
+  count: number;
+  color: string;
+  thumbUrl?: string;
+  compareUrl?: string;
+  cameraCompareUrl?: string;
+  aspectRatio?: number;
+  savedResolution?: number;
+  cameraBaseLongSide?: number;
+  detectionSensitivity?: number;
+};
+
+type LiveBox = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  score: number;
+};
+
+function isInspectionProfile(value: unknown): value is InspectionProfile {
+  if (!value || typeof value !== "object") return false
+  const data = value as Record<string, unknown>;
+  return (
+    typeof data.profileName === "string" &&
+    typeof data.version === "string" &&
+    typeof data.baseThreshold === "number" &&
+    typeof data.missingCandidateThreshold === "number" &&
+    typeof data.rotationRange === "number" &&
+    typeof data.scaleRange === "number" &&
+    typeof data.shearRange === "number" &&
+    typeof data.compareResolution === "number" &&
+    typeof data.hitLimit === "number"
+  );
+}
+
 type CaptureDebugInfo = {
   sourceType: "camera" | "file";
   originalWidth: number;
@@ -27,7 +91,80 @@ type CaptureDebugInfo = {
   dataUrlLength: number;
 };
 
-export default function CameraPage() {
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function dataUrlToImage(dataUrl: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = (e) => reject(e);
+    img.src = dataUrl;
+  });
+}
+
+function toGrayArray(ctx: CanvasRenderingContext2D, width: number, height: number) {
+  const imageData = ctx.getImageData(0, 0, width, height).data;
+  const out = new Float32Array(width * height);
+  for (let i = 0, j = 0; i < imageData.length; i += 4, j++) {
+    out[j] = imageData[i] * 0.299 + imageData[i + 1] * 0.587 + imageData[i + 2] * 0.114;
+  }
+  return out;
+}
+
+function edgeNormalize(gray: Float32Array, width: number, height: number) {
+  const out = new Float32Array(width * height);
+  let sum = 0;
+  let sumSq = 0;
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const idx = y * width + x;
+      const gx = gray[idx + 1] - gray[idx - 1];
+      const gy = gray[idx + width] - gray[idx - width];
+      const mag = Math.sqrt(gx * gx + gy * gy);
+      out[idx] = mag;
+      sum += mag;
+      sumSq += mag * mag;
+    }
+  }
+  const n = Math.max(1, (width - 2) * (height - 2));
+  const mean = sum / n;
+  const variance = Math.max(1e-6, sumSq / n - mean * mean);
+  const std = Math.sqrt(variance);
+  for (let i = 0; i < out.length; i++) out[i] = (out[i] - mean) / std;
+  return out;
+}
+
+function computeNcc(
+  scene: Float32Array,
+  sceneWidth: number,
+  tpl: Float32Array,
+  tplWidth: number,
+  tplHeight: number,
+  startX: number,
+  startY: number
+) {
+  let sum = 0;
+  let count = 0;
+  for (let y = 1; y < tplHeight - 1; y += 2) {
+    const sceneRow = (startY + y) * sceneWidth + startX;
+    const tplRow = y * tplWidth;
+    for (let x = 1; x < tplWidth - 1; x += 2) {
+      sum += scene[sceneRow + x] * tpl[tplRow + x];
+      count++;
+    }
+  }
+  return count > 0 ? sum / count : -1;
+}
+
+function sampleSensitivityThreshold(sample: SampleItem | null | undefined) {
+  const sens = clamp(Math.round(sample?.detectionSensitivity ?? 50), 0, 100);
+  return clamp(Number((0.5 - (sens - 50) * 0.005).toFixed(3)), 0, 0.99);
+}
+
+export default function DebugCameraPage() {
   const router = useRouter();
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -41,22 +178,22 @@ export default function CameraPage() {
   const [errorMsg, setErrorMsg] = useState("");
   const [isCapturing, setIsCapturing] = useState(false);
   const [isLandscape, setIsLandscape] = useState(false);
+  const [configVersion, setConfigVersion] = useState("--");
+  const [sharedProfile, setSharedProfile] = useState<InspectionProfile | null>(null);
 
   const [saveStep, setSaveStep] = useState<SaveStep>("idle");
-  const [saveLog, setSaveLog] = useState<string[]>([]);
-  const [lastImageInfo, setLastImageInfo] = useState("");
+  const [liveBoxes, setLiveBoxes] = useState<LiveBox[]>([]);
+  const [liveGuideActive, setLiveGuideActive] = useState(false);
+  const [liveGuideThresholdOffset, setLiveGuideThresholdOffset] = useState(DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET);
+  const [liveGuideIntervalMs, setLiveGuideIntervalMs] = useState(DEFAULT_LIVE_GUIDE_INTERVAL_MS);
+  const [liveProcessInfo, setLiveProcessInfo] = useState("");
+  const [liveGuideSavedMsg, setLiveGuideSavedMsg] = useState("");
+  const liveTemplateRef = useRef<{ sample: SampleItem; gray: Float32Array; width: number; height: number; rawWidth: number; rawHeight: number } | null>(null);
+  const liveRunningRef = useRef(false);
+  const liveTimerRef = useRef<number | null>(null);
 
-  const pushSaveLog = useCallback((msg: string) => {
-    setSaveLog((prev) => {
-      const next = [...prev, msg];
-      return next.slice(-10);
-    });
-  }, []);
-
-  const resetSaveDebug = useCallback(() => {
+  const resetSaveState = useCallback(() => {
     setSaveStep("idle");
-    setSaveLog([]);
-    setLastImageInfo("");
   }, []);
 
   const stopCamera = useCallback(() => {
@@ -152,6 +289,226 @@ export default function CameraPage() {
   }, [startCamera, stopCamera]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    const loadSharedProfile = async () => {
+      try {
+        const response = await fetch("/api/config", { cache: "no-store" });
+        if (!response.ok) return;
+
+        const data = await response.json();
+        if (cancelled) return;
+
+        if (isInspectionProfile(data)) {
+          setSharedProfile(data);
+          if (data.version.trim()) {
+            setConfigVersion(data.version.trim());
+          }
+        }
+      } catch (error) {
+        console.error("共有設定の取得に失敗しました", error);
+      }
+    };
+
+    void loadSharedProfile();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    try {
+      const savedOffset = localStorage.getItem(LIVE_GUIDE_THRESHOLD_OFFSET_KEY);
+      const savedInterval = localStorage.getItem(LIVE_GUIDE_INTERVAL_KEY);
+
+      if (savedOffset !== null) {
+        const n = Number(savedOffset);
+        if (Number.isFinite(n)) {
+          setLiveGuideThresholdOffset(clamp(Number(n.toFixed(2)), -0.25, 0.25));
+        }
+      } else if (typeof sharedProfile?.liveGuideThresholdOffset === "number") {
+        setLiveGuideThresholdOffset(clamp(Number(sharedProfile.liveGuideThresholdOffset.toFixed(2)), -0.25, 0.25));
+      }
+
+      if (savedInterval !== null) {
+        const n = Number(savedInterval);
+        if (Number.isFinite(n)) {
+          setLiveGuideIntervalMs(clamp(Math.round(n), 500, 5000));
+        }
+      } else if (typeof sharedProfile?.liveGuideIntervalMs === "number") {
+        setLiveGuideIntervalMs(clamp(Math.round(sharedProfile.liveGuideIntervalMs), 500, 5000));
+      }
+    } catch (error) {
+      console.error("ライブ簡易検査設定の読み込みに失敗しました", error);
+    }
+  }, [sharedProfile]);
+
+
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadLiveTemplate = async () => {
+      try {
+        const raw = localStorage.getItem(SAMPLES_KEY);
+        if (!raw) {
+          liveTemplateRef.current = null;
+          setLiveBoxes([]);
+          setLiveGuideActive(false);
+          return;
+        }
+
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed) || parsed.length === 0) {
+          liveTemplateRef.current = null;
+          setLiveBoxes([]);
+          setLiveGuideActive(false);
+          return;
+        }
+
+        const sample = parsed[0] as SampleItem;
+        const src = sample.cameraCompareUrl || sample.compareUrl || sample.thumbUrl;
+        if (!src) {
+          liveTemplateRef.current = null;
+          setLiveBoxes([]);
+          setLiveGuideActive(false);
+          return;
+        }
+
+        const img = await dataUrlToImage(src);
+        if (cancelled) return;
+
+        const longSide = Math.max(img.naturalWidth, img.naturalHeight);
+        const scale = Math.min(1, LIVE_TEMPLATE_LONG_SIDE / Math.max(1, longSide));
+        const width = Math.max(16, Math.round(img.naturalWidth * scale));
+        const height = Math.max(16, Math.round(img.naturalHeight * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.drawImage(img, 0, 0, width, height);
+        const gray = edgeNormalize(toGrayArray(ctx, width, height), width, height);
+        liveTemplateRef.current = { sample, gray, width, height, rawWidth: img.naturalWidth, rawHeight: img.naturalHeight };
+        setLiveGuideActive(true);
+      } catch (error) {
+        console.error('ライブ簡易検査の見本読み込みに失敗しました', error);
+        liveTemplateRef.current = null;
+        setLiveGuideActive(false);
+      }
+    };
+
+    void loadLiveTemplate();
+    const handleStorage = () => { void loadLiveTemplate(); };
+    window.addEventListener('storage', handleStorage);
+    window.addEventListener('focus', handleStorage);
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener('storage', handleStorage);
+      window.removeEventListener('focus', handleStorage);
+    };
+  }, []);
+
+  const runLiveCheck = useCallback(async () => {
+    if (liveRunningRef.current || isCapturing || !isReady) return;
+    const video = videoRef.current;
+    const tpl = liveTemplateRef.current;
+    if (!video || !tpl) {
+      setLiveBoxes([]);
+      return;
+    }
+
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    if (!vw || !vh) return;
+
+    liveRunningRef.current = true;
+    try {
+      const longSide = Math.max(vw, vh);
+      const scale = Math.min(1, LIVE_PROCESS_LONG_SIDE / Math.max(1, longSide));
+      const pw = Math.max(160, Math.round(vw * scale));
+      const ph = Math.max(120, Math.round(vh * scale));
+
+      const canvas = document.createElement('canvas');
+      canvas.width = pw;
+      canvas.height = ph;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return;
+      ctx.drawImage(video, 0, 0, pw, ph);
+
+      const roiW = Math.max(tpl.width + 4, Math.round(pw * LIVE_ROI_WIDTH_RATIO));
+      const roiH = Math.max(tpl.height + 4, Math.round(ph * LIVE_ROI_HEIGHT_RATIO));
+      const roiX = Math.round((pw - roiW) / 2);
+      const roiY = Math.round((ph - roiH) / 2);
+
+      const gray = edgeNormalize(toGrayArray(ctx, pw, ph), pw, ph);
+      setLiveProcessInfo(`${pw}x${ph} / tpl ${tpl.width}x${tpl.height}`);
+      const results: LiveBox[] = [];
+      const matchThreshold = sampleSensitivityThreshold(tpl.sample);
+      const highThreshold = clamp(Number((matchThreshold + liveGuideThresholdOffset).toFixed(2)), 0.35, 0.95);
+      const earlyThreshold = clamp(Number((highThreshold + 0.06).toFixed(2)), 0.4, 0.99);
+
+      for (let y = roiY; y <= roiY + roiH - tpl.height; y += LIVE_SEARCH_STEP) {
+        for (let x = roiX; x <= roiX + roiW - tpl.width; x += LIVE_SEARCH_STEP) {
+          const score = computeNcc(gray, pw, tpl.gray, tpl.width, tpl.height, x, y);
+          if (score < highThreshold) continue;
+
+          const box: LiveBox = {
+            x: x / pw,
+            y: y / ph,
+            w: tpl.width / pw,
+            h: tpl.height / ph,
+            score,
+          };
+
+          const overlaps = results.some((r) => {
+            const x1 = Math.max(r.x, box.x);
+            const y1 = Math.max(r.y, box.y);
+            const x2 = Math.min(r.x + r.w, box.x + box.w);
+            const y2 = Math.min(r.y + r.h, box.y + box.h);
+            const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+            const union = r.w * r.h + box.w * box.h - inter;
+            return union > 0 && inter / union > 0.35;
+          });
+          if (!overlaps) results.push(box);
+          if (results.length >= LIVE_MAX_BOXES && score >= earlyThreshold) break;
+        }
+        if (results.length >= LIVE_MAX_BOXES) break;
+      }
+
+      setLiveBoxes(results.slice(0, LIVE_MAX_BOXES));
+    } catch (error) {
+      console.error('ライブ簡易検査エラー', error);
+    } finally {
+      liveRunningRef.current = false;
+    }
+  }, [isCapturing, isReady, liveGuideThresholdOffset]);
+
+  useEffect(() => {
+    if (liveTimerRef.current !== null) {
+      window.clearInterval(liveTimerRef.current);
+      liveTimerRef.current = null;
+    }
+
+    if (!isReady) return;
+
+    liveTimerRef.current = window.setInterval(() => {
+      void runLiveCheck();
+    }, liveGuideIntervalMs);
+
+    void runLiveCheck();
+
+    return () => {
+      if (liveTimerRef.current !== null) {
+        window.clearInterval(liveTimerRef.current);
+        liveTimerRef.current = null;
+      }
+    };
+  }, [isReady, runLiveCheck, liveGuideIntervalMs]);
+
+  useEffect(() => {
     if (!mountedRef.current) return;
 
     if (restartTimerRef.current !== null) {
@@ -174,10 +531,9 @@ export default function CameraPage() {
       console.error(message, detail);
       setSaveStep("error");
       setErrorMsg(message);
-      pushSaveLog(`ERROR: ${message}`);
       setIsCapturing(false);
     },
-    [pushSaveLog]
+    []
   );
 
   const saveToSessionStorageSafely = useCallback(
@@ -205,7 +561,6 @@ export default function CameraPage() {
 
         const outCtx = outCanvas.getContext("2d");
         if (!outCtx) {
-          pushSaveLog(`resize fail: ctx unavailable / ${attempt.maxSide}`);
           continue;
         }
 
@@ -215,19 +570,13 @@ export default function CameraPage() {
         try {
           dataUrl = outCanvas.toDataURL("image/jpeg", attempt.quality);
         } catch (err) {
-          pushSaveLog(`toDataURL fail: ${attempt.maxSide}`);
           console.error(err);
           continue;
         }
 
         if (!dataUrl || !dataUrl.startsWith("data:image/")) {
-          pushSaveLog(`invalid dataUrl: ${attempt.maxSide}`);
           continue;
         }
-
-        pushSaveLog(
-          `try save: ${outW}x${outH} / q${attempt.quality} / ${dataUrl.length.toLocaleString()} chars`
-        );
 
         try {
           sessionStorage.setItem("capturedImage", dataUrl);
@@ -250,19 +599,32 @@ export default function CameraPage() {
           };
         } catch (err) {
           console.error(err);
-          pushSaveLog(`sessionStorage fail: ${outW}x${outH}`);
         }
       }
 
       return { ok: false as const };
     },
-    [pushSaveLog]
+    []
   );
+
+
+  const savePendingSharedProfile = useCallback(() => {
+    try {
+      if (!sharedProfile) {
+        sessionStorage.removeItem(PENDING_SHARED_PROFILE_KEY);
+        return;
+      }
+
+      sessionStorage.setItem(PENDING_SHARED_PROFILE_KEY, JSON.stringify(sharedProfile));
+    } catch (error) {
+      console.error("共有設定の受け渡し保存に失敗しました", error);
+    }
+  }, [sharedProfile]);
 
   const handleCapture = async () => {
     if (!videoRef.current || isCapturing || !isReady) return;
 
-    resetSaveDebug();
+    resetSaveState();
 
     const video = videoRef.current;
     const vw = video.videoWidth;
@@ -278,14 +640,11 @@ export default function CameraPage() {
       setErrorMsg("");
 
       setSaveStep("capture_start");
-      pushSaveLog(`capture start: ${vw}x${vh}`);
-      setLastImageInfo(`video: ${vw}x${vh}`);
 
       setSaveStep("canvas_create");
       const canvas = document.createElement("canvas");
       canvas.width = vw;
       canvas.height = vh;
-      pushSaveLog(`canvas created: ${canvas.width}x${canvas.height}`);
 
       const ctx = canvas.getContext("2d");
       if (!ctx) {
@@ -295,10 +654,8 @@ export default function CameraPage() {
 
       setSaveStep("canvas_draw");
       ctx.drawImage(video, 0, 0, vw, vh);
-      pushSaveLog("canvas draw: ok");
 
       setSaveStep("image_resize");
-      pushSaveLog("resize for storage: start");
 
       setSaveStep("sessionstorage_save");
       const saved = saveToSessionStorageSafely(canvas);
@@ -308,13 +665,10 @@ export default function CameraPage() {
         return;
       }
 
-      setLastImageInfo(
-        `video: ${vw}x${vh} / stored: ${saved.width}x${saved.height} / q${saved.quality} / ${saved.length.toLocaleString()} chars`
-      );
-      pushSaveLog(`saved: ${saved.width}x${saved.height}`);
+
+      savePendingSharedProfile();
 
       setSaveStep("navigate_review");
-      pushSaveLog("navigate: /review");
       setSaveStep("done");
 
       router.push("/debug/review");
@@ -331,15 +685,12 @@ export default function CameraPage() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    resetSaveDebug();
+    resetSaveState();
 
     try {
       setErrorMsg("");
       setIsCapturing(true);
       setSaveStep("capture_start");
-      pushSaveLog(`file selected: ${file.name}`);
-      pushSaveLog(`file size: ${file.size.toLocaleString()} bytes`);
-      setLastImageInfo(`file: ${file.name} / ${file.size.toLocaleString()} bytes`);
 
       const reader = new FileReader();
 
@@ -367,7 +718,6 @@ export default function CameraPage() {
 
             setSaveStep("canvas_draw");
             ctx.drawImage(img, 0, 0);
-            pushSaveLog(`image loaded: ${img.naturalWidth}x${img.naturalHeight}`);
 
             setSaveStep("image_resize");
             const saved = saveToSessionStorageSafely(canvas);
@@ -390,13 +740,10 @@ export default function CameraPage() {
               sessionStorage.setItem("captureDebugInfo", JSON.stringify(debugInfo));
             } catch {}
 
-            setLastImageInfo(
-              `file image: ${img.naturalWidth}x${img.naturalHeight} / stored: ${saved.width}x${saved.height} / q${saved.quality} / ${saved.length.toLocaleString()} chars`
-            );
-            pushSaveLog(`saved: ${saved.width}x${saved.height}`);
+
+            savePendingSharedProfile();
 
             setSaveStep("navigate_review");
-            pushSaveLog("navigate: /review");
             setSaveStep("done");
 
             router.push("/debug/review");
@@ -425,6 +772,124 @@ export default function CameraPage() {
       e.target.value = "";
     }
   };
+
+
+  const adjustLiveGuideThresholdOffset = (delta: number) => {
+    setLiveGuideThresholdOffset((prev) => clamp(Number((prev + delta).toFixed(2)), -0.25, 0.25));
+  };
+
+  const adjustLiveGuideInterval = (deltaMs: number) => {
+    setLiveGuideIntervalMs((prev) => clamp(prev + deltaMs, 500, 5000));
+  };
+
+  const saveLiveGuideSettings = () => {
+    try {
+      localStorage.setItem(
+        LIVE_GUIDE_THRESHOLD_OFFSET_KEY,
+        String(Number(liveGuideThresholdOffset.toFixed(2)))
+      );
+      localStorage.setItem(
+        LIVE_GUIDE_INTERVAL_KEY,
+        String(Math.round(liveGuideIntervalMs))
+      );
+      setLiveGuideSavedMsg("出力しました");
+      window.setTimeout(() => setLiveGuideSavedMsg(""), 1600);
+    } catch (error) {
+      console.error("ライブ簡易検査設定の保存に失敗しました", error);
+      setLiveGuideSavedMsg("保存失敗");
+      window.setTimeout(() => setLiveGuideSavedMsg(""), 1600);
+    }
+  };
+
+  const DebugGuideControls = (
+    <div className="rounded-2xl border border-white/10 bg-zinc-950/95 px-4 py-3 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="text-sm font-medium">簡易検査調整</div>
+        <button
+          onClick={saveLiveGuideSettings}
+          className="rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-3 py-1.5 text-sm text-cyan-200"
+        >
+          出力
+        </button>
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex items-center justify-between text-sm">
+          <div>しきい値補正</div>
+          <div className="tabular-nums">
+            {liveGuideThresholdOffset >= 0 ? "+" : ""}
+            {liveGuideThresholdOffset.toFixed(2)}
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => adjustLiveGuideThresholdOffset(-0.01)}
+            className="w-10 h-10 rounded-xl border border-white/15 bg-white/5 text-lg"
+            aria-label="しきい値補正を下げる"
+          >
+            −
+          </button>
+          <input
+            type="range"
+            min={-0.25}
+            max={0.25}
+            step={0.01}
+            value={liveGuideThresholdOffset}
+            onChange={(e) => setLiveGuideThresholdOffset(clamp(Number(e.target.value), -0.25, 0.25))}
+            className="flex-1"
+          />
+          <button
+            onClick={() => adjustLiveGuideThresholdOffset(0.01)}
+            className="w-10 h-10 rounded-xl border border-white/15 bg-white/5 text-lg"
+            aria-label="しきい値補正を上げる"
+          >
+            +
+          </button>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex items-center justify-between text-sm">
+          <div>検知間隔</div>
+          <div className="tabular-nums">{(liveGuideIntervalMs / 1000).toFixed(1)}秒</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => adjustLiveGuideInterval(-100)}
+            className="w-10 h-10 rounded-xl border border-white/15 bg-white/5 text-lg"
+            aria-label="検知間隔を短くする"
+          >
+            −
+          </button>
+          <input
+            type="range"
+            min={500}
+            max={5000}
+            step={100}
+            value={liveGuideIntervalMs}
+            onChange={(e) => setLiveGuideIntervalMs(clamp(Number(e.target.value), 500, 5000))}
+            className="flex-1"
+          />
+          <button
+            onClick={() => adjustLiveGuideInterval(100)}
+            className="w-10 h-10 rounded-xl border border-white/15 bg-white/5 text-lg"
+            aria-label="検知間隔を長くする"
+          >
+            +
+          </button>
+        </div>
+      </div>
+
+      <div className="text-xs text-zinc-400 space-y-1">
+        <div>内部処理解像度: 長辺 {LIVE_PROCESS_LONG_SIDE}</div>
+        <div>現在: {liveProcessInfo || "待機中"}</div>
+      </div>
+
+      {liveGuideSavedMsg ? (
+        <div className="text-xs text-cyan-300">{liveGuideSavedMsg}</div>
+      ) : null}
+    </div>
+  );
 
   const IconPhoto = (
     <svg
@@ -499,7 +964,7 @@ export default function CameraPage() {
 
   const TopBar = (
     <div className="h-20 shrink-0 flex items-center justify-between px-4 border-b border-zinc-800 bg-zinc-950">
-      <div className="text-base font-medium">カメラ</div>
+      <div className="text-base font-medium">デバッグカメラ</div>
       <button
         onClick={() => router.push("/")}
         className="text-sm text-zinc-300"
@@ -549,6 +1014,29 @@ export default function CameraPage() {
             transform: "translateY(-0.5px)",
           }}
         />
+
+        <div
+          className={`absolute rounded-xl border ${liveGuideActive ? "border-cyan-400/40" : "border-white/20"}`}
+          style={{
+            width: `${LIVE_ROI_WIDTH_RATIO * 100}%`,
+            height: `${LIVE_ROI_HEIGHT_RATIO * 100}%`,
+            left: `${(1 - LIVE_ROI_WIDTH_RATIO) * 50}%`,
+            top: `${(1 - LIVE_ROI_HEIGHT_RATIO) * 50}%`,
+          }}
+        />
+
+        {liveBoxes.map((box, index) => (
+          <div
+            key={`live-box-${index}-${box.x}-${box.y}`}
+            className="absolute rounded-md border-[3px] border-sky-400"
+            style={{
+              left: `${box.x * 100}%`,
+              top: `${box.y * 100}%`,
+              width: `${box.w * 100}%`,
+              height: `${box.h * 100}%`,
+            }}
+          />
+        ))}
       </div>
 
       {!isReady && !errorMsg ? (
@@ -576,20 +1064,6 @@ export default function CameraPage() {
               {saveStep === "error" && "エラー"}
               {saveStep === "idle" && "待機中"}
             </div>
-
-            {lastImageInfo ? (
-              <div className="mt-2 text-[11px] text-zinc-400 break-all">
-                {lastImageInfo}
-              </div>
-            ) : null}
-
-            {saveLog.length > 0 ? (
-              <div className="mt-3 text-left text-[11px] text-zinc-300 bg-black/40 rounded-lg p-2 max-w-[320px]">
-                {saveLog.map((line, index) => (
-                  <div key={`${index}-${line}`}>{line}</div>
-                ))}
-              </div>
-            ) : null}
           </div>
         </div>
       ) : null}
@@ -604,10 +1078,6 @@ export default function CameraPage() {
 
   return (
     <main className="h-[100dvh] bg-black text-white flex flex-col overflow-hidden">
-      <div className="fixed right-2 bottom-2 z-[9999] text-[10px] px-2 py-1 rounded bg-black/70 text-zinc-300 border border-white/10 pointer-events-none">
-        {PAGE_VERSION}
-      </div>
-
       <input
         ref={fileInputRef}
         type="file"
@@ -620,28 +1090,22 @@ export default function CameraPage() {
 
       {isLandscape ? (
         <div className="flex-1 min-h-0 flex bg-black overflow-hidden">
-          <div className="w-20 shrink-0 relative">
-            <div className="absolute left-1/2 top-4 -translate-x-1/2">
+          <div className="w-80 shrink-0 p-3 flex flex-col gap-3 bg-black">
+            <div className="flex items-start justify-between">
               {BackButton}
+              {SettingsButton}
             </div>
-
-            <div className="absolute left-1/2 bottom-4 -translate-x-1/2">
+            <div className="flex-1 min-h-0 overflow-auto">
+              {DebugGuideControls}
+            </div>
+            <div className="flex items-center justify-between gap-3">
               {PhotoButton}
+              {ShutterButton}
             </div>
           </div>
 
           <div className="flex-1 min-w-0 min-h-0 overflow-hidden">
             {PreviewArea}
-          </div>
-
-          <div className="w-24 shrink-0 relative">
-            <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-              {ShutterButton}
-            </div>
-
-            <div className="absolute left-1/2 bottom-4 -translate-x-1/2">
-              {SettingsButton}
-            </div>
           </div>
         </div>
       ) : (
@@ -650,7 +1114,11 @@ export default function CameraPage() {
             {PreviewArea}
           </div>
 
-          <div className="shrink-0 bg-black px-5 pt-4 pb-8">
+          <div className="shrink-0 bg-black px-4 pt-3 pb-3">
+            {DebugGuideControls}
+          </div>
+
+          <div className="shrink-0 bg-black px-5 pt-3 pb-8">
             <div className="flex items-center justify-between">
               {PhotoButton}
               {ShutterButton}
