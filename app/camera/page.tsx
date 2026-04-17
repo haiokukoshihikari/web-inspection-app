@@ -62,8 +62,47 @@ type LiveBox = {
   y: number;
   w: number;
   h: number;
+  matchW: number;
+  matchH: number;
   score: number;
 };
+
+type Rect = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
+
+function calcContainRect(
+  containerWidth: number,
+  containerHeight: number,
+  contentWidth: number,
+  contentHeight: number
+): Rect {
+  if (!containerWidth || !containerHeight || !contentWidth || !contentHeight) {
+    return { left: 0, top: 0, width: 0, height: 0 };
+  }
+
+  const contentRatio = contentWidth / contentHeight;
+  const containerRatio = containerWidth / containerHeight;
+
+  let width = containerWidth;
+  let height = containerHeight;
+
+  if (contentRatio > containerRatio) {
+    height = width / contentRatio;
+  } else {
+    width = height * contentRatio;
+  }
+
+  return {
+    left: (containerWidth - width) / 2,
+    top: (containerHeight - height) / 2,
+    width,
+    height,
+  };
+}
 
 function isInspectionProfile(value: unknown): value is InspectionProfile {
   if (!value || typeof value !== "object") return false
@@ -168,6 +207,7 @@ export default function CameraPage() {
   const router = useRouter();
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const previewFrameRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const restartTimerRef = useRef<number | null>(null);
@@ -187,9 +227,25 @@ export default function CameraPage() {
   const [liveGuideThresholdOffset, setLiveGuideThresholdOffset] = useState(DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET);
   const [liveGuideIntervalMs, setLiveGuideIntervalMs] = useState(DEFAULT_LIVE_GUIDE_INTERVAL_MS);
   const [liveProcessInfo, setLiveProcessInfo] = useState("");
+  const [videoDisplayRect, setVideoDisplayRect] = useState<Rect>({ left: 0, top: 0, width: 0, height: 0 });
   const liveTemplateRef = useRef<{ sample: SampleItem; gray: Float32Array; width: number; height: number; rawWidth: number; rawHeight: number } | null>(null);
   const liveRunningRef = useRef(false);
   const liveTimerRef = useRef<number | null>(null);
+
+  const updateVideoDisplayRect = useCallback(() => {
+    const frame = previewFrameRef.current;
+    const video = videoRef.current;
+    if (!frame || !video) return;
+
+    const frameRect = frame.getBoundingClientRect();
+    const next = calcContainRect(
+      frameRect.width,
+      frameRect.height,
+      video.videoWidth || frameRect.width,
+      video.videoHeight || frameRect.height
+    );
+    setVideoDisplayRect(next);
+  }, []);
 
   const resetSaveState = useCallback(() => {
     setSaveStep("idle");
@@ -263,7 +319,7 @@ export default function CameraPage() {
     } finally {
       startingRef.current = false;
     }
-  }, [stopCamera]);
+  }, [stopCamera, updateVideoDisplayRect]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -454,21 +510,30 @@ export default function CameraPage() {
           const score = computeNcc(gray, pw, tpl.gray, tpl.width, tpl.height, x, y);
           if (score < highThreshold) continue;
 
+          const rawWNorm = tpl.rawWidth / pw;
+          const rawHNorm = tpl.rawHeight / ph;
+          const matchWNorm = tpl.width / pw;
+          const matchHNorm = tpl.height / ph;
+          const offsetXNorm = Math.max(0, (rawWNorm - matchWNorm) / 2);
+          const offsetYNorm = Math.max(0, (rawHNorm - matchHNorm) / 2);
+
           const box: LiveBox = {
-            x: x / pw,
-            y: y / ph,
-            w: tpl.width / pw,
-            h: tpl.height / ph,
+            x: Math.max(0, x / pw - offsetXNorm),
+            y: Math.max(0, y / ph - offsetYNorm),
+            w: rawWNorm,
+            h: rawHNorm,
+            matchW: matchWNorm,
+            matchH: matchHNorm,
             score,
           };
 
           const overlaps = results.some((r) => {
             const x1 = Math.max(r.x, box.x);
             const y1 = Math.max(r.y, box.y);
-            const x2 = Math.min(r.x + r.w, box.x + box.w);
-            const y2 = Math.min(r.y + r.h, box.y + box.h);
+            const x2 = Math.min(r.x + r.matchW, box.x + box.matchW);
+            const y2 = Math.min(r.y + r.matchH, box.y + box.matchH);
             const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
-            const union = r.w * r.h + box.w * box.h - inter;
+            const union = r.matchW * r.matchH + box.matchW * box.matchH - inter;
             return union > 0 && inter / union > 0.35;
           });
           if (!overlaps) results.push(box);
@@ -524,6 +589,17 @@ export default function CameraPage() {
       }
     };
   }, [isLandscape, startCamera]);
+
+
+  useEffect(() => {
+    const handleResize = () => updateVideoDisplayRect();
+    window.addEventListener("resize", handleResize);
+    window.addEventListener("orientationchange", handleResize);
+    return () => {
+      window.removeEventListener("resize", handleResize);
+      window.removeEventListener("orientationchange", handleResize);
+    };
+  }, [updateVideoDisplayRect]);
 
   const failSave = useCallback(
     (message: string, detail?: unknown) => {
