@@ -1291,6 +1291,14 @@ export default function DebugCameraPage() {
               {SettingsButton}
             </div>
           </div>
+
+          <div className="shrink-0 bg-black px-5 pt-3 pb-8">
+            <div className="flex items-center justify-between">
+              {PhotoButton}
+              {ShutterButton}
+              {SettingsButton}
+            </div>
+          </div>
         </>
       )}
     </main>
