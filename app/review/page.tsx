@@ -1541,8 +1541,16 @@ const drawPolylineCanvas = (
   };
 
   const adjustSensitivity = (delta: number) => {
-    if (!sensitivitySliderEnabled) return;
-    applySensitivityChange(sensitivity + delta);
+    if (!sensitivitySliderEnabled || !editingSampleId) return;
+
+    const nextSensitivity = clamp(Math.round((sensitivity ?? 50) + delta), 0, 100);
+    sensitivityDraftRef.current = nextSensitivity;
+    pendingSensitivityCommitRef.current = {
+      sampleId: editingSampleId,
+      value: nextSensitivity,
+    };
+    setSensitivity(nextSensitivity);
+    scheduleRecheckApply(baseThreshold, nextSensitivity, draftMissingCandidateThreshold);
   };
 
   const adjustMissingCandidateThreshold = (delta: number) => {
