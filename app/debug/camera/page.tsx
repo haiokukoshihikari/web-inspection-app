@@ -293,63 +293,6 @@ export default function DebugCameraPage() {
   useEffect(() => {
     let cancelled = false;
 
-    async function loadCameraTemplateInfo() {
-      try {
-        const raw = localStorage.getItem(SAMPLES_KEY);
-        if (!raw) {
-          setFirstSamplePreviewUrl("");
-          setCameraTemplateInfo(null);
-          return;
-        }
-
-        const parsed = JSON.parse(raw);
-        if (!Array.isArray(parsed) || parsed.length === 0) {
-          setFirstSamplePreviewUrl("");
-          setCameraTemplateInfo(null);
-          return;
-        }
-
-        const sample = parsed[0] as SampleItem;
-        const src = sample.cameraCompareUrl || sample.compareUrl || sample.thumbUrl || "";
-        if (!src) {
-          setFirstSamplePreviewUrl("");
-          setCameraTemplateInfo(null);
-          return;
-        }
-
-        setFirstSamplePreviewUrl(src);
-
-        const img = new Image();
-        img.onload = () => {
-          if (!cancelled) {
-            setCameraTemplateInfo({
-              width: img.naturalWidth,
-              height: img.naturalHeight,
-            });
-          }
-        };
-        img.onerror = () => {
-          if (!cancelled) setCameraTemplateInfo(null);
-        };
-        img.src = src;
-      } catch {
-        if (!cancelled) {
-          setFirstSamplePreviewUrl("");
-          setCameraTemplateInfo(null);
-        }
-      }
-    }
-
-    void loadCameraTemplateInfo();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [configVersion]);
-
-  useEffect(() => {
-    let cancelled = false;
-
     const loadSharedProfile = async () => {
       try {
         const response = await fetch("/api/config", { cache: "no-store" });
@@ -942,6 +885,28 @@ export default function DebugCameraPage() {
       <div className="text-xs text-zinc-400 space-y-1">
         <div>内部処理解像度: 長辺 {LIVE_PROCESS_LONG_SIDE}</div>
         <div>現在: {liveProcessInfo || "待機中"}</div>
+      </div>
+
+      <div className="rounded-xl border border-white/10 bg-black/30 p-3 space-y-2">
+        <div className="text-sm font-medium">camera用見本の確認</div>
+        {firstSamplePreviewUrl ? (
+          <>
+            <div className="h-24 rounded-lg border border-white/10 bg-zinc-900 flex items-center justify-center overflow-hidden">
+              <img
+                src={firstSamplePreviewUrl}
+                alt="camera用見本"
+                className="max-w-full max-h-full object-contain"
+              />
+            </div>
+            <div className="text-xs text-zinc-400">
+              {cameraTemplateInfo
+                ? `${cameraTemplateInfo.width} × ${cameraTemplateInfo.height}`
+                : "サイズ取得中…"}
+            </div>
+          </>
+        ) : (
+          <div className="text-xs text-zinc-500">見本1のcamera用見本はまだありません</div>
+        )}
       </div>
 
       {liveGuideSavedMsg ? (
