@@ -33,8 +33,6 @@ type InspectionProfile = {
 const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
 
 const SAMPLES_KEY = "inspection:samples";
-const LIVE_GUIDE_THRESHOLD_OFFSET_KEY = "inspection:liveGuideThresholdOffset";
-const LIVE_GUIDE_INTERVAL_KEY = "inspection:liveGuideIntervalMs";
 const DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET = 0.12;
 const DEFAULT_LIVE_GUIDE_INTERVAL_MS = 1500;
 const LIVE_MAX_BOXES = 2;
@@ -374,32 +372,23 @@ export default function CameraPage() {
 
   useEffect(() => {
     try {
-      const savedOffset = localStorage.getItem(LIVE_GUIDE_THRESHOLD_OFFSET_KEY);
-      const savedInterval = localStorage.getItem(LIVE_GUIDE_INTERVAL_KEY);
-
-      if (savedOffset !== null) {
-        const n = Number(savedOffset);
-        if (Number.isFinite(n)) {
-          setLiveGuideThresholdOffset(clamp(Number(n.toFixed(2)), -0.25, 0.25));
-        }
-      } else if (typeof sharedProfile?.liveGuideThresholdOffset === "number") {
-        setLiveGuideThresholdOffset(clamp(Number(sharedProfile.liveGuideThresholdOffset.toFixed(2)), -0.25, 0.25));
+      if (typeof sharedProfile?.liveGuideThresholdOffset === "number") {
+        setLiveGuideThresholdOffset(
+          clamp(Number(sharedProfile.liveGuideThresholdOffset.toFixed(2)), -0.25, 0.25)
+        );
+      } else {
+        setLiveGuideThresholdOffset(DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET);
       }
 
-      if (savedInterval !== null) {
-        const n = Number(savedInterval);
-        if (Number.isFinite(n)) {
-          setLiveGuideIntervalMs(clamp(Math.round(n), 500, 5000));
-        }
-      } else if (typeof sharedProfile?.liveGuideIntervalMs === "number") {
+      if (typeof sharedProfile?.liveGuideIntervalMs === "number") {
         setLiveGuideIntervalMs(clamp(Math.round(sharedProfile.liveGuideIntervalMs), 500, 5000));
+      } else {
+        setLiveGuideIntervalMs(DEFAULT_LIVE_GUIDE_INTERVAL_MS);
       }
     } catch (error) {
       console.error("ライブ簡易検査設定の読み込みに失敗しました", error);
     }
   }, [sharedProfile]);
-
-
 
   useEffect(() => {
     let cancelled = false;
