@@ -33,8 +33,6 @@ type InspectionProfile = {
 const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
 
 const SAMPLES_KEY = "inspection:samples";
-const LIVE_GUIDE_THRESHOLD_OFFSET_KEY = "inspection:liveGuideThresholdOffset";
-const LIVE_GUIDE_INTERVAL_KEY = "inspection:liveGuideIntervalMs";
 const DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET = 0.12;
 const DEFAULT_LIVE_GUIDE_INTERVAL_MS = 1500;
 const LIVE_MAX_BOXES = 2;
@@ -924,16 +922,50 @@ export default function DebugCameraPage() {
     setLiveGuideIntervalMs((prev) => clamp(prev + deltaMs, 500, 5000));
   };
 
-  const saveLiveGuideSettings = () => {
+  const saveLiveGuideSettings = async () => {
     try {
-      localStorage.setItem(
-        LIVE_GUIDE_THRESHOLD_OFFSET_KEY,
-        String(Number(liveGuideThresholdOffset.toFixed(2)))
-      );
-      localStorage.setItem(
-        LIVE_GUIDE_INTERVAL_KEY,
-        String(Math.round(liveGuideIntervalMs))
-      );
+      const baseProfile = sharedProfile ?? {
+        profileName: "default",
+        version: configVersion !== "--" ? configVersion : "live-guide-update",
+        baseThreshold: 0.48,
+        missingCandidateThreshold: 0.31,
+        rotationRange: 3,
+        scaleRange: 5,
+        shearRange: 0,
+        compareResolution: 1600,
+        hitLimit: 100,
+        liveGuideThresholdOffset: DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET,
+        liveGuideIntervalMs: DEFAULT_LIVE_GUIDE_INTERVAL_MS,
+      };
+
+      const nextProfile = {
+        ...baseProfile,
+        liveGuideThresholdOffset: clamp(Number(liveGuideThresholdOffset.toFixed(2)), -0.25, 0.25),
+        liveGuideIntervalMs: clamp(Math.round(liveGuideIntervalMs), 500, 5000),
+      };
+
+      const response = await fetch("/api/config", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(nextProfile),
+      });
+
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(
+          typeof data?.message === "string" ? data.message : "共有設定の保存に失敗しました。"
+        );
+      }
+
+      if (data?.profile) {
+        setSharedProfile(data.profile);
+        if (typeof data.profile.version === "string" && data.profile.version.trim()) {
+          setConfigVersion(data.profile.version.trim());
+        }
+      }
+
       setLiveGuideSavedMsg("出力しました");
       window.setTimeout(() => setLiveGuideSavedMsg(""), 1600);
     } catch (error) {
@@ -1276,11 +1308,11 @@ export default function DebugCameraPage() {
         </div>
       ) : (
         <>
-          <div className="flex-1 min-h-0 relative bg-black overflow-hidden" style={{ minHeight: "36vh" }}>
+          <div className="flex-1 min-h-0 relative bg-black overflow-hidden" style={{ minHeight: "44vh" }}>
             {PreviewArea}
           </div>
 
-          <div className="shrink-0 bg-black px-4 pt-2 pb-3 max-h-[34vh] overflow-auto">
+          <div className="shrink-0 bg-black px-4 pt-2 pb-3 max-h-[46vh] overflow-auto">
             {DebugGuideControls}
           </div>
 
