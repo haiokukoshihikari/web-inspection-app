@@ -577,13 +577,20 @@ export default function DebugCameraPage() {
           const score = computeNcc(gray, pw, tpl.gray, tpl.width, tpl.height, x, y);
           if (score < highThreshold) continue;
 
+          const rawWNorm = tpl.rawWidth / pw;
+          const rawHNorm = tpl.rawHeight / ph;
+          const matchWNorm = tpl.width / pw;
+          const matchHNorm = tpl.height / ph;
+          const offsetXNorm = Math.max(0, (rawWNorm - matchWNorm) / 2);
+          const offsetYNorm = Math.max(0, (rawHNorm - matchHNorm) / 2);
+
           const box: LiveBox = {
-            x: x / pw,
-            y: y / ph,
-            w: tpl.rawWidth / pw,
-            h: tpl.rawHeight / ph,
-            matchW: tpl.width / pw,
-            matchH: tpl.height / ph,
+            x: Math.max(0, x / pw - offsetXNorm),
+            y: Math.max(0, y / ph - offsetYNorm),
+            w: rawWNorm,
+            h: rawHNorm,
+            matchW: matchWNorm,
+            matchH: matchHNorm,
             score,
           };
 
@@ -1249,7 +1256,7 @@ export default function DebugCameraPage() {
 
       {isLandscape ? (
         <div className="flex-1 min-h-0 flex bg-black overflow-hidden">
-          <div className="w-80 shrink-0 p-3 flex flex-col gap-3 bg-black">
+          <div className="w-72 shrink-0 p-3 flex flex-col gap-3 bg-black">
             <div className="flex items-start justify-between">
               {BackButton}
               {SettingsButton}
@@ -1269,11 +1276,11 @@ export default function DebugCameraPage() {
         </div>
       ) : (
         <>
-          <div className="flex-1 min-h-0 relative bg-black overflow-hidden">
+          <div className="flex-1 min-h-0 relative bg-black overflow-hidden" style={{ minHeight: "44vh" }}>
             {PreviewArea}
           </div>
 
-          <div className="shrink-0 bg-black px-4 pt-3 pb-3">
+          <div className="shrink-0 bg-black px-4 pt-2 pb-3 max-h-[46vh] overflow-auto">
             {DebugGuideControls}
           </div>
 
