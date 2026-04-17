@@ -14,6 +14,8 @@ type InspectionProfile = {
   shearRange: number;
   compareResolution: number;
   hitLimit: number;
+  liveGuideThresholdOffset: number;
+  liveGuideIntervalMs: number;
 };
 
 const BLOB_PATHNAME = "config/inspection-profile.json";
@@ -28,6 +30,8 @@ const DEFAULT_PROFILE: InspectionProfile = {
   shearRange: 0,
   compareResolution: 1600,
   hitLimit: 100,
+  liveGuideThresholdOffset: 0.12,
+  liveGuideIntervalMs: 1500,
 };
 
 function isFiniteNumber(value: unknown): value is number {
@@ -77,6 +81,14 @@ function validateProfile(input: unknown): InspectionProfile {
     throw new Error("hitLimit は数値にしてください。");
   }
 
+  const liveGuideThresholdOffset = isFiniteNumber(data.liveGuideThresholdOffset)
+    ? data.liveGuideThresholdOffset
+    : DEFAULT_PROFILE.liveGuideThresholdOffset;
+
+  const liveGuideIntervalMs = isFiniteNumber(data.liveGuideIntervalMs)
+    ? data.liveGuideIntervalMs
+    : DEFAULT_PROFILE.liveGuideIntervalMs;
+
   return {
     profileName: data.profileName.trim(),
     version: data.version.trim(),
@@ -87,6 +99,8 @@ function validateProfile(input: unknown): InspectionProfile {
     shearRange: data.shearRange,
     compareResolution: data.compareResolution,
     hitLimit: data.hitLimit,
+    liveGuideThresholdOffset,
+    liveGuideIntervalMs,
   };
 }
 
