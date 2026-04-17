@@ -351,6 +351,67 @@ export default function DebugCameraPage() {
   useEffect(() => {
     let cancelled = false;
 
+    const loadCameraTemplatePreview = async () => {
+      try {
+        const raw = localStorage.getItem(SAMPLES_KEY);
+        if (!raw) {
+          setFirstSamplePreviewUrl("");
+          setCameraTemplateInfo(null);
+          return;
+        }
+
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed) || parsed.length === 0) {
+          setFirstSamplePreviewUrl("");
+          setCameraTemplateInfo(null);
+          return;
+        }
+
+        const sample = parsed[0] as SampleItem & {
+          cameraCompareUrl?: string;
+          compareUrl?: string;
+          thumbUrl?: string;
+        };
+        const src = sample.cameraCompareUrl || sample.compareUrl || sample.thumbUrl || "";
+        if (!src) {
+          setFirstSamplePreviewUrl("");
+          setCameraTemplateInfo(null);
+          return;
+        }
+
+        setFirstSamplePreviewUrl(src);
+
+        const img = await dataUrlToImage(src);
+        if (cancelled) return;
+
+        setCameraTemplateInfo({
+          width: img.naturalWidth,
+          height: img.naturalHeight,
+        });
+      } catch {
+        if (!cancelled) {
+          setFirstSamplePreviewUrl("");
+          setCameraTemplateInfo(null);
+        }
+      }
+    };
+
+    void loadCameraTemplatePreview();
+
+    const handleFocus = () => {
+      void loadCameraTemplatePreview();
+    };
+    window.addEventListener("focus", handleFocus);
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", handleFocus);
+    };
+  }, [configVersion]);
+
+  useEffect(() => {
+    let cancelled = false;
+
     const loadLiveTemplate = async () => {
       try {
         const raw = localStorage.getItem(SAMPLES_KEY);
