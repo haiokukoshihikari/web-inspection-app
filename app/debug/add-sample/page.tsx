@@ -7,6 +7,8 @@ const SAMPLES_KEY = "inspection:samples";
 const RESOLUTION_KEY = "inspection:compareResolution";
 const PENDING_SELECTED_SAMPLE_ID_KEY = "inspection:pendingSelectedSampleId";
 
+const CAMERA_BASE_LONG_SIDE = 640;
+
 const MAX_SAMPLES = 6;
 const PAGE_VERSION = "add-sample-stable-05";
 
@@ -24,8 +26,10 @@ type SampleItem = {
   color: string;
   thumbUrl?: string;
   compareUrl?: string;
+  cameraCompareUrl?: string;
   aspectRatio?: number;
   savedResolution?: CompareResolutionMode;
+  cameraBaseLongSide?: number;
 };
 
 const SAMPLE_COLORS = [
@@ -364,6 +368,10 @@ export default function AddSamplePage() {
     const compareWidth = Math.max(1, Math.round(naturalWidth * compareScale));
     const compareHeight = Math.max(1, Math.round(naturalHeight * compareScale));
 
+    const cameraBaseScale = Math.min(1, CAMERA_BASE_LONG_SIDE / Math.max(naturalWidth, naturalHeight));
+    const cameraBaseWidth = Math.max(1, Math.round(naturalWidth * cameraBaseScale));
+    const cameraBaseHeight = Math.max(1, Math.round(naturalHeight * cameraBaseScale));
+
     const compareCanvas = document.createElement("canvas");
     compareCanvas.width = compareWidth;
     compareCanvas.height = compareHeight;
@@ -372,10 +380,22 @@ export default function AddSamplePage() {
 
     compareCtx.drawImage(sourceImg, 0, 0, compareWidth, compareHeight);
 
+    const cameraBaseCanvas = document.createElement("canvas");
+    cameraBaseCanvas.width = cameraBaseWidth;
+    cameraBaseCanvas.height = cameraBaseHeight;
+    const cameraBaseCtx = cameraBaseCanvas.getContext("2d");
+    if (!cameraBaseCtx) return;
+    cameraBaseCtx.drawImage(sourceImg, 0, 0, cameraBaseWidth, cameraBaseHeight);
+
     const srcX = clamp(cropRectImage.x, 0, compareWidth - 1);
     const srcY = clamp(cropRectImage.y, 0, compareHeight - 1);
     const srcW = clamp(cropRectImage.width, 1, compareWidth - srcX);
     const srcH = clamp(cropRectImage.height, 1, compareHeight - srcY);
+
+    const cameraSrcX = clamp(Math.round((srcX / compareWidth) * cameraBaseWidth), 0, cameraBaseWidth - 1);
+    const cameraSrcY = clamp(Math.round((srcY / compareHeight) * cameraBaseHeight), 0, cameraBaseHeight - 1);
+    const cameraSrcW = clamp(Math.round((srcW / compareWidth) * cameraBaseWidth), 1, cameraBaseWidth - cameraSrcX);
+    const cameraSrcH = clamp(Math.round((srcH / compareHeight) * cameraBaseHeight), 1, cameraBaseHeight - cameraSrcY);
 
     const cropCanvas = document.createElement("canvas");
     cropCanvas.width = srcW;
@@ -396,6 +416,26 @@ export default function AddSamplePage() {
     );
 
     const compareUrl = cropCanvas.toDataURL("image/png");
+
+    const cameraCropCanvas = document.createElement("canvas");
+    cameraCropCanvas.width = cameraSrcW;
+    cameraCropCanvas.height = cameraSrcH;
+    const cameraCropCtx = cameraCropCanvas.getContext("2d");
+    if (!cameraCropCtx) return;
+
+    cameraCropCtx.drawImage(
+      cameraBaseCanvas,
+      cameraSrcX,
+      cameraSrcY,
+      cameraSrcW,
+      cameraSrcH,
+      0,
+      0,
+      cameraSrcW,
+      cameraSrcH
+    );
+
+    const cameraCompareUrl = cameraCropCanvas.toDataURL("image/png");
 
     const thumbCanvas = document.createElement("canvas");
     const thumbBase = 140;
@@ -434,8 +474,10 @@ export default function AddSamplePage() {
       color: nextColor,
       thumbUrl,
       compareUrl,
+      cameraCompareUrl,
       aspectRatio: srcW / srcH,
       savedResolution: compareResolution,
+      cameraBaseLongSide: CAMERA_BASE_LONG_SIDE,
     };
 
     localStorage.setItem(SAMPLES_KEY, JSON.stringify([...existing, nextItem]));
