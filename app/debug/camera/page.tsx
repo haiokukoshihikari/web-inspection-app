@@ -348,6 +348,26 @@ export default function DebugCameraPage() {
   }, [startCamera, stopCamera]);
 
   useEffect(() => {
+    try {
+      if (typeof sharedProfile?.liveGuideThresholdOffset === "number") {
+        setLiveGuideThresholdOffset(
+          clamp(Number(sharedProfile.liveGuideThresholdOffset.toFixed(2)), -0.25, 0.25)
+        );
+      } else {
+        setLiveGuideThresholdOffset(DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET);
+      }
+
+      if (typeof sharedProfile?.liveGuideIntervalMs === "number") {
+        setLiveGuideIntervalMs(clamp(Math.round(sharedProfile.liveGuideIntervalMs), 500, 5000));
+      } else {
+        setLiveGuideIntervalMs(DEFAULT_LIVE_GUIDE_INTERVAL_MS);
+      }
+    } catch (error) {
+      console.error("ライブ簡易検査設定の読み込みに失敗しました", error);
+    }
+  }, [sharedProfile]);
+
+  useEffect(() => {
     let cancelled = false;
 
     const loadSharedProfile = async () => {
@@ -376,32 +396,6 @@ export default function DebugCameraPage() {
     };
   }, []);
 
-  useEffect(() => {
-    try {
-      const savedOffset = localStorage.getItem(LIVE_GUIDE_THRESHOLD_OFFSET_KEY);
-      const savedInterval = localStorage.getItem(LIVE_GUIDE_INTERVAL_KEY);
-
-      if (savedOffset !== null) {
-        const n = Number(savedOffset);
-        if (Number.isFinite(n)) {
-          setLiveGuideThresholdOffset(clamp(Number(n.toFixed(2)), -0.25, 0.25));
-        }
-      } else if (typeof sharedProfile?.liveGuideThresholdOffset === "number") {
-        setLiveGuideThresholdOffset(clamp(Number(sharedProfile.liveGuideThresholdOffset.toFixed(2)), -0.25, 0.25));
-      }
-
-      if (savedInterval !== null) {
-        const n = Number(savedInterval);
-        if (Number.isFinite(n)) {
-          setLiveGuideIntervalMs(clamp(Math.round(n), 500, 5000));
-        }
-      } else if (typeof sharedProfile?.liveGuideIntervalMs === "number") {
-        setLiveGuideIntervalMs(clamp(Math.round(sharedProfile.liveGuideIntervalMs), 500, 5000));
-      }
-    } catch (error) {
-      console.error("ライブ簡易検査設定の読み込みに失敗しました", error);
-    }
-  }, [sharedProfile]);
 
 
 
