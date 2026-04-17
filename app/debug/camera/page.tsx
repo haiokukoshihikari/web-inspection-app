@@ -188,6 +188,8 @@ export default function DebugCameraPage() {
   const [liveGuideIntervalMs, setLiveGuideIntervalMs] = useState(DEFAULT_LIVE_GUIDE_INTERVAL_MS);
   const [liveProcessInfo, setLiveProcessInfo] = useState("");
   const [liveGuideSavedMsg, setLiveGuideSavedMsg] = useState("");
+  const firstSample = samples[0] ?? null;
+  const [cameraTemplateInfo, setCameraTemplateInfo] = useState<{ width: number; height: number } | null>(null);
   const liveTemplateRef = useRef<{ sample: SampleItem; gray: Float32Array; width: number; height: number; rawWidth: number; rawHeight: number } | null>(null);
   const liveRunningRef = useRef(false);
   const liveTimerRef = useRef<number | null>(null);
@@ -287,6 +289,41 @@ export default function DebugCameraPage() {
       stopCamera();
     };
   }, [startCamera, stopCamera]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadCameraTemplateInfo() {
+      if (!firstSample?.cameraCompareUrl) {
+        setCameraTemplateInfo(null);
+        return;
+      }
+
+      try {
+        const img = new Image();
+        img.onload = () => {
+          if (!cancelled) {
+            setCameraTemplateInfo({
+              width: img.naturalWidth,
+              height: img.naturalHeight,
+            });
+          }
+        };
+        img.onerror = () => {
+          if (!cancelled) setCameraTemplateInfo(null);
+        };
+        img.src = firstSample.cameraCompareUrl;
+      } catch {
+        if (!cancelled) setCameraTemplateInfo(null);
+      }
+    }
+
+    void loadCameraTemplateInfo();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [firstSample?.cameraCompareUrl]);
 
   useEffect(() => {
     let cancelled = false;
