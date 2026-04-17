@@ -62,6 +62,8 @@ type LiveBox = {
   y: number;
   w: number;
   h: number;
+  matchW: number;
+  matchH: number;
   score: number;
 };
 
@@ -578,18 +580,20 @@ export default function DebugCameraPage() {
           const box: LiveBox = {
             x: x / pw,
             y: y / ph,
-            w: tpl.width / pw,
-            h: tpl.height / ph,
+            w: tpl.rawWidth / pw,
+            h: tpl.rawHeight / ph,
+            matchW: tpl.width / pw,
+            matchH: tpl.height / ph,
             score,
           };
 
           const overlaps = results.some((r) => {
             const x1 = Math.max(r.x, box.x);
             const y1 = Math.max(r.y, box.y);
-            const x2 = Math.min(r.x + r.w, box.x + box.w);
-            const y2 = Math.min(r.y + r.h, box.y + box.h);
+            const x2 = Math.min(r.x + r.matchW, box.x + box.matchW);
+            const y2 = Math.min(r.y + r.matchH, box.y + box.matchH);
             const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
-            const union = r.w * r.h + box.w * box.h - inter;
+            const union = r.matchW * r.matchH + box.matchW * box.matchH - inter;
             return union > 0 && inter / union > 0.35;
           });
           if (!overlaps) results.push(box);
