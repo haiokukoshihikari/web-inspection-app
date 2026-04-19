@@ -41,6 +41,10 @@ const LIVE_ROI_HEIGHT_RATIO = 0.4;
 const LIVE_PROCESS_LONG_SIDE = 640;
 const LIVE_TEMPLATE_LONG_SIDE = 64;
 const LIVE_SEARCH_STEP = 4;
+const DISTANCE_GUIDE_NEAR_RATIO = 0.62;
+const DISTANCE_GUIDE_FAR_RATIO = 0.22;
+const DISTANCE_GUIDE_STREAK_REQUIRED = 2;
+const DISTANCE_GUIDE_MIN_SCORE_MARGIN = 0.03;
 
 type SampleItem = {
   id: string;
@@ -200,6 +204,18 @@ function computeNcc(
 function sampleSensitivityThreshold(sample: SampleItem | null | undefined) {
   const sens = clamp(Math.round(sample?.detectionSensitivity ?? 50), 0, 100);
   return clamp(Number((0.5 - (sens - 50) * 0.005).toFixed(3)), 0, 0.99);
+
+
+function nextDistanceGuideState(
+  current: { hint: string; count: number },
+  nextHint: string
+) {
+  if (!nextHint) return { hint: "", count: 0 };
+  if (current.hint === nextHint) {
+    return { hint: nextHint, count: current.count + 1 };
+  }
+  return { hint: nextHint, count: 1 };
+}
 }
 
 export default function DebugCameraPage() {
@@ -227,8 +243,10 @@ export default function DebugCameraPage() {
   const [liveGuideIntervalMs, setLiveGuideIntervalMs] = useState(DEFAULT_LIVE_GUIDE_INTERVAL_MS);
   const [liveProcessInfo, setLiveProcessInfo] = useState("");
   const [liveGuideSavedMsg, setLiveGuideSavedMsg] = useState("");
+  const [liveDistanceGuide, setLiveDistanceGuide] = useState("");
   const [firstSamplePreviewUrl, setFirstSamplePreviewUrl] = useState("");
   const [cameraTemplateInfo, setCameraTemplateInfo] = useState<{ width: number; height: number } | null>(null);
+  const distanceGuideStreakRef = useRef<{ hint: string; count: number }>({ hint: "", count: 0 });
   const [videoDisplayRect, setVideoDisplayRect] = useState<Rect>({ left: 0, top: 0, width: 0, height: 0 });
   const liveTemplateRef = useRef<{ sample: SampleItem; gray: Float32Array; width: number; height: number; rawWidth: number; rawHeight: number } | null>(null);
   const liveRunningRef = useRef(false);
@@ -531,6 +549,8 @@ export default function DebugCameraPage() {
     const tpl = liveTemplateRef.current;
     if (!video || !tpl) {
       setLiveBoxes([]);
+      distanceGuideStreakRef.current = { hint: "", count: 0 };
+      setLiveDistanceGuide("");
       return;
     }
 
@@ -601,7 +621,29 @@ export default function DebugCameraPage() {
         if (results.length >= LIVE_MAX_BOXES) break;
       }
 
-      setLiveBoxes(results.slice(0, LIVE_MAX_BOXES));
+      const nextResults = results.slice(0, LIVE_MAX_BOXES);
+      setLiveBoxes(nextResults);
+
+      const best = nextResults.length > 0
+        ? nextResults.reduce((prev, cur) => (cur.score > prev.score ? cur : prev))
+        : null;
+
+      let nextHint = "";
+      if (best && best.score >= highThreshold + DISTANCE_GUIDE_MIN_SCORE_MARGIN) {
+        const roiWidthNorm = LIVE_ROI_WIDTH_RATIO;
+        const widthRatioInRoi = roiWidthNorm > 0 ? best.w / roiWidthNorm : 0;
+        if (widthRatioInRoi >= DISTANCE_GUIDE_NEAR_RATIO) {
+          nextHint = "もっと離れて下さい";
+        } else if (widthRatioInRoi <= DISTANCE_GUIDE_FAR_RATIO) {
+          nextHint = "もっと近づいて下さい";
+        }
+      }
+
+      const streak = nextDistanceGuideState(distanceGuideStreakRef.current, nextHint);
+      distanceGuideStreakRef.current = streak;
+      setLiveDistanceGuide(
+        streak.count >= DISTANCE_GUIDE_STREAK_REQUIRED ? streak.hint : ""
+      );
     } catch (error) {
       console.error('ライブ簡易検査エラー', error);
     } finally {
@@ -973,12 +1015,17 @@ export default function DebugCameraPage() {
     <div className="rounded-2xl border border-white/10 bg-zinc-950/95 px-4 py-3 space-y-3">
       <div className="flex items-center justify-between">
         <div className="text-sm font-medium">簡易検査調整</div>
-        <button
-          onClick={saveLiveGuideSettings}
-          className="rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-3 py-1.5 text-sm text-cyan-200"
-        >
-          出力
-        </button>
+        <div className="flex items-center gap-2">
+          {liveGuideSavedMsg ? (
+            <div className="text-xs text-cyan-300">{liveGuideSavedMsg}</div>
+          ) : null}
+          <button
+            onClick={saveLiveGuideSettings}
+            className="rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-3 py-1.5 text-sm text-cyan-200"
+          >
+            出力
+          </button>
+        </div>
       </div>
 
       <div className="space-y-2">
@@ -1075,9 +1122,9 @@ export default function DebugCameraPage() {
         )}
       </div>
 
-      {liveGuideSavedMsg ? (
-        <div className="text-xs text-cyan-300">{liveGuideSavedMsg}</div>
-      ) : null}
+      <div className="text-xs text-zinc-400">
+        出力結果は画面上にオーバーレイ表示します。
+      </div>
     </div>
   );
 
@@ -1257,6 +1304,19 @@ export default function DebugCameraPage() {
               {saveStep === "idle" && "待機中"}
             </div>
           </div>
+        </div>
+      ) : null}
+
+
+      {liveDistanceGuide ? (
+        <div className="absolute left-1/2 top-6 -translate-x-1/2 px-4 py-2 rounded-xl border border-amber-300/30 bg-black/70 text-amber-200 text-sm">
+          {liveDistanceGuide}
+        </div>
+      ) : null}
+
+      {liveGuideSavedMsg ? (
+        <div className="absolute right-4 top-6 px-4 py-2 rounded-xl border border-cyan-400/30 bg-black/75 text-cyan-200 text-sm">
+          {liveGuideSavedMsg}
         </div>
       ) : null}
 
