@@ -204,7 +204,7 @@ function computeNcc(
 function sampleSensitivityThreshold(sample: SampleItem | null | undefined) {
   const sens = clamp(Math.round(sample?.detectionSensitivity ?? 50), 0, 100);
   return clamp(Number((0.5 - (sens - 50) * 0.005).toFixed(3)), 0, 0.99);
-
+}
 
 function nextDistanceGuideState(
   current: { hint: string; count: number },
@@ -215,7 +215,6 @@ function nextDistanceGuideState(
     return { hint: nextHint, count: current.count + 1 };
   }
   return { hint: nextHint, count: 1 };
-}
 }
 
 export default function DebugCameraPage() {
