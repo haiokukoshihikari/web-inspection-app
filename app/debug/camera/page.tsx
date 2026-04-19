@@ -1302,11 +1302,11 @@ export default function DebugCameraPage() {
         </div>
       ) : (
         <>
-          <div className="flex-1 min-h-0 relative bg-black overflow-hidden" style={{ minHeight: "44vh" }}>
+          <div className="flex-1 min-h-0 relative bg-black overflow-hidden" style={{ minHeight: "36vh" }}>
             {PreviewArea}
           </div>
 
-          <div className="shrink-0 bg-black px-4 pt-2 pb-3 max-h-[46vh] overflow-auto">
+          <div className="shrink-0 bg-black px-4 pt-2 pb-3 max-h-[34vh] overflow-auto">
             {DebugGuideControls}
           </div>
 
