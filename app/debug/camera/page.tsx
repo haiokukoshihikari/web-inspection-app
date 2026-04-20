@@ -353,14 +353,14 @@ export default function DebugCameraPage() {
     try {
       if (typeof sharedProfile?.liveGuideThresholdOffset === "number") {
         setLiveGuideThresholdOffset(
-          clamp(Number(sharedProfile.liveGuideThresholdOffset.toFixed(2)), -0.25, 0.25)
+          clamp(Number(sharedProfile.liveGuideThresholdOffset.toFixed(2)), -0.40, 0.40)
         );
       } else {
         setLiveGuideThresholdOffset(DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET);
       }
 
       if (typeof sharedProfile?.liveGuideIntervalMs === "number") {
-        setLiveGuideIntervalMs(clamp(Math.round(sharedProfile.liveGuideIntervalMs), 500, 5000));
+        setLiveGuideIntervalMs(clamp(Math.round(sharedProfile.liveGuideIntervalMs), 100, 1000));
       } else {
         setLiveGuideIntervalMs(DEFAULT_LIVE_GUIDE_INTERVAL_MS);
       }
@@ -911,11 +911,11 @@ export default function DebugCameraPage() {
 
 
   const adjustLiveGuideThresholdOffset = (delta: number) => {
-    setLiveGuideThresholdOffset((prev) => clamp(Number((prev + delta).toFixed(2)), -0.25, 0.25));
+    setLiveGuideThresholdOffset((prev) => clamp(Number((prev + delta).toFixed(2)), -0.40, 0.40));
   };
 
   const adjustLiveGuideInterval = (deltaMs: number) => {
-    setLiveGuideIntervalMs((prev) => clamp(prev + deltaMs, 500, 5000));
+    setLiveGuideIntervalMs((prev) => clamp(prev + deltaMs, 100, 1000));
   };
 
   const saveLiveGuideSettings = async () => {
@@ -946,8 +946,8 @@ export default function DebugCameraPage() {
 
       const nextProfile = {
         ...baseProfile,
-        liveGuideThresholdOffset: clamp(Number(liveGuideThresholdOffset.toFixed(2)), -0.25, 0.25),
-        liveGuideIntervalMs: clamp(Math.round(liveGuideIntervalMs), 500, 5000),
+        liveGuideThresholdOffset: clamp(Number(liveGuideThresholdOffset.toFixed(2)), -0.40, 0.40),
+        liveGuideIntervalMs: clamp(Math.round(liveGuideIntervalMs), 100, 1000),
       };
 
       const controller = new AbortController();
@@ -1028,11 +1028,11 @@ export default function DebugCameraPage() {
           </button>
           <input
             type="range"
-            min={-0.25}
-            max={0.25}
+            min={-0.40}
+            max={0.40}
             step={0.01}
             value={liveGuideThresholdOffset}
-            onChange={(e) => setLiveGuideThresholdOffset(clamp(Number(e.target.value), -0.25, 0.25))}
+            onChange={(e) => setLiveGuideThresholdOffset(clamp(Number(e.target.value), -0.40, 0.40))}
             className="flex-1"
           />
           <button
@@ -1060,11 +1060,11 @@ export default function DebugCameraPage() {
           </button>
           <input
             type="range"
-            min={500}
-            max={5000}
+            min={100}
+            max={1000}
             step={100}
             value={liveGuideIntervalMs}
-            onChange={(e) => setLiveGuideIntervalMs(clamp(Number(e.target.value), 500, 5000))}
+            onChange={(e) => setLiveGuideIntervalMs(clamp(Number(e.target.value), 100, 1000))}
             className="flex-1"
           />
           <button
