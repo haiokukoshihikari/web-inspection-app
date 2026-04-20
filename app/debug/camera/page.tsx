@@ -564,6 +564,7 @@ export default function DebugCameraPage() {
     if (!video || !tpl) {
       setLiveBoxes([]);
       liveBoxesHoldUntilRef.current = 0;
+      setLiveDistanceDebug("");
       return;
     }
 
