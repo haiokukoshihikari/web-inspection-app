@@ -227,6 +227,8 @@ export default function DebugCameraPage() {
   const [liveGuideIntervalMs, setLiveGuideIntervalMs] = useState(DEFAULT_LIVE_GUIDE_INTERVAL_MS);
   const [liveProcessInfo, setLiveProcessInfo] = useState("");
   const [liveGuideSavedMsg, setLiveGuideSavedMsg] = useState("");
+  const [liveGuideSaving, setLiveGuideSaving] = useState(false);
+  const [liveGuideOverlayMsg, setLiveGuideOverlayMsg] = useState("");
   const [firstSamplePreviewUrl, setFirstSamplePreviewUrl] = useState("");
   const [cameraTemplateInfo, setCameraTemplateInfo] = useState<{ width: number; height: number } | null>(null);
   const [videoDisplayRect, setVideoDisplayRect] = useState<Rect>({ left: 0, top: 0, width: 0, height: 0 });
@@ -917,7 +919,17 @@ export default function DebugCameraPage() {
   };
 
   const saveLiveGuideSettings = async () => {
+    if (liveGuideSaving) return;
+
+    const clearOverlayLater = (ms = 1800) => {
+      window.setTimeout(() => setLiveGuideOverlayMsg(""), ms);
+    };
+
     try {
+      setLiveGuideSaving(true);
+      setLiveGuideSavedMsg("保存中…");
+      setLiveGuideOverlayMsg("保存中…");
+
       const baseProfile = sharedProfile ?? {
         profileName: "default",
         version: configVersion !== "--" ? configVersion : "live-guide-update",
@@ -938,12 +950,18 @@ export default function DebugCameraPage() {
         liveGuideIntervalMs: clamp(Math.round(liveGuideIntervalMs), 500, 5000),
       };
 
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 12000);
+
       const response = await fetch("/api/config", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(nextProfile),
+        signal: controller.signal,
+      }).finally(() => {
+        window.clearTimeout(timer);
       });
 
       const data = await response.json().catch(() => null);
@@ -961,11 +979,21 @@ export default function DebugCameraPage() {
       }
 
       setLiveGuideSavedMsg("出力しました");
+      setLiveGuideOverlayMsg("出力しました");
       window.setTimeout(() => setLiveGuideSavedMsg(""), 1600);
+      clearOverlayLater(1600);
     } catch (error) {
       console.error("ライブ簡易検査設定の保存に失敗しました", error);
-      setLiveGuideSavedMsg("保存失敗");
-      window.setTimeout(() => setLiveGuideSavedMsg(""), 1600);
+      const msg =
+        error instanceof Error && error.name === "AbortError"
+          ? "保存タイムアウト"
+          : "保存失敗";
+      setLiveGuideSavedMsg(msg);
+      setLiveGuideOverlayMsg(msg);
+      window.setTimeout(() => setLiveGuideSavedMsg(""), 2200);
+      clearOverlayLater(2200);
+    } finally {
+      setLiveGuideSaving(false);
     }
   };
 
@@ -975,9 +1003,10 @@ export default function DebugCameraPage() {
         <div className="text-sm font-medium">簡易検査調整</div>
         <button
           onClick={saveLiveGuideSettings}
-          className="rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-3 py-1.5 text-sm text-cyan-200"
+          disabled={liveGuideSaving}
+          className="rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-3 py-1.5 text-sm text-cyan-200 disabled:opacity-50"
         >
-          出力
+          {liveGuideSaving ? "保存中…" : "出力"}
         </button>
       </div>
 
@@ -1257,6 +1286,16 @@ export default function DebugCameraPage() {
               {saveStep === "idle" && "待機中"}
             </div>
           </div>
+        </div>
+      ) : null}
+
+      {liveGuideOverlayMsg ? (
+        <div className={`absolute right-4 top-6 px-4 py-2 rounded-xl border text-sm ${
+          liveGuideOverlayMsg.includes("失敗") || liveGuideOverlayMsg.includes("タイムアウト")
+            ? "border-rose-400/30 bg-black/75 text-rose-200"
+            : "border-cyan-400/30 bg-black/75 text-cyan-200"
+        }`}>
+          {liveGuideOverlayMsg}
         </div>
       ) : null}
 
