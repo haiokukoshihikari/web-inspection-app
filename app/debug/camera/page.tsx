@@ -230,6 +230,7 @@ export default function DebugCameraPage() {
   const [liveGuideSavedMsg, setLiveGuideSavedMsg] = useState("");
   const [liveGuideSaving, setLiveGuideSaving] = useState(false);
   const [liveGuideOverlayMsg, setLiveGuideOverlayMsg] = useState("");
+  const [liveDistanceDebug, setLiveDistanceDebug] = useState("");
   const [firstSamplePreviewUrl, setFirstSamplePreviewUrl] = useState("");
   const [cameraTemplateInfo, setCameraTemplateInfo] = useState<{ width: number; height: number } | null>(null);
   const [videoDisplayRect, setVideoDisplayRect] = useState<Rect>({ left: 0, top: 0, width: 0, height: 0 });
