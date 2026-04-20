@@ -358,6 +358,7 @@ export default function AddSamplePage() {
 
   const handleSave = async () => {
     if (!capturedImage || !compareBasis.width || !compareBasis.height) return;
+    if (!frameRef.current || !imgRef.current) return;
 
     const sourceImg = await loadImage(capturedImage);
     const naturalWidth = sourceImg.naturalWidth;
@@ -368,10 +369,6 @@ export default function AddSamplePage() {
     const compareWidth = Math.max(1, Math.round(naturalWidth * compareScale));
     const compareHeight = Math.max(1, Math.round(naturalHeight * compareScale));
 
-    const cameraBaseScale = Math.min(1, CAMERA_BASE_LONG_SIDE / Math.max(naturalWidth, naturalHeight));
-    const cameraBaseWidth = Math.max(1, Math.round(naturalWidth * cameraBaseScale));
-    const cameraBaseHeight = Math.max(1, Math.round(naturalHeight * cameraBaseScale));
-
     const compareCanvas = document.createElement("canvas");
     compareCanvas.width = compareWidth;
     compareCanvas.height = compareHeight;
@@ -380,6 +377,10 @@ export default function AddSamplePage() {
 
     compareCtx.drawImage(sourceImg, 0, 0, compareWidth, compareHeight);
 
+    const cameraBaseScale = Math.min(1, CAMERA_BASE_LONG_SIDE / Math.max(naturalWidth, naturalHeight));
+    const cameraBaseWidth = Math.max(1, Math.round(naturalWidth * cameraBaseScale));
+    const cameraBaseHeight = Math.max(1, Math.round(naturalHeight * cameraBaseScale));
+
     const cameraBaseCanvas = document.createElement("canvas");
     cameraBaseCanvas.width = cameraBaseWidth;
     cameraBaseCanvas.height = cameraBaseHeight;
@@ -387,10 +388,25 @@ export default function AddSamplePage() {
     if (!cameraBaseCtx) return;
     cameraBaseCtx.drawImage(sourceImg, 0, 0, cameraBaseWidth, cameraBaseHeight);
 
-    const srcX = clamp(cropRectImage.x, 0, compareWidth - 1);
-    const srcY = clamp(cropRectImage.y, 0, compareHeight - 1);
-    const srcW = clamp(cropRectImage.width, 1, compareWidth - srcX);
-    const srcH = clamp(cropRectImage.height, 1, compareHeight - srcY);
+    // 実際に表示されている画像位置から逆算する（app/add-sample と同方式）
+    const frameRect = frameRef.current.getBoundingClientRect();
+    const imgRect = imgRef.current.getBoundingClientRect();
+
+    const boxLeftViewport = frameRect.left + displayBox.left;
+    const boxTopViewport = frameRect.top + displayBox.top;
+
+    const cropLeftOnImage = boxLeftViewport - imgRect.left;
+    const cropTopOnImage = boxTopViewport - imgRect.top;
+
+    let srcX = Math.round((cropLeftOnImage / imgRect.width) * compareWidth);
+    let srcY = Math.round((cropTopOnImage / imgRect.height) * compareHeight);
+    let srcW = Math.round((displayBox.width / imgRect.width) * compareWidth);
+    let srcH = Math.round((displayBox.height / imgRect.height) * compareHeight);
+
+    srcX = clamp(srcX, 0, compareWidth - 1);
+    srcY = clamp(srcY, 0, compareHeight - 1);
+    srcW = clamp(srcW, 1, compareWidth - srcX);
+    srcH = clamp(srcH, 1, compareHeight - srcY);
 
     const cameraSrcX = clamp(Math.round((srcX / compareWidth) * cameraBaseWidth), 0, cameraBaseWidth - 1);
     const cameraSrcY = clamp(Math.round((srcY / compareHeight) * cameraBaseHeight), 0, cameraBaseHeight - 1);
