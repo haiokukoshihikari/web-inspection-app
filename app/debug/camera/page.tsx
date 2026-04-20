@@ -36,8 +36,8 @@ const SAMPLES_KEY = "inspection:samples";
 const DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET = 0.12;
 const DEFAULT_LIVE_GUIDE_INTERVAL_MS = 1500;
 const LIVE_MAX_BOXES = 2;
-const LIVE_ROI_WIDTH_RATIO = 0.7;
-const LIVE_ROI_HEIGHT_RATIO = 0.4;
+const LIVE_ROI_WIDTH_RATIO = 0.5;
+const LIVE_ROI_HEIGHT_RATIO = 0.3;
 const LIVE_PROCESS_LONG_SIDE = 640;
 const LIVE_TEMPLATE_LONG_SIDE = 64;
 const LIVE_SEARCH_STEP = 4;
@@ -235,6 +235,7 @@ export default function DebugCameraPage() {
   const liveTemplateRef = useRef<{ sample: SampleItem; gray: Float32Array; width: number; height: number; rawWidth: number; rawHeight: number } | null>(null);
   const liveRunningRef = useRef(false);
   const liveTimerRef = useRef<number | null>(null);
+  const liveBoxesHoldUntilRef = useRef(0);
 
 
   const updateVideoDisplayRect = useCallback(() => {
@@ -533,6 +534,7 @@ export default function DebugCameraPage() {
     const tpl = liveTemplateRef.current;
     if (!video || !tpl) {
       setLiveBoxes([]);
+      liveBoxesHoldUntilRef.current = 0;
       return;
     }
 
