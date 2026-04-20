@@ -271,6 +271,8 @@ export default function DebugCameraPage() {
   const liveTimerRef = useRef<number | null>(null);
   const liveBoxesHoldUntilRef = useRef(0);
   const distanceGuideStreakRef = useRef<{ hint: string; count: number }>({ hint: "", count: 0 });
+  const distanceGuideShownAtRef = useRef(0);
+  const distanceGuideCurrentHintRef = useRef("");
 
 
   const updateVideoDisplayRect = useCallback(() => {
@@ -587,6 +589,8 @@ export default function DebugCameraPage() {
       setLiveBoxes([]);
       liveBoxesHoldUntilRef.current = 0;
       distanceGuideStreakRef.current = { hint: "", count: 0 };
+      distanceGuideShownAtRef.current = 0;
+      distanceGuideCurrentHintRef.current = "";
       setLiveDistanceGuide("");
       setLiveDistanceDebug("");
       return;
@@ -699,12 +703,35 @@ export default function DebugCameraPage() {
 
       const streak = nextDistanceGuideState(distanceGuideStreakRef.current, nextHint);
       distanceGuideStreakRef.current = streak;
-      const confirmedHint =
+      const nextConfirmedHint =
         streak.count >= DISTANCE_GUIDE_STREAK_REQUIRED ? streak.hint : "";
-      setLiveDistanceGuide(confirmedHint);
 
       const now = performance.now();
-      if (confirmedHint) {
+      const prevHint = distanceGuideCurrentHintRef.current;
+      let visibleHint = prevHint;
+
+      if (nextConfirmedHint) {
+        if (prevHint !== nextConfirmedHint) {
+          distanceGuideShownAtRef.current = now;
+        }
+        distanceGuideCurrentHintRef.current = nextConfirmedHint;
+        visibleHint = nextConfirmedHint;
+      } else if (prevHint) {
+        const keepVisibleUntil = distanceGuideShownAtRef.current + 2000;
+        if (now >= keepVisibleUntil) {
+          distanceGuideCurrentHintRef.current = "";
+          visibleHint = "";
+        } else {
+          visibleHint = prevHint;
+        }
+      } else {
+        distanceGuideCurrentHintRef.current = "";
+        visibleHint = "";
+      }
+
+      setLiveDistanceGuide(visibleHint);
+
+      if (visibleHint) {
         setLiveBoxes([]);
         liveBoxesHoldUntilRef.current = 0;
       } else if (nextResults.length > 0) {
