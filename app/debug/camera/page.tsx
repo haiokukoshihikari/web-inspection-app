@@ -42,8 +42,8 @@ const LIVE_PROCESS_LONG_SIDE = 640;
 const LIVE_TEMPLATE_LONG_SIDE = 64;
 const LIVE_SEARCH_STEP = 4;
 const LIVE_TEMPLATE_SCALE_FACTORS = [0.95, 1.0, 1.05] as const;
-const DISTANCE_GUIDE_FAR_SCALE_PCT = 98;
-const DISTANCE_GUIDE_NEAR_SCALE_PCT = 102;
+const DISTANCE_GUIDE_FAR_SCALE_PCT = 95;
+const DISTANCE_GUIDE_NEAR_SCALE_PCT = 105;
 const DISTANCE_GUIDE_STREAK_REQUIRED = 2;
 
 type SampleItem = {
@@ -1358,7 +1358,7 @@ export default function DebugCameraPage() {
         {liveBoxes.map((box, index) => (
           <div
             key={`live-box-${index}-${box.x}-${box.y}`}
-            className="absolute rounded-md border-[3px] border-sky-400"
+            className="absolute rounded-md border-[3px] border-sky-400 transition-opacity duration-200"
             style={{
               left: videoDisplayRect.left + videoDisplayRect.width * box.x,
               top: videoDisplayRect.top + videoDisplayRect.height * box.y,
@@ -1398,17 +1398,21 @@ export default function DebugCameraPage() {
         </div>
       ) : null}
 
-      {liveDistanceGuide ? (
-        <div className="absolute left-1/2 top-6 -translate-x-1/2 px-4 py-2 rounded-xl border border-amber-300/30 bg-black/70 text-amber-200 text-sm">
-          {liveDistanceGuide}
-        </div>
-      ) : null}
+      <div
+        className={`absolute left-1/2 top-6 -translate-x-1/2 px-4 py-2 rounded-xl border border-amber-300/30 bg-black/70 text-amber-200 text-sm transition-opacity duration-300 ${
+          liveDistanceGuide ? "opacity-100" : "opacity-0 pointer-events-none"
+        }`}
+      >
+        {liveDistanceGuide || "距離誘導"}
+      </div>
 
-      {liveDistanceDebug ? (
-        <div className="absolute left-1/2 top-16 -translate-x-1/2 px-3 py-1.5 rounded-xl border border-white/10 bg-black/70 text-zinc-200 text-[11px] tabular-nums whitespace-nowrap">
-          {liveDistanceDebug}
-        </div>
-      ) : null}
+      <div
+        className={`absolute left-1/2 top-16 -translate-x-1/2 px-3 py-1.5 rounded-xl border border-white/10 bg-black/70 text-zinc-200 text-[11px] tabular-nums whitespace-nowrap transition-opacity duration-300 ${
+          liveDistanceDebug ? "opacity-100" : "opacity-0 pointer-events-none"
+        }`}
+      >
+        {liveDistanceDebug || "score:-- thr:-- w:-- h:-- raw:none"}
+      </div>
 
       {liveGuideOverlayMsg ? (
         <div className={`absolute right-4 top-6 px-4 py-2 rounded-xl border text-sm ${
