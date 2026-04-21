@@ -1262,6 +1262,70 @@ export default function DebugCameraPage() {
         </div>
       </div>
 
+            <div className="space-y-2">
+        <div className="flex items-center justify-between text-sm">
+          <div>距離検知ROI 横</div>
+          <div className="tabular-nums">{Math.round(liveRoiWidthRatio * 100)}%</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setLiveRoiWidthRatio((prev) => Math.max(0.1, Number((prev - 0.05).toFixed(2))))}
+            className="w-10 h-10 rounded-xl border border-white/15 bg-white/5 text-lg"
+            aria-label="距離検知ROI横幅を狭くする"
+          >
+            −
+          </button>
+          <input
+            type="range"
+            min={0.1}
+            max={0.6}
+            step={0.01}
+            value={liveRoiWidthRatio}
+            onChange={(e) => setLiveRoiWidthRatio(Math.min(0.6, Math.max(0.1, Number(e.target.value))))}
+            className="flex-1"
+          />
+          <button
+            onClick={() => setLiveRoiWidthRatio((prev) => Math.min(0.6, Number((prev + 0.05).toFixed(2))))}
+            className="w-10 h-10 rounded-xl border border-white/15 bg-white/5 text-lg"
+            aria-label="距離検知ROI横幅を広くする"
+          >
+            +
+          </button>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex items-center justify-between text-sm">
+          <div>距離検知ROI 縦</div>
+          <div className="tabular-nums">{Math.round(liveRoiHeightRatio * 100)}%</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setLiveRoiHeightRatio((prev) => Math.max(0.1, Number((prev - 0.05).toFixed(2))))}
+            className="w-10 h-10 rounded-xl border border-white/15 bg-white/5 text-lg"
+            aria-label="距離検知ROI縦幅を狭くする"
+          >
+            −
+          </button>
+          <input
+            type="range"
+            min={0.1}
+            max={0.4}
+            step={0.01}
+            value={liveRoiHeightRatio}
+            onChange={(e) => setLiveRoiHeightRatio(Math.min(0.4, Math.max(0.1, Number(e.target.value))))}
+            className="flex-1"
+          />
+          <button
+            onClick={() => setLiveRoiHeightRatio((prev) => Math.min(0.4, Number((prev + 0.05).toFixed(2))))}
+            className="w-10 h-10 rounded-xl border border-white/15 bg-white/5 text-lg"
+            aria-label="距離検知ROI縦幅を広くする"
+          >
+            +
+          </button>
+        </div>
+      </div>
+
       <div className="text-xs text-zinc-400 space-y-1">
         <div>内部処理解像度: 長辺 {LIVE_PROCESS_LONG_SIDE}</div>
         <div>現在: {liveProcessInfo || "待機中"}</div>
