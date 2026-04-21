@@ -1278,6 +1278,33 @@ export default function DebugCameraPage() {
                 className="max-w-full max-h-full object-contain"
               />
             </div>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-sm">
+                      <div>scale許容</div>
+                      <div className="tabular-nums">±{liveScaleOptions.join(" / ")}%</div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {LIVE_SCALE_OPTIONS.map((option) => {
+                        const active = liveScaleOptions.includes(option);
+                        return (
+                          <button
+                            key={option}
+                            type="button"
+                            onClick={() => setLiveScaleOptions((prev) => toggleScaleOption(prev, option))}
+                            className={`px-3 py-2 rounded-xl border text-sm transition-colors ${
+                              active
+                                ? "border-cyan-400/40 bg-cyan-500/15 text-cyan-200"
+                                : "border-white/10 bg-white/5 text-zinc-300"
+                            }`}
+                          >
+                            ±{option}%
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
             <div className="text-xs text-zinc-400">
               {cameraTemplateInfo
                 ? `${cameraTemplateInfo.width} × ${cameraTemplateInfo.height}`
