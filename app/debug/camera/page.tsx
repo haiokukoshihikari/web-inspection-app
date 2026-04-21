@@ -671,7 +671,7 @@ export default function DebugCameraPage() {
       const roiY = Math.round((ph - roiH) / 2);
 
       const gray = edgeNormalize(toGrayArray(ctx, pw, ph), pw, ph);
-      setLiveProcessInfo(`${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} / scale ±${liveScaleOptions.join("/")}%" );
+      setLiveProcessInfo(`${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} / scale ±${liveScaleOptions.join("/")}%`);
       const results: LiveBox[] = [];
       const matchThreshold = sampleSensitivityThreshold(tpl.sample);
       const highThreshold = clamp(Number((matchThreshold + liveGuideThresholdOffset).toFixed(2)), 0.35, 0.95);
