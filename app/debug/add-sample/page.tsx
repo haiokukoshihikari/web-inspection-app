@@ -23,6 +23,7 @@ type CompareResolutionMode = 1200 | 1600 | 2000 | 2400;
 type SampleItem = {
   id: string;
   count: number;
+  order: number;
   color: string;
   thumbUrl?: string;
   compareUrl?: string;
@@ -482,11 +483,22 @@ export default function AddSamplePage() {
       return;
     }
 
+    const nextOrder =
+      existing.reduce((maxOrder, item, index) => {
+        const n =
+          typeof (item as { order?: unknown }).order === "number" &&
+          Number.isFinite((item as { order?: number }).order)
+            ? Math.round((item as { order: number }).order)
+            : index + 1;
+        return Math.max(maxOrder, n);
+      }, 0) + 1;
+
     const nextColor = SAMPLE_COLORS[existing.length % SAMPLE_COLORS.length];
 
     const nextItem: SampleItem = {
       id: String(Date.now()),
       count: 0,
+      order: nextOrder,
       color: nextColor,
       thumbUrl,
       compareUrl,
