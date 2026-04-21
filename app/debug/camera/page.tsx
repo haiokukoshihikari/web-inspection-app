@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 
@@ -41,7 +41,8 @@ const LIVE_ROI_HEIGHT_RATIO = 0.3;
 const LIVE_PROCESS_LONG_SIDE = 640;
 const LIVE_TEMPLATE_LONG_SIDE = 64;
 const LIVE_SEARCH_STEP = 4;
-const LIVE_TEMPLATE_SCALE_FACTORS = [0.95, 1.0, 1.05] as const;
+const LIVE_SCALE_OPTIONS = [5, 10, 15, 20] as const;
+const DEFAULT_LIVE_SCALE_OPTIONS = [5] as const;
 const DISTANCE_GUIDE_FAR_SCALE_PCT = 95;
 const DISTANCE_GUIDE_NEAR_SCALE_PCT = 105;
 const DISTANCE_GUIDE_STREAK_REQUIRED = 2;
@@ -221,6 +222,33 @@ function nextDistanceGuideState(
   return { hint: nextHint, count: 1 };
 }
 
+
+function buildScaleFactors(scaleOptions: number[]) {
+  const normalized = Array.from(
+    new Set(
+      scaleOptions
+        .map((value) => Math.round(value))
+        .filter((value) => value >= 0)
+    )
+  ).sort((a, b) => a - b);
+
+  const factors = new Set<number>([1]);
+  for (const pct of normalized) {
+    const ratio = pct / 100;
+    factors.add(Number((1 - ratio).toFixed(3)));
+    factors.add(Number((1 + ratio).toFixed(3)));
+  }
+  return Array.from(factors).sort((a, b) => a - b);
+}
+
+function toggleScaleOption(current: number[], value: number) {
+  if (current.includes(value)) {
+    const next = current.filter((item) => item !== value);
+    return next.length > 0 ? next : [value];
+  }
+  return [...current, value].sort((a, b) => a - b);
+}
+
 export default function DebugCameraPage() {
   const router = useRouter();
 
@@ -244,6 +272,7 @@ export default function DebugCameraPage() {
   const [liveGuideActive, setLiveGuideActive] = useState(false);
   const [liveGuideThresholdOffset, setLiveGuideThresholdOffset] = useState(DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET);
   const [liveGuideIntervalMs, setLiveGuideIntervalMs] = useState(DEFAULT_LIVE_GUIDE_INTERVAL_MS);
+  const [liveScaleOptions, setLiveScaleOptions] = useState<number[]>([...DEFAULT_LIVE_SCALE_OPTIONS]);
   const [liveProcessInfo, setLiveProcessInfo] = useState("");
   const [liveGuideSavedMsg, setLiveGuideSavedMsg] = useState("");
   const [liveGuideSaving, setLiveGuideSaving] = useState(false);
@@ -274,6 +303,8 @@ export default function DebugCameraPage() {
   const distanceGuideStreakRef = useRef<{ hint: string; count: number }>({ hint: "", count: 0 });
   const distanceGuideShownAtRef = useRef(0);
   const distanceGuideCurrentHintRef = useRef("");
+
+  const liveTemplateScaleFactors = useMemo(() => buildScaleFactors(liveScaleOptions), [liveScaleOptions]);
 
 
   const updateVideoDisplayRect = useCallback(() => {
@@ -556,7 +587,7 @@ export default function DebugCameraPage() {
         const baseWidth = Math.max(16, Math.round(img.naturalWidth * baseScale));
         const baseHeight = Math.max(16, Math.round(img.naturalHeight * baseScale));
 
-        const variants = LIVE_TEMPLATE_SCALE_FACTORS.map((factor) => {
+        const variants = liveTemplateScaleFactors.map((factor) => {
           const width = Math.max(16, Math.round(baseWidth * factor));
           const height = Math.max(16, Math.round(baseHeight * factor));
           const canvas = document.createElement('canvas');
@@ -597,7 +628,7 @@ export default function DebugCameraPage() {
       window.removeEventListener('storage', handleStorage);
       window.removeEventListener('focus', handleStorage);
     };
-  }, []);
+  }, [liveTemplateScaleFactors]);
 
   const runLiveCheck = useCallback(async () => {
     if (liveRunningRef.current || isCapturing || !isReady) return;
@@ -640,7 +671,7 @@ export default function DebugCameraPage() {
       const roiY = Math.round((ph - roiH) / 2);
 
       const gray = edgeNormalize(toGrayArray(ctx, pw, ph), pw, ph);
-      setLiveProcessInfo(`${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} / scale ±5%`);
+      setLiveProcessInfo(`${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} / scale ±${liveScaleOptions.join("/")}%" );
       const results: LiveBox[] = [];
       const matchThreshold = sampleSensitivityThreshold(tpl.sample);
       const highThreshold = clamp(Number((matchThreshold + liveGuideThresholdOffset).toFixed(2)), 0.35, 0.95);
@@ -763,7 +794,7 @@ export default function DebugCameraPage() {
     } finally {
       liveRunningRef.current = false;
     }
-  }, [isCapturing, isReady, liveGuideThresholdOffset]);
+  }, [isCapturing, isReady, liveGuideThresholdOffset, liveScaleOptions]);
 
   useEffect(() => {
     if (liveTimerRef.current !== null) {
