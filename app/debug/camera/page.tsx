@@ -36,8 +36,6 @@ const SAMPLES_KEY = "inspection:samples";
 const DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET = 0.12;
 const DEFAULT_LIVE_GUIDE_INTERVAL_MS = 1500;
 const LIVE_MAX_BOXES = 1;
-const LIVE_ROI_WIDTH_RATIO = 0.5;
-const LIVE_ROI_HEIGHT_RATIO = 0.3;
 const LIVE_PROCESS_LONG_SIDE = 640;
 const LIVE_TEMPLATE_LONG_SIDE = 64;
 const LIVE_SEARCH_STEP = 4;
@@ -273,6 +271,8 @@ export default function DebugCameraPage() {
   const [liveGuideThresholdOffset, setLiveGuideThresholdOffset] = useState(DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET);
   const [liveGuideIntervalMs, setLiveGuideIntervalMs] = useState(DEFAULT_LIVE_GUIDE_INTERVAL_MS);
   const [liveScaleOptions, setLiveScaleOptions] = useState<number[]>([...DEFAULT_LIVE_SCALE_OPTIONS]);
+  const [liveRoiWidthRatio, setLiveRoiWidthRatio] = useState(0.5);
+  const [liveRoiHeightRatio, setLiveRoiHeightRatio] = useState(0.3);
   const [liveProcessInfo, setLiveProcessInfo] = useState("");
   const [liveGuideSavedMsg, setLiveGuideSavedMsg] = useState("");
   const [liveGuideSaving, setLiveGuideSaving] = useState(false);
@@ -665,13 +665,13 @@ export default function DebugCameraPage() {
 
       const maxTplWidth = Math.max(...tpl.variants.map((v) => v.width));
       const maxTplHeight = Math.max(...tpl.variants.map((v) => v.height));
-      const roiW = Math.max(maxTplWidth + 4, Math.round(pw * LIVE_ROI_WIDTH_RATIO));
-      const roiH = Math.max(maxTplHeight + 4, Math.round(ph * LIVE_ROI_HEIGHT_RATIO));
+      const roiW = Math.max(maxTplWidth + 4, Math.round(pw * liveRoiWidthRatio));
+      const roiH = Math.max(maxTplHeight + 4, Math.round(ph * liveRoiHeightRatio));
       const roiX = Math.round((pw - roiW) / 2);
       const roiY = Math.round((ph - roiH) / 2);
 
       const gray = edgeNormalize(toGrayArray(ctx, pw, ph), pw, ph);
-      setLiveProcessInfo(`${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} / scale ±${liveScaleOptions.join("/")}%`);
+      setLiveProcessInfo(`${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} / scale ±${liveScaleOptions.join("/")}% / roi ${Math.round(liveRoiWidthRatio * 100)}x${Math.round(liveRoiHeightRatio * 100)}%`);
       const results: LiveBox[] = [];
       const matchThreshold = sampleSensitivityThreshold(tpl.sample);
       const highThreshold = clamp(Number((matchThreshold + liveGuideThresholdOffset).toFixed(2)), 0.35, 0.95);
@@ -794,7 +794,7 @@ export default function DebugCameraPage() {
     } finally {
       liveRunningRef.current = false;
     }
-  }, [isCapturing, isReady, liveGuideThresholdOffset, liveScaleOptions]);
+  }, [isCapturing, isReady, liveGuideThresholdOffset, liveScaleOptions, liveRoiWidthRatio, liveRoiHeightRatio]);
 
   useEffect(() => {
     if (liveTimerRef.current !== null) {
@@ -1451,10 +1451,10 @@ export default function DebugCameraPage() {
         <div
           className={`absolute rounded-xl border ${liveGuideActive ? "border-cyan-400/40" : "border-white/20"}`}
           style={{
-            width: videoDisplayRect.width * LIVE_ROI_WIDTH_RATIO,
-            height: videoDisplayRect.height * LIVE_ROI_HEIGHT_RATIO,
-            left: videoDisplayRect.left + videoDisplayRect.width * ((1 - LIVE_ROI_WIDTH_RATIO) / 2),
-            top: videoDisplayRect.top + videoDisplayRect.height * ((1 - LIVE_ROI_HEIGHT_RATIO) / 2),
+            width: videoDisplayRect.width * liveRoiWidthRatio,
+            height: videoDisplayRect.height * liveRoiHeightRatio,
+            left: videoDisplayRect.left + videoDisplayRect.width * ((1 - liveRoiWidthRatio) / 2),
+            top: videoDisplayRect.top + videoDisplayRect.height * ((1 - liveRoiHeightRatio) / 2),
           }}
         />
 
