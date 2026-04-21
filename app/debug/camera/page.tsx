@@ -57,6 +57,7 @@ type SampleItem = {
   savedResolution?: number;
   cameraBaseLongSide?: number;
   detectionSensitivity?: number;
+  order?: number;
 };
 
 type LiveBox = {
@@ -521,7 +522,24 @@ export default function DebugCameraPage() {
           return;
         }
 
-        const sample = parsed[0] as SampleItem;
+        const sortedSamples = (parsed as SampleItem[])
+          .map((sample, index) => ({
+            ...sample,
+            order: typeof sample.order === "number" ? sample.order : index + 1,
+          }))
+          .sort((a, b) => (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER));
+
+        const sample = sortedSamples.find(
+          (item) => !!(item.cameraCompareUrl || item.compareUrl || item.thumbUrl)
+        );
+
+        if (!sample) {
+          liveTemplateRef.current = null;
+          setLiveBoxes([]);
+          setLiveGuideActive(false);
+          return;
+        }
+
         const src = sample.cameraCompareUrl || sample.compareUrl || sample.thumbUrl;
         if (!src) {
           liveTemplateRef.current = null;
