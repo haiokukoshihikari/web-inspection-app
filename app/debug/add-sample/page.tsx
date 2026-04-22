@@ -7,10 +7,10 @@ const SAMPLES_KEY = "inspection:samples";
 const RESOLUTION_KEY = "inspection:compareResolution";
 const PENDING_SELECTED_SAMPLE_ID_KEY = "inspection:pendingSelectedSampleId";
 
-const CAMERA_BASE_LONG_SIDE = 640;
+const CAMERA_BASE_LONG_SIDE = 960;
 
 const MAX_SAMPLES = 6;
-const PAGE_VERSION = "add-sample-stable-05";
+const PAGE_VERSION = "add-sample-stable-06";
 
 const MIN_BOX_W = 0.08;
 const MAX_BOX_W = 0.8;
