@@ -41,8 +41,10 @@ const LIVE_TEMPLATE_LONG_SIDE = 96;
 const LIVE_SEARCH_STEP = 4;
 const LIVE_SCALE_OPTIONS = [5, 10, 15, 20] as const;
 const DEFAULT_LIVE_SCALE_OPTIONS = [5] as const;
-const DISTANCE_GUIDE_FAR_SCALE_PCT = 95;
-const DISTANCE_GUIDE_NEAR_SCALE_PCT = 105;
+const DISTANCE_GUIDE_BLUE_TOLERANCE_PCT = 3;
+const DISTANCE_GUIDE_STEP1_PCT = 5;
+const DISTANCE_GUIDE_STEP2_PCT = 10;
+const DISTANCE_GUIDE_STEP3_PCT = 20;
 const DISTANCE_GUIDE_STREAK_REQUIRED = 2;
 
 type SampleItem = {
@@ -70,6 +72,7 @@ type LiveBox = {
   sampleWidthPct: number;
   sampleHeightPct: number;
   rawHint: "near" | "far" | "neutral";
+  scaleDeltaPct: number;
 };
 
 type Rect = {
@@ -692,12 +695,14 @@ export default function DebugCameraPage() {
 
             const sampleWidthPct = (variant.rawWidth / Math.max(1, tpl.baseRawWidth)) * 100;
             const sampleHeightPct = (variant.rawHeight / Math.max(1, tpl.baseRawHeight)) * 100;
+            const scaleDeltaPct = sampleWidthPct - 100;
+
             const rawHint: "near" | "far" | "neutral" =
-              sampleWidthPct >= DISTANCE_GUIDE_NEAR_SCALE_PCT
+              Math.abs(scaleDeltaPct) <= DISTANCE_GUIDE_BLUE_TOLERANCE_PCT
+                ? "neutral"
+                : scaleDeltaPct > 0
                 ? "near"
-                : sampleWidthPct <= DISTANCE_GUIDE_FAR_SCALE_PCT
-                ? "far"
-                : "neutral";
+                : "far";
 
             const box: LiveBox = {
               x: Math.max(0, x / pw - offsetXNorm),
@@ -710,6 +715,7 @@ export default function DebugCameraPage() {
               sampleWidthPct,
               sampleHeightPct,
               rawHint,
+              scaleDeltaPct,
             };
 
             const overlaps = results.some((r) => {
@@ -739,15 +745,42 @@ export default function DebugCameraPage() {
       const thresholdText = highThreshold.toFixed(3);
       const widthPctText = best ? `${best.sampleWidthPct.toFixed(0)}%` : "--";
       const heightPctText = best ? `${best.sampleHeightPct.toFixed(0)}%` : "--";
+      const deltaText = best
+        ? `${best.scaleDeltaPct >= 0 ? "+" : ""}${best.scaleDeltaPct.toFixed(0)}%`
+        : "--";
+
       setLiveDistanceDebug(
-        `score:${scoreText} thr:${thresholdText} w:${widthPctText} h:${heightPctText} raw:${rawLabel}`
+        `score:${scoreText} thr:${thresholdText} w:${widthPctText} h:${heightPctText} Δ:${deltaText} raw:${rawLabel}`
       );
 
+      const delta = best ? best.scaleDeltaPct : 0;
+
       const nextHint =
-        rawLabel === "near"
+
+        delta >= DISTANCE_GUIDE_STEP3_PCT
+
           ? "もっと離れて下さい"
-          : rawLabel === "far"
+
+          : delta >= DISTANCE_GUIDE_STEP2_PCT
+
+          ? "離れて下さい"
+
+          : delta >= DISTANCE_GUIDE_STEP1_PCT
+
+          ? "もう少し離れて下さい"
+
+          : delta <= -DISTANCE_GUIDE_STEP3_PCT
+
           ? "もっと近づいて下さい"
+
+          : delta <= -DISTANCE_GUIDE_STEP2_PCT
+
+          ? "近づいて下さい"
+
+          : delta <= -DISTANCE_GUIDE_STEP1_PCT
+
+          ? "もう少し近づいて下さい"
+
           : "";
 
       const streak = nextDistanceGuideState(distanceGuideStreakRef.current, nextHint);
