@@ -675,10 +675,9 @@ export default function DebugCameraPage() {
 
       const gray = edgeNormalize(toGrayArray(ctx, pw, ph), pw, ph);
       setLiveProcessInfo(`${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} / scale ±${liveScaleOptions.join("/")}% / roi ${Math.round(liveRoiWidthRatio * 100)}x${Math.round(liveRoiHeightRatio * 100)}%`);
-      const results: LiveBox[] = [];
+      let bestBox: LiveBox | null = null;
       const matchThreshold = sampleSensitivityThreshold(tpl.sample);
       const highThreshold = clamp(Number((matchThreshold + liveGuideThresholdOffset).toFixed(2)), 0.35, 0.95);
-      const earlyThreshold = clamp(Number((highThreshold + 0.06).toFixed(2)), 0.4, 0.99);
 
       for (const variant of tpl.variants) {
         for (let y = roiY; y <= roiY + roiH - variant.height; y += LIVE_SEARCH_STEP) {
@@ -718,27 +717,15 @@ export default function DebugCameraPage() {
               scaleDeltaPct,
             };
 
-            const overlaps = results.some((r) => {
-              const x1 = Math.max(r.x, box.x);
-              const y1 = Math.max(r.y, box.y);
-              const x2 = Math.min(r.x + r.matchW, box.x + box.matchW);
-              const y2 = Math.min(r.y + r.matchH, box.y + box.matchH);
-              const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
-              const union = r.matchW * r.matchH + box.matchW * box.matchH - inter;
-              return union > 0 && inter / union > 0.35;
-            });
-            if (!overlaps) results.push(box);
-            if (results.length >= LIVE_MAX_BOXES && score >= earlyThreshold) break;
+            if (!bestBox || box.score > bestBox.score) {
+              bestBox = box;
+            }
           }
-          if (results.length >= LIVE_MAX_BOXES) break;
         }
-        if (results.length >= LIVE_MAX_BOXES) break;
       }
 
-      const nextResults = results.slice(0, LIVE_MAX_BOXES);
-      const best = nextResults.length > 0
-        ? nextResults.reduce((prev, cur) => (cur.score > prev.score ? cur : prev))
-        : null;
+      const nextResults = bestBox ? [bestBox] : [];
+      const best = bestBox;
 
       const rawLabel = best ? best.rawHint : "none";
       const scoreText = best ? best.score.toFixed(3) : "--";
