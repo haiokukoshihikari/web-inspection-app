@@ -73,6 +73,8 @@ type LiveBox = {
   sampleHeightPct: number;
   rawHint: "near" | "far" | "neutral";
   scaleDeltaPct: number;
+  centerDistanceNorm: number;
+  priorityScore: number;
 };
 
 type Rect = {
@@ -143,6 +145,26 @@ type CaptureDebugInfo = {
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
+
+function normalizedDistanceToCenter(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  roiX: number,
+  roiY: number,
+  roiW: number,
+  roiH: number
+) {
+  const cx = x + w / 2;
+  const cy = y + h / 2;
+  const roiCx = roiX + roiW / 2;
+  const roiCy = roiY + roiH / 2;
+  const dx = roiW > 0 ? (cx - roiCx) / (roiW / 2) : 0;
+  const dy = roiH > 0 ? (cy - roiCy) / (roiH / 2) : 0;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
 
 function dataUrlToImage(dataUrl: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -703,6 +725,21 @@ export default function DebugCameraPage() {
                 ? "near"
                 : "far";
 
+            const centerDistanceNorm = normalizedDistanceToCenter(
+              x,
+              y,
+              variant.width,
+              variant.height,
+              roiX,
+              roiY,
+              roiW,
+              roiH
+            );
+            const priorityScore =
+              score
+              - centerDistanceNorm * 0.12
+              - Math.abs(scaleDeltaPct) * 0.0025;
+
             const box: LiveBox = {
               x: Math.max(0, x / pw - offsetXNorm),
               y: Math.max(0, y / ph - offsetYNorm),
@@ -715,9 +752,18 @@ export default function DebugCameraPage() {
               sampleHeightPct,
               rawHint,
               scaleDeltaPct,
+              centerDistanceNorm,
+              priorityScore,
             };
 
-            if (!bestBox || box.score > bestBox.score) {
+            if (
+              !bestBox ||
+              box.priorityScore > bestBox.priorityScore ||
+              (
+                Math.abs(box.priorityScore - bestBox.priorityScore) < 0.0001 &&
+                box.score > bestBox.score
+              )
+            ) {
               bestBox = box;
             }
           }
@@ -729,6 +775,8 @@ export default function DebugCameraPage() {
 
       const rawLabel = best ? best.rawHint : "none";
       const scoreText = best ? best.score.toFixed(3) : "--";
+      const priorityText = best ? best.priorityScore.toFixed(3) : "--";
+      const centerText = best ? best.centerDistanceNorm.toFixed(2) : "--";
       const thresholdText = highThreshold.toFixed(3);
       const widthPctText = best ? `${best.sampleWidthPct.toFixed(0)}%` : "--";
       const heightPctText = best ? `${best.sampleHeightPct.toFixed(0)}%` : "--";
@@ -737,7 +785,7 @@ export default function DebugCameraPage() {
         : "--";
 
       setLiveDistanceDebug(
-        `score:${scoreText} thr:${thresholdText} w:${widthPctText} h:${heightPctText} Δ:${deltaText} raw:${rawLabel}`
+        `score:${scoreText} p:${priorityText} c:${centerText} thr:${thresholdText} w:${widthPctText} h:${heightPctText} Δ:${deltaText} raw:${rawLabel}`
       );
 
       const delta = best ? best.scaleDeltaPct : 0;
