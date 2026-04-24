@@ -4,6 +4,9 @@ import { NextResponse } from "next/server";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const LIVE_SCALE_OPTIONS = [5, 10, 15, 20] as const;
+const DEFAULT_LIVE_SCALE_OPTIONS = [5] as const;
+
 type InspectionProfile = {
   profileName: string;
   version: string;
@@ -16,6 +19,9 @@ type InspectionProfile = {
   hitLimit: number;
   liveGuideThresholdOffset: number;
   liveGuideIntervalMs: number;
+  liveScaleOptions: number[];
+  liveRoiWidthRatio: number;
+  liveRoiHeightRatio: number;
 };
 
 const BLOB_PATHNAME = "config/inspection-profile.json";
@@ -32,10 +38,36 @@ const DEFAULT_PROFILE: InspectionProfile = {
   hitLimit: 100,
   liveGuideThresholdOffset: 0.12,
   liveGuideIntervalMs: 1500,
+  liveScaleOptions: [...DEFAULT_LIVE_SCALE_OPTIONS],
+  liveRoiWidthRatio: 0.5,
+  liveRoiHeightRatio: 0.3,
 };
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function sanitizeLiveScaleOptions(value: unknown): number[] {
+  if (!Array.isArray(value)) return [...DEFAULT_LIVE_SCALE_OPTIONS];
+  const allowed = new Set<number>(LIVE_SCALE_OPTIONS as readonly number[]);
+  const next = Array.from(
+    new Set(
+      value
+        .map((item) => (typeof item === "number" && Number.isFinite(item) ? Math.round(item) : NaN))
+        .filter((item) => Number.isFinite(item) && allowed.has(item as number))
+    )
+  ).sort((a, b) => a - b) as number[];
+  return next.length > 0 ? next : [...DEFAULT_LIVE_SCALE_OPTIONS];
+}
+
+function sanitizeLiveRoiWidthRatio(value: unknown): number {
+  if (!isFiniteNumber(value)) return DEFAULT_PROFILE.liveRoiWidthRatio;
+  return Math.min(0.6, Math.max(0.1, Number(value.toFixed(2))));
+}
+
+function sanitizeLiveRoiHeightRatio(value: unknown): number {
+  if (!isFiniteNumber(value)) return DEFAULT_PROFILE.liveRoiHeightRatio;
+  return Math.min(0.4, Math.max(0.1, Number(value.toFixed(2))));
 }
 
 function validateProfile(input: unknown): InspectionProfile {
@@ -89,6 +121,10 @@ function validateProfile(input: unknown): InspectionProfile {
     ? data.liveGuideIntervalMs
     : DEFAULT_PROFILE.liveGuideIntervalMs;
 
+  const liveScaleOptions = sanitizeLiveScaleOptions(data.liveScaleOptions);
+  const liveRoiWidthRatio = sanitizeLiveRoiWidthRatio(data.liveRoiWidthRatio);
+  const liveRoiHeightRatio = sanitizeLiveRoiHeightRatio(data.liveRoiHeightRatio);
+
   return {
     profileName: data.profileName.trim(),
     version: data.version.trim(),
@@ -101,6 +137,9 @@ function validateProfile(input: unknown): InspectionProfile {
     hitLimit: data.hitLimit,
     liveGuideThresholdOffset,
     liveGuideIntervalMs,
+    liveScaleOptions,
+    liveRoiWidthRatio,
+    liveRoiHeightRatio,
   };
 }
 
