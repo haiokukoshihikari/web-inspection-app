@@ -49,6 +49,10 @@ const DISTANCE_GUIDE_STEP1_PCT = 5;
 const DISTANCE_GUIDE_STEP2_PCT = 10;
 const DISTANCE_GUIDE_STEP3_PCT = 20;
 const DISTANCE_GUIDE_STREAK_REQUIRED = 2;
+const DISTANCE_GUIDE_CENTER_ROI_WIDTH_RATIO = 0.15;
+const DISTANCE_GUIDE_CENTER_ROI_HEIGHT_RATIO = 0.15;
+const DISTANCE_GUIDE_SCALE_WEIGHT = 0.08;
+const DISTANCE_GUIDE_SCORE_WEIGHT = 0.02;
 
 type SampleItem = {
   id: string;
@@ -78,6 +82,8 @@ type LiveBox = {
   scaleDeltaPct: number;
   centerDistanceNorm: number;
   priorityScore: number;
+  distanceGuidePriority: number;
+  inDistanceGuideCenterRoi: boolean;
 };
 
 type Rect = {
@@ -297,6 +303,20 @@ function toggleScaleOption(current: number[], value: number) {
     return next.length > 0 ? next : [value];
   }
   return [...current, value].sort((a, b) => a - b);
+}
+
+
+function intersectsRect(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  rx: number,
+  ry: number,
+  rw: number,
+  rh: number
+) {
+  return x < rx + rw && x + w > rx && y < ry + rh && y + h > ry;
 }
 
 export default function DebugCameraPage() {
@@ -731,8 +751,23 @@ export default function DebugCameraPage() {
       const roiY = Math.round((ph - roiH) / 2);
 
       const gray = edgeNormalize(toGrayArray(ctx, pw, ph), pw, ph);
-      setLiveProcessInfo(`${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} / scale ±${liveScaleOptions.join("/")}% / roi ${Math.round(liveRoiWidthRatio * 100)}x${Math.round(liveRoiHeightRatio * 100)}%`);
+
+      const distanceGuideCenterRoiW = Math.max(
+        maxTplWidth + 4,
+        Math.round(pw * DISTANCE_GUIDE_CENTER_ROI_WIDTH_RATIO)
+      );
+      const distanceGuideCenterRoiH = Math.max(
+        maxTplHeight + 4,
+        Math.round(ph * DISTANCE_GUIDE_CENTER_ROI_HEIGHT_RATIO)
+      );
+      const distanceGuideCenterRoiX = Math.round((pw - distanceGuideCenterRoiW) / 2);
+      const distanceGuideCenterRoiY = Math.round((ph - distanceGuideCenterRoiH) / 2);
+
+      setLiveProcessInfo(
+        `${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} / scale ±${liveScaleOptions.join("/")}% / roi ${Math.round(liveRoiWidthRatio * 100)}x${Math.round(liveRoiHeightRatio * 100)}% / d-roi ${Math.round(DISTANCE_GUIDE_CENTER_ROI_WIDTH_RATIO * 100)}x${Math.round(DISTANCE_GUIDE_CENTER_ROI_HEIGHT_RATIO * 100)}%`
+      );
       let bestBox: LiveBox | null = null;
+      let bestDistanceGuideBox: LiveBox | null = null;
       const matchThreshold = sampleSensitivityThreshold(tpl.sample);
       const highThreshold = clamp(Number((matchThreshold + liveGuideThresholdOffset).toFixed(2)), 0.35, 0.95);
 
@@ -775,6 +810,22 @@ export default function DebugCameraPage() {
               - centerDistanceNorm * 0.12
               - Math.abs(scaleDeltaPct) * 0.0025;
 
+            const inDistanceGuideCenterRoi = intersectsRect(
+              x,
+              y,
+              variant.width,
+              variant.height,
+              distanceGuideCenterRoiX,
+              distanceGuideCenterRoiY,
+              distanceGuideCenterRoiW,
+              distanceGuideCenterRoiH
+            );
+            const distanceGuidePriority =
+              (inDistanceGuideCenterRoi ? 1 : -1)
+              - Math.abs(scaleDeltaPct) * DISTANCE_GUIDE_SCALE_WEIGHT
+              - centerDistanceNorm * 0.04
+              + score * DISTANCE_GUIDE_SCORE_WEIGHT;
+
             const box: LiveBox = {
               x: Math.max(0, x / pw - offsetXNorm),
               y: Math.max(0, y / ph - offsetYNorm),
@@ -789,6 +840,8 @@ export default function DebugCameraPage() {
               scaleDeltaPct,
               centerDistanceNorm,
               priorityScore,
+              distanceGuidePriority,
+              inDistanceGuideCenterRoi,
             };
 
             if (
@@ -801,56 +854,61 @@ export default function DebugCameraPage() {
             ) {
               bestBox = box;
             }
+
+            if (
+              !bestDistanceGuideBox ||
+              box.distanceGuidePriority > bestDistanceGuideBox.distanceGuidePriority ||
+              (
+                Math.abs(box.distanceGuidePriority - bestDistanceGuideBox.distanceGuidePriority) < 0.0001 &&
+                Math.abs(box.scaleDeltaPct) < Math.abs(bestDistanceGuideBox.scaleDeltaPct)
+              )
+            ) {
+              bestDistanceGuideBox = box;
+            }
           }
         }
       }
 
       const nextResults = bestBox ? [bestBox] : [];
       const best = bestBox;
+      const bestDistance = bestDistanceGuideBox;
 
-      const rawLabel = best ? best.rawHint : "none";
+      const rawLabel = bestDistance ? bestDistance.rawHint : "none";
       const scoreText = best ? best.score.toFixed(3) : "--";
       const priorityText = best ? best.priorityScore.toFixed(3) : "--";
-      const centerText = best ? best.centerDistanceNorm.toFixed(2) : "--";
+      const guidePriorityText = bestDistance ? bestDistance.distanceGuidePriority.toFixed(3) : "--";
+      const centerText = bestDistance ? bestDistance.centerDistanceNorm.toFixed(2) : "--";
       const thresholdText = highThreshold.toFixed(3);
-      const widthPctText = best ? `${best.sampleWidthPct.toFixed(0)}%` : "--";
-      const heightPctText = best ? `${best.sampleHeightPct.toFixed(0)}%` : "--";
-      const deltaText = best
-        ? `${best.scaleDeltaPct >= 0 ? "+" : ""}${best.scaleDeltaPct.toFixed(0)}%`
+      const widthPctText = bestDistance ? `${bestDistance.sampleWidthPct.toFixed(0)}%` : "--";
+      const heightPctText = bestDistance ? `${bestDistance.sampleHeightPct.toFixed(0)}%` : "--";
+      const deltaText = bestDistance
+        ? `${bestDistance.scaleDeltaPct >= 0 ? "+" : ""}${bestDistance.scaleDeltaPct.toFixed(0)}%`
+        : "--";
+      const guideCenterText = bestDistance
+        ? bestDistance.inDistanceGuideCenterRoi ? "in" : "out"
         : "--";
 
       setLiveDistanceDebug(
-        `score:${scoreText} p:${priorityText} c:${centerText} thr:${thresholdText} w:${widthPctText} h:${heightPctText} Δ:${deltaText} raw:${rawLabel}`
+        `score:${scoreText} p:${priorityText} gp:${guidePriorityText} c:${centerText} thr:${thresholdText} w:${widthPctText} h:${heightPctText} Δ:${deltaText} center:${guideCenterText} raw:${rawLabel}`
       );
 
-      const delta = best ? best.scaleDeltaPct : 0;
+      const delta = bestDistance ? bestDistance.scaleDeltaPct : 0;
 
       const nextHint =
-
-        delta >= DISTANCE_GUIDE_STEP3_PCT
-
+        !bestDistance || !bestDistance.inDistanceGuideCenterRoi
+          ? ""
+          : delta >= DISTANCE_GUIDE_STEP3_PCT
           ? "もっと離れて下さい"
-
           : delta >= DISTANCE_GUIDE_STEP2_PCT
-
           ? "離れて下さい"
-
           : delta >= DISTANCE_GUIDE_STEP1_PCT
-
           ? "もう少し離れて下さい"
-
           : delta <= -DISTANCE_GUIDE_STEP3_PCT
-
           ? "もっと近づいて下さい"
-
           : delta <= -DISTANCE_GUIDE_STEP2_PCT
-
           ? "近づいて下さい"
-
           : delta <= -DISTANCE_GUIDE_STEP1_PCT
-
           ? "もう少し近づいて下さい"
-
           : "";
 
       const streak = nextDistanceGuideState(distanceGuideStreakRef.current, nextHint);
@@ -1655,6 +1713,16 @@ export default function DebugCameraPage() {
             height: videoDisplayRect.height * liveRoiHeightRatio,
             left: videoDisplayRect.left + videoDisplayRect.width * ((1 - liveRoiWidthRatio) / 2),
             top: videoDisplayRect.top + videoDisplayRect.height * ((1 - liveRoiHeightRatio) / 2),
+          }}
+        />
+
+        <div
+          className="absolute rounded-lg border border-amber-400/30"
+          style={{
+            width: videoDisplayRect.width * DISTANCE_GUIDE_CENTER_ROI_WIDTH_RATIO,
+            height: videoDisplayRect.height * DISTANCE_GUIDE_CENTER_ROI_HEIGHT_RATIO,
+            left: videoDisplayRect.left + videoDisplayRect.width * ((1 - DISTANCE_GUIDE_CENTER_ROI_WIDTH_RATIO) / 2),
+            top: videoDisplayRect.top + videoDisplayRect.height * ((1 - DISTANCE_GUIDE_CENTER_ROI_HEIGHT_RATIO) / 2),
           }}
         />
 
