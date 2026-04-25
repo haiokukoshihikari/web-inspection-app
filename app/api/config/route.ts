@@ -53,7 +53,9 @@ function sanitizeLiveScaleOptions(value: unknown): number[] {
   const next = Array.from(
     new Set(
       value
-        .map((item) => (typeof item === "number" && Number.isFinite(item) ? Math.round(item) : NaN))
+        .map((item) =>
+          typeof item === "number" && Number.isFinite(item) ? Math.round(item) : NaN
+        )
         .filter((item) => Number.isFinite(item) && allowed.has(item as number))
     )
   ).sort((a, b) => a - b) as number[];
