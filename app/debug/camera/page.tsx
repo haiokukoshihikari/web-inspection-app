@@ -28,6 +28,9 @@ type InspectionProfile = {
   hitLimit: number;
   liveGuideThresholdOffset?: number;
   liveGuideIntervalMs?: number;
+  liveScaleOptions?: number[];
+  liveRoiWidthRatio?: number;
+  liveRoiHeightRatio?: number;
 };
 
 const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
@@ -129,6 +132,30 @@ function isInspectionProfile(value: unknown): value is InspectionProfile {
     typeof data.compareResolution === "number" &&
     typeof data.hitLimit === "number"
   );
+}
+
+
+function sanitizeLiveScaleOptions(value: unknown): number[] {
+  if (!Array.isArray(value)) return [...DEFAULT_LIVE_SCALE_OPTIONS];
+  const allowed = new Set<number>(LIVE_SCALE_OPTIONS as readonly number[]);
+  const next = Array.from(
+    new Set(
+      value
+        .map((item) => (typeof item === "number" && Number.isFinite(item) ? Math.round(item) : NaN))
+        .filter((item) => Number.isFinite(item) && allowed.has(item as number))
+    )
+  ).sort((a, b) => a - b) as number[];
+  return next.length > 0 ? next : [...DEFAULT_LIVE_SCALE_OPTIONS];
+}
+
+function sanitizeLiveRoiWidthRatio(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0.5;
+  return Math.min(0.6, Math.max(0.1, Number(value.toFixed(2))));
+}
+
+function sanitizeLiveRoiHeightRatio(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0.3;
+  return Math.min(0.4, Math.max(0.1, Number(value.toFixed(2))));
 }
 
 type CaptureDebugInfo = {
@@ -459,6 +486,10 @@ export default function DebugCameraPage() {
       } else {
         setLiveGuideIntervalMs(DEFAULT_LIVE_GUIDE_INTERVAL_MS);
       }
+
+      setLiveScaleOptions(sanitizeLiveScaleOptions(sharedProfile?.liveScaleOptions));
+      setLiveRoiWidthRatio(sanitizeLiveRoiWidthRatio(sharedProfile?.liveRoiWidthRatio));
+      setLiveRoiHeightRatio(sanitizeLiveRoiHeightRatio(sharedProfile?.liveRoiHeightRatio));
     } catch (error) {
       console.error("ライブ簡易検査設定の読み込みに失敗しました", error);
     }
@@ -488,13 +519,17 @@ export default function DebugCameraPage() {
 
     void loadSharedProfile();
 
+    const handleFocus = () => {
+      void loadSharedProfile();
+    };
+
+    window.addEventListener("focus", handleFocus);
+
     return () => {
       cancelled = true;
+      window.removeEventListener("focus", handleFocus);
     };
   }, []);
-
-
-
 
   useEffect(() => {
     let cancelled = false;
@@ -1171,6 +1206,30 @@ export default function DebugCameraPage() {
     setLiveGuideIntervalMs((prev) => clamp(prev + deltaMs, 100, 1000));
   };
 
+    useEffect(() => {
+    try {
+      if (typeof sharedProfile?.liveGuideThresholdOffset === "number") {
+        setLiveGuideThresholdOffset(
+          clamp(Number(sharedProfile.liveGuideThresholdOffset.toFixed(2)), -0.40, 0.40)
+        );
+      } else {
+        setLiveGuideThresholdOffset(DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET);
+      }
+
+      if (typeof sharedProfile?.liveGuideIntervalMs === "number") {
+        setLiveGuideIntervalMs(clamp(Math.round(sharedProfile.liveGuideIntervalMs), 100, 1000));
+      } else {
+        setLiveGuideIntervalMs(DEFAULT_LIVE_GUIDE_INTERVAL_MS);
+      }
+
+      setLiveScaleOptions(sanitizeLiveScaleOptions(sharedProfile?.liveScaleOptions));
+      setLiveRoiWidthRatio(sanitizeLiveRoiWidthRatio(sharedProfile?.liveRoiWidthRatio));
+      setLiveRoiHeightRatio(sanitizeLiveRoiHeightRatio(sharedProfile?.liveRoiHeightRatio));
+    } catch (error) {
+      console.error("ライブ簡易検査設定の読み込みに失敗しました", error);
+    }
+  }, [sharedProfile]);
+
   const saveLiveGuideSettings = async () => {
     if (liveGuideSaving) return;
 
@@ -1195,12 +1254,18 @@ export default function DebugCameraPage() {
         hitLimit: 100,
         liveGuideThresholdOffset: DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET,
         liveGuideIntervalMs: DEFAULT_LIVE_GUIDE_INTERVAL_MS,
+        liveScaleOptions: [...DEFAULT_LIVE_SCALE_OPTIONS],
+        liveRoiWidthRatio: 0.5,
+        liveRoiHeightRatio: 0.3,
       };
 
       const nextProfile = {
         ...baseProfile,
         liveGuideThresholdOffset: clamp(Number(liveGuideThresholdOffset.toFixed(2)), -0.40, 0.40),
         liveGuideIntervalMs: clamp(Math.round(liveGuideIntervalMs), 100, 1000),
+        liveScaleOptions: sanitizeLiveScaleOptions(liveScaleOptions),
+        liveRoiWidthRatio: sanitizeLiveRoiWidthRatio(liveRoiWidthRatio),
+        liveRoiHeightRatio: sanitizeLiveRoiHeightRatio(liveRoiHeightRatio),
       };
 
       const controller = new AbortController();
@@ -1229,6 +1294,9 @@ export default function DebugCameraPage() {
         if (typeof data.profile.version === "string" && data.profile.version.trim()) {
           setConfigVersion(data.profile.version.trim());
         }
+        setLiveScaleOptions(sanitizeLiveScaleOptions(data.profile.liveScaleOptions));
+        setLiveRoiWidthRatio(sanitizeLiveRoiWidthRatio(data.profile.liveRoiWidthRatio));
+        setLiveRoiHeightRatio(sanitizeLiveRoiHeightRatio(data.profile.liveRoiHeightRatio));
       }
 
       setLiveGuideSavedMsg("出力しました");
