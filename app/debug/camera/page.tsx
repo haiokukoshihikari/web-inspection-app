@@ -53,6 +53,12 @@ const DISTANCE_GUIDE_CENTER_ROI_WIDTH_RATIO = 0.15;
 const DISTANCE_GUIDE_CENTER_ROI_HEIGHT_RATIO = 0.15;
 const DISTANCE_GUIDE_SCALE_WEIGHT = 0.08;
 const DISTANCE_GUIDE_SCORE_WEIGHT = 0.02;
+const DISTANCE_GUIDE_TRACK_STABLE_REQUIRED = 3;
+const DISTANCE_GUIDE_TRACK_MAX_LOST = 2;
+const DISTANCE_GUIDE_TRACK_POSITION_TOLERANCE = 0.08;
+const DISTANCE_GUIDE_TRACK_SCALE_TOLERANCE_PCT = 6;
+const DISTANCE_GUIDE_TRACK_SEARCH_WINDOW_RATIO = 0.12;
+const DISTANCE_GUIDE_FULL_SEARCH_REFRESH_MS = 1200;
 
 type SampleItem = {
   id: string;
@@ -84,6 +90,14 @@ type LiveBox = {
   priorityScore: number;
   distanceGuidePriority: number;
   inDistanceGuideCenterRoi: boolean;
+};
+
+type DistanceGuideTrackState = {
+  status: "search" | "candidate" | "locked";
+  box: LiveBox | null;
+  stableCount: number;
+  lostCount: number;
+  source: "none" | "full" | "tracked";
 };
 
 type Rect = {
@@ -319,6 +333,33 @@ function intersectsRect(
   return x < rx + rw && x + w > rx && y < ry + rh && y + h > ry;
 }
 
+function boxCenterDistance(a: LiveBox, b: LiveBox) {
+  const ax = a.x + a.w / 2;
+  const ay = a.y + a.h / 2;
+  const bx = b.x + b.w / 2;
+  const by = b.y + b.h / 2;
+  const dx = ax - bx;
+  const dy = ay - by;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function isSimilarDistanceGuideBox(a: LiveBox, b: LiveBox) {
+  return (
+    boxCenterDistance(a, b) <= DISTANCE_GUIDE_TRACK_POSITION_TOLERANCE &&
+    Math.abs(a.scaleDeltaPct - b.scaleDeltaPct) <= DISTANCE_GUIDE_TRACK_SCALE_TOLERANCE_PCT
+  );
+}
+
+function makeInitialDistanceGuideTrackState(): DistanceGuideTrackState {
+  return {
+    status: "search",
+    box: null,
+    stableCount: 0,
+    lostCount: 0,
+    source: "none",
+  };
+}
+
 export default function DebugCameraPage() {
   const router = useRouter();
 
@@ -375,6 +416,8 @@ export default function DebugCameraPage() {
   const distanceGuideStreakRef = useRef<{ hint: string; count: number }>({ hint: "", count: 0 });
   const distanceGuideShownAtRef = useRef(0);
   const distanceGuideCurrentHintRef = useRef("");
+  const distanceGuideTrackRef = useRef<DistanceGuideTrackState>(makeInitialDistanceGuideTrackState());
+  const lastDistanceGuideFullSearchAtRef = useRef(0);
 
   const liveTemplateScaleFactors = useMemo(() => buildScaleFactors(liveScaleOptions), [liveScaleOptions]);
 
@@ -720,6 +763,7 @@ export default function DebugCameraPage() {
       distanceGuideStreakRef.current = { hint: "", count: 0 };
       distanceGuideShownAtRef.current = 0;
       distanceGuideCurrentHintRef.current = "";
+      distanceGuideTrackRef.current = makeInitialDistanceGuideTrackState();
       setLiveDistanceGuide("");
       setLiveDistanceDebug("");
       return;
@@ -768,6 +812,12 @@ export default function DebugCameraPage() {
       );
       let bestBox: LiveBox | null = null;
       let bestDistanceGuideBox: LiveBox | null = null;
+      let bestTrackedDistanceGuideBox: LiveBox | null = null;
+      const prevTrack = distanceGuideTrackRef.current;
+      const shouldRefreshFullSearch =
+        prevTrack.status !== "locked" ||
+        performance.now() - lastDistanceGuideFullSearchAtRef.current >= DISTANCE_GUIDE_FULL_SEARCH_REFRESH_MS;
+
       const matchThreshold = sampleSensitivityThreshold(tpl.sample);
       const highThreshold = clamp(Number((matchThreshold + liveGuideThresholdOffset).toFixed(2)), 0.35, 0.95);
 
@@ -865,13 +915,141 @@ export default function DebugCameraPage() {
             ) {
               bestDistanceGuideBox = box;
             }
+
+            if (prevTrack.box) {
+              const trackCx = prevTrack.box.x + prevTrack.box.w / 2;
+              const trackCy = prevTrack.box.y + prevTrack.box.h / 2;
+              const boxCx = box.x + box.w / 2;
+              const boxCy = box.y + box.h / 2;
+              const withinTrackedWindow =
+                Math.abs(boxCx - trackCx) <= DISTANCE_GUIDE_TRACK_SEARCH_WINDOW_RATIO &&
+                Math.abs(boxCy - trackCy) <= DISTANCE_GUIDE_TRACK_SEARCH_WINDOW_RATIO;
+
+              if (
+                withinTrackedWindow &&
+                Math.abs(box.scaleDeltaPct - prevTrack.box.scaleDeltaPct) <= DISTANCE_GUIDE_TRACK_SCALE_TOLERANCE_PCT
+              ) {
+                if (
+                  !bestTrackedDistanceGuideBox ||
+                  box.distanceGuidePriority > bestTrackedDistanceGuideBox.distanceGuidePriority ||
+                  (
+                    Math.abs(box.distanceGuidePriority - bestTrackedDistanceGuideBox.distanceGuidePriority) < 0.0001 &&
+                    box.score > bestTrackedDistanceGuideBox.score
+                  )
+                ) {
+                  bestTrackedDistanceGuideBox = box;
+                }
+              }
+            }
           }
         }
       }
 
       const nextResults = bestBox ? [bestBox] : [];
       const best = bestBox;
-      const bestDistance = bestDistanceGuideBox;
+
+      let nextTrack = prevTrack;
+      let selectedDistanceGuideBox: LiveBox | null = null;
+      let distanceGuideSource: "none" | "full" | "tracked" = "none";
+
+      if (prevTrack.status === "search") {
+        if (bestDistanceGuideBox) {
+          nextTrack = {
+            status: "candidate",
+            box: bestDistanceGuideBox,
+            stableCount: 1,
+            lostCount: 0,
+            source: "full",
+          };
+          selectedDistanceGuideBox = bestDistanceGuideBox;
+          distanceGuideSource = "full";
+        } else {
+          nextTrack = makeInitialDistanceGuideTrackState();
+        }
+      } else if (prevTrack.status === "candidate") {
+        if (bestDistanceGuideBox && prevTrack.box && isSimilarDistanceGuideBox(prevTrack.box, bestDistanceGuideBox)) {
+          const stableCount = prevTrack.stableCount + 1;
+          nextTrack = {
+            status: stableCount >= DISTANCE_GUIDE_TRACK_STABLE_REQUIRED ? "locked" : "candidate",
+            box: bestDistanceGuideBox,
+            stableCount,
+            lostCount: 0,
+            source: "full",
+          };
+          selectedDistanceGuideBox = bestDistanceGuideBox;
+          distanceGuideSource = "full";
+        } else if (bestDistanceGuideBox) {
+          nextTrack = {
+            status: "candidate",
+            box: bestDistanceGuideBox,
+            stableCount: 1,
+            lostCount: 0,
+            source: "full",
+          };
+          selectedDistanceGuideBox = bestDistanceGuideBox;
+          distanceGuideSource = "full";
+        } else {
+          nextTrack = makeInitialDistanceGuideTrackState();
+        }
+      } else {
+        if (bestTrackedDistanceGuideBox && prevTrack.box && isSimilarDistanceGuideBox(prevTrack.box, bestTrackedDistanceGuideBox)) {
+          nextTrack = {
+            status: "locked",
+            box: bestTrackedDistanceGuideBox,
+            stableCount: Math.min(prevTrack.stableCount + 1, 99),
+            lostCount: 0,
+            source: "tracked",
+          };
+          selectedDistanceGuideBox = bestTrackedDistanceGuideBox;
+          distanceGuideSource = "tracked";
+        } else if (
+          shouldRefreshFullSearch &&
+          bestDistanceGuideBox &&
+          prevTrack.box &&
+          isSimilarDistanceGuideBox(prevTrack.box, bestDistanceGuideBox)
+        ) {
+          nextTrack = {
+            status: "locked",
+            box: bestDistanceGuideBox,
+            stableCount: Math.min(prevTrack.stableCount + 1, 99),
+            lostCount: 0,
+            source: "full",
+          };
+          selectedDistanceGuideBox = bestDistanceGuideBox;
+          distanceGuideSource = "full";
+        } else {
+          const lostCount = prevTrack.lostCount + 1;
+          if (lostCount > DISTANCE_GUIDE_TRACK_MAX_LOST) {
+            if (bestDistanceGuideBox) {
+              nextTrack = {
+                status: "candidate",
+                box: bestDistanceGuideBox,
+                stableCount: 1,
+                lostCount: 0,
+                source: "full",
+              };
+              selectedDistanceGuideBox = bestDistanceGuideBox;
+              distanceGuideSource = "full";
+            } else {
+              nextTrack = makeInitialDistanceGuideTrackState();
+            }
+          } else {
+            nextTrack = {
+              ...prevTrack,
+              lostCount,
+            };
+            selectedDistanceGuideBox = prevTrack.box;
+            distanceGuideSource = prevTrack.source;
+          }
+        }
+      }
+
+      if (shouldRefreshFullSearch) {
+        lastDistanceGuideFullSearchAtRef.current = performance.now();
+      }
+      distanceGuideTrackRef.current = nextTrack;
+
+      const bestDistance = selectedDistanceGuideBox;
 
       const rawLabel = bestDistance ? bestDistance.rawHint : "none";
       const scoreText = best ? best.score.toFixed(3) : "--";
@@ -889,13 +1067,13 @@ export default function DebugCameraPage() {
         : "--";
 
       setLiveDistanceDebug(
-        `score:${scoreText} p:${priorityText} gp:${guidePriorityText} c:${centerText} thr:${thresholdText} w:${widthPctText} h:${heightPctText} Δ:${deltaText} center:${guideCenterText} raw:${rawLabel}`
+        `track:${nextTrack.status} stable:${nextTrack.stableCount} lost:${nextTrack.lostCount} src:${distanceGuideSource} score:${scoreText} p:${priorityText} gp:${guidePriorityText} c:${centerText} thr:${thresholdText} w:${widthPctText} h:${heightPctText} Δ:${deltaText} center:${guideCenterText} raw:${rawLabel}`
       );
 
       const delta = bestDistance ? bestDistance.scaleDeltaPct : 0;
 
       const nextHint =
-        !bestDistance || !bestDistance.inDistanceGuideCenterRoi
+        nextTrack.status !== "locked" || !bestDistance || !bestDistance.inDistanceGuideCenterRoi
           ? ""
           : delta >= DISTANCE_GUIDE_STEP3_PCT
           ? "もっと離れて下さい"
