@@ -170,6 +170,16 @@ function sanitizeLiveDistanceScaleOffsetPct(value: unknown): number {
   return Math.min(20, Math.max(-20, Math.round(value)));
 }
 
+function sanitizeMedianWindow(value: unknown): number {
+  const n = typeof value === "number" && Number.isFinite(value) ? Math.round(value) : 5;
+  return [3, 5, 7, 9].includes(n) ? n : 5;
+}
+
+function sanitizeGuideConfirmCount(value: unknown): number {
+  const n = typeof value === "number" && Number.isFinite(value) ? Math.round(value) : 2;
+  return Math.min(3, Math.max(1, n));
+}
+
 type CaptureDebugInfo = {
   sourceType: "camera" | "file";
   originalWidth: number;
@@ -382,6 +392,8 @@ export default function DebugCameraPage() {
   const [liveGuideThresholdOffset, setLiveGuideThresholdOffset] = useState(DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET);
   const [liveGuideIntervalMs, setLiveGuideIntervalMs] = useState(DEFAULT_LIVE_GUIDE_INTERVAL_MS);
   const [liveDistanceScaleOffsetPct, setLiveDistanceScaleOffsetPct] = useState(7);
+  const [liveDistanceMedianWindow, setLiveDistanceMedianWindow] = useState(5);
+  const [liveDistanceHintConfirmCount, setLiveDistanceHintConfirmCount] = useState(2);
   const [liveScaleOptions, setLiveScaleOptions] = useState<number[]>([...DEFAULT_LIVE_SCALE_OPTIONS]);
   const [liveRoiWidthRatio, setLiveRoiWidthRatio] = useState(0.5);
   const [liveRoiHeightRatio, setLiveRoiHeightRatio] = useState(0.3);
@@ -931,7 +943,7 @@ export default function DebugCameraPage() {
       const deltaRaw = bestDistance ? bestDistance.scaleDeltaPct + liveDistanceScaleOffsetPct : 0;
 
       if (bestDistance && bestDistance.inDistanceGuideCenterRoi) {
-        const nextHistory = [...distanceGuideDeltaHistoryRef.current, deltaRaw].slice(-5);
+        const nextHistory = [...distanceGuideDeltaHistoryRef.current, deltaRaw].slice(-liveDistanceMedianWindow);
         distanceGuideDeltaHistoryRef.current = nextHistory;
       } else {
         distanceGuideDeltaHistoryRef.current = [];
@@ -944,7 +956,7 @@ export default function DebugCameraPage() {
       setLiveDistanceDebug(
         `score:${scoreText} p:${priorityText} gp:${guidePriorityText} c:${centerText} thr:${thresholdText}\n` +
         `w:${widthPctText} h:${heightPctText} Δraw:${deltaRaw >= 0 ? "+" : ""}${deltaRaw.toFixed(0)}% Δ:${delta >= 0 ? "+" : ""}${delta.toFixed(0)}% offset:${liveDistanceScaleOffsetPct >= 0 ? "+" : ""}${liveDistanceScaleOffsetPct}%\n` +
-        `center:${guideCenterText} raw:${rawLabel}`
+        `center:${guideCenterText} raw:${rawLabel} med:${liveDistanceMedianWindow} confirm:${liveDistanceHintConfirmCount}`
       );
 
       const nextHint =
@@ -955,7 +967,7 @@ export default function DebugCameraPage() {
       const streak = nextDistanceGuideState(distanceGuideStreakRef.current, nextHint);
       distanceGuideStreakRef.current = streak;
       const nextConfirmedHint =
-        streak.count >= DISTANCE_GUIDE_STREAK_REQUIRED ? streak.hint : "";
+        streak.count >= liveDistanceHintConfirmCount ? streak.hint : "";
 
       const now = performance.now();
       const prevHint = distanceGuideCurrentHintRef.current;
