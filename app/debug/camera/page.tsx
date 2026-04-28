@@ -325,6 +325,39 @@ function intersectsRect(
   return x < rx + rw && x + w > rx && y < ry + rh && y + h > ry;
 }
 
+function median(values: number[]) {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+}
+
+function nextDistanceGuideHintWithHysteresis(currentHint: string, delta: number) {
+  if (currentHint === "もっと離れて下さい") {
+    if (delta >= DISTANCE_GUIDE_STEP2_PCT) return "もっと離れて下さい";
+  } else if (currentHint === "離れて下さい") {
+    if (delta >= DISTANCE_GUIDE_STEP1_PCT) return "離れて下さい";
+  } else if (currentHint === "もう少し離れて下さい") {
+    if (delta >= 1) return "もう少し離れて下さい";
+  } else if (currentHint === "もっと近づいて下さい") {
+    if (delta <= -DISTANCE_GUIDE_STEP2_PCT) return "もっと近づいて下さい";
+  } else if (currentHint === "近づいて下さい") {
+    if (delta <= -DISTANCE_GUIDE_STEP1_PCT) return "近づいて下さい";
+  } else if (currentHint === "もう少し近づいて下さい") {
+    if (delta <= -1) return "もう少し近づいて下さい";
+  }
+
+  if (delta >= DISTANCE_GUIDE_STEP3_PCT) return "もっと離れて下さい";
+  if (delta >= DISTANCE_GUIDE_STEP2_PCT) return "離れて下さい";
+  if (delta >= DISTANCE_GUIDE_STEP1_PCT) return "もう少し離れて下さい";
+  if (delta <= -DISTANCE_GUIDE_STEP3_PCT) return "もっと近づいて下さい";
+  if (delta <= -DISTANCE_GUIDE_STEP2_PCT) return "近づいて下さい";
+  if (delta <= -DISTANCE_GUIDE_STEP1_PCT) return "もう少し近づいて下さい";
+  return "";
+}
+
 export default function DebugCameraPage() {
   const router = useRouter();
 
@@ -382,6 +415,7 @@ export default function DebugCameraPage() {
   const distanceGuideStreakRef = useRef<{ hint: string; count: number }>({ hint: "", count: 0 });
   const distanceGuideShownAtRef = useRef(0);
   const distanceGuideCurrentHintRef = useRef("");
+  const distanceGuideDeltaHistoryRef = useRef<number[]>([]);
 
   const liveTemplateScaleFactors = useMemo(() => buildScaleFactors(liveScaleOptions), [liveScaleOptions]);
 
@@ -728,6 +762,7 @@ export default function DebugCameraPage() {
       distanceGuideStreakRef.current = { hint: "", count: 0 };
       distanceGuideShownAtRef.current = 0;
       distanceGuideCurrentHintRef.current = "";
+      distanceGuideDeltaHistoryRef.current = [];
       setLiveDistanceGuide("");
       setLiveDistanceDebug("");
       return;
@@ -889,35 +924,33 @@ export default function DebugCameraPage() {
       const thresholdText = highThreshold.toFixed(3);
       const widthPctText = bestDistance ? `${bestDistance.sampleWidthPct.toFixed(0)}%` : "--";
       const heightPctText = bestDistance ? `${bestDistance.sampleHeightPct.toFixed(0)}%` : "--";
-      const deltaText = bestDistance
-        ? `${bestDistance.scaleDeltaPct >= 0 ? "+" : ""}${bestDistance.scaleDeltaPct.toFixed(0)}%`
-        : "--";
       const guideCenterText = bestDistance
         ? bestDistance.inDistanceGuideCenterRoi ? "in" : "out"
         : "--";
 
-      setLiveDistanceDebug(
-        `score:${scoreText} p:${priorityText} gp:${guidePriorityText} c:${centerText} thr:${thresholdText} w:${widthPctText} h:${heightPctText} Δ:${deltaText} center:${guideCenterText} raw:${rawLabel}`
-      );
+      const deltaRaw = bestDistance ? bestDistance.scaleDeltaPct + liveDistanceScaleOffsetPct : 0;
 
-      const delta = bestDistance ? bestDistance.scaleDeltaPct + liveDistanceScaleOffsetPct : 0;
+      if (bestDistance && bestDistance.inDistanceGuideCenterRoi) {
+        const nextHistory = [...distanceGuideDeltaHistoryRef.current, deltaRaw].slice(-5);
+        distanceGuideDeltaHistoryRef.current = nextHistory;
+      } else {
+        distanceGuideDeltaHistoryRef.current = [];
+      }
+
+      const delta = distanceGuideDeltaHistoryRef.current.length > 0
+        ? median(distanceGuideDeltaHistoryRef.current)
+        : deltaRaw;
+
+      setLiveDistanceDebug(
+        `score:${scoreText} p:${priorityText} gp:${guidePriorityText} c:${centerText} thr:${thresholdText}\n` +
+        `w:${widthPctText} h:${heightPctText} Δraw:${deltaRaw >= 0 ? "+" : ""}${deltaRaw.toFixed(0)}% Δ:${delta >= 0 ? "+" : ""}${delta.toFixed(0)}% offset:${liveDistanceScaleOffsetPct >= 0 ? "+" : ""}${liveDistanceScaleOffsetPct}%\n` +
+        `center:${guideCenterText} raw:${rawLabel}`
+      );
 
       const nextHint =
         !bestDistance || !bestDistance.inDistanceGuideCenterRoi
           ? ""
-          : delta >= DISTANCE_GUIDE_STEP3_PCT
-          ? "もっと離れて下さい"
-          : delta >= DISTANCE_GUIDE_STEP2_PCT
-          ? "離れて下さい"
-          : delta >= DISTANCE_GUIDE_STEP1_PCT
-          ? "もう少し離れて下さい"
-          : delta <= -DISTANCE_GUIDE_STEP3_PCT
-          ? "もっと近づいて下さい"
-          : delta <= -DISTANCE_GUIDE_STEP2_PCT
-          ? "近づいて下さい"
-          : delta <= -DISTANCE_GUIDE_STEP1_PCT
-          ? "もう少し近づいて下さい"
-          : "";
+          : nextDistanceGuideHintWithHysteresis(distanceGuideCurrentHintRef.current, delta);
 
       const streak = nextDistanceGuideState(distanceGuideStreakRef.current, nextHint);
       distanceGuideStreakRef.current = streak;
