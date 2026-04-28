@@ -28,6 +28,7 @@ type InspectionProfile = {
   hitLimit: number;
   liveGuideThresholdOffset?: number;
   liveGuideIntervalMs?: number;
+  liveDistanceScaleOffsetPct?: number;
   liveScaleOptions?: number[];
   liveRoiWidthRatio?: number;
   liveRoiHeightRatio?: number;
@@ -53,12 +54,6 @@ const DISTANCE_GUIDE_CENTER_ROI_WIDTH_RATIO = 0.15;
 const DISTANCE_GUIDE_CENTER_ROI_HEIGHT_RATIO = 0.15;
 const DISTANCE_GUIDE_SCALE_WEIGHT = 0.08;
 const DISTANCE_GUIDE_SCORE_WEIGHT = 0.02;
-const DISTANCE_GUIDE_TRACK_STABLE_REQUIRED = 3;
-const DISTANCE_GUIDE_TRACK_MAX_LOST = 2;
-const DISTANCE_GUIDE_TRACK_POSITION_TOLERANCE = 0.08;
-const DISTANCE_GUIDE_TRACK_SCALE_TOLERANCE_PCT = 6;
-const DISTANCE_GUIDE_TRACK_SEARCH_WINDOW_RATIO = 0.12;
-const DISTANCE_GUIDE_FULL_SEARCH_REFRESH_MS = 1200;
 
 type SampleItem = {
   id: string;
@@ -90,14 +85,6 @@ type LiveBox = {
   priorityScore: number;
   distanceGuidePriority: number;
   inDistanceGuideCenterRoi: boolean;
-};
-
-type DistanceGuideTrackState = {
-  status: "search" | "candidate" | "locked";
-  box: LiveBox | null;
-  stableCount: number;
-  lostCount: number;
-  source: "none" | "full" | "tracked";
 };
 
 type Rect = {
@@ -176,6 +163,11 @@ function sanitizeLiveRoiWidthRatio(value: unknown): number {
 function sanitizeLiveRoiHeightRatio(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return 0.3;
   return Math.min(0.4, Math.max(0.1, Number(value.toFixed(2))));
+}
+
+function sanitizeLiveDistanceScaleOffsetPct(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 7;
+  return Math.min(20, Math.max(-20, Math.round(value)));
 }
 
 type CaptureDebugInfo = {
@@ -333,33 +325,6 @@ function intersectsRect(
   return x < rx + rw && x + w > rx && y < ry + rh && y + h > ry;
 }
 
-function boxCenterDistance(a: LiveBox, b: LiveBox) {
-  const ax = a.x + a.w / 2;
-  const ay = a.y + a.h / 2;
-  const bx = b.x + b.w / 2;
-  const by = b.y + b.h / 2;
-  const dx = ax - bx;
-  const dy = ay - by;
-  return Math.sqrt(dx * dx + dy * dy);
-}
-
-function isSimilarDistanceGuideBox(a: LiveBox, b: LiveBox) {
-  return (
-    boxCenterDistance(a, b) <= DISTANCE_GUIDE_TRACK_POSITION_TOLERANCE &&
-    Math.abs(a.scaleDeltaPct - b.scaleDeltaPct) <= DISTANCE_GUIDE_TRACK_SCALE_TOLERANCE_PCT
-  );
-}
-
-function makeInitialDistanceGuideTrackState(): DistanceGuideTrackState {
-  return {
-    status: "search",
-    box: null,
-    stableCount: 0,
-    lostCount: 0,
-    source: "none",
-  };
-}
-
 export default function DebugCameraPage() {
   const router = useRouter();
 
@@ -383,6 +348,7 @@ export default function DebugCameraPage() {
   const [liveGuideActive, setLiveGuideActive] = useState(false);
   const [liveGuideThresholdOffset, setLiveGuideThresholdOffset] = useState(DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET);
   const [liveGuideIntervalMs, setLiveGuideIntervalMs] = useState(DEFAULT_LIVE_GUIDE_INTERVAL_MS);
+  const [liveDistanceScaleOffsetPct, setLiveDistanceScaleOffsetPct] = useState(7);
   const [liveScaleOptions, setLiveScaleOptions] = useState<number[]>([...DEFAULT_LIVE_SCALE_OPTIONS]);
   const [liveRoiWidthRatio, setLiveRoiWidthRatio] = useState(0.5);
   const [liveRoiHeightRatio, setLiveRoiHeightRatio] = useState(0.3);
@@ -416,8 +382,6 @@ export default function DebugCameraPage() {
   const distanceGuideStreakRef = useRef<{ hint: string; count: number }>({ hint: "", count: 0 });
   const distanceGuideShownAtRef = useRef(0);
   const distanceGuideCurrentHintRef = useRef("");
-  const distanceGuideTrackRef = useRef<DistanceGuideTrackState>(makeInitialDistanceGuideTrackState());
-  const lastDistanceGuideFullSearchAtRef = useRef(0);
 
   const liveTemplateScaleFactors = useMemo(() => buildScaleFactors(liveScaleOptions), [liveScaleOptions]);
 
@@ -550,6 +514,7 @@ export default function DebugCameraPage() {
         setLiveGuideIntervalMs(DEFAULT_LIVE_GUIDE_INTERVAL_MS);
       }
 
+      setLiveDistanceScaleOffsetPct(sanitizeLiveDistanceScaleOffsetPct(sharedProfile?.liveDistanceScaleOffsetPct));
       setLiveScaleOptions(sanitizeLiveScaleOptions(sharedProfile?.liveScaleOptions));
       setLiveRoiWidthRatio(sanitizeLiveRoiWidthRatio(sharedProfile?.liveRoiWidthRatio));
       setLiveRoiHeightRatio(sanitizeLiveRoiHeightRatio(sharedProfile?.liveRoiHeightRatio));
@@ -763,7 +728,6 @@ export default function DebugCameraPage() {
       distanceGuideStreakRef.current = { hint: "", count: 0 };
       distanceGuideShownAtRef.current = 0;
       distanceGuideCurrentHintRef.current = "";
-      distanceGuideTrackRef.current = makeInitialDistanceGuideTrackState();
       setLiveDistanceGuide("");
       setLiveDistanceDebug("");
       return;
@@ -812,12 +776,6 @@ export default function DebugCameraPage() {
       );
       let bestBox: LiveBox | null = null;
       let bestDistanceGuideBox: LiveBox | null = null;
-      let bestTrackedDistanceGuideBox: LiveBox | null = null;
-      const prevTrack = distanceGuideTrackRef.current;
-      const shouldRefreshFullSearch =
-        prevTrack.status !== "locked" ||
-        performance.now() - lastDistanceGuideFullSearchAtRef.current >= DISTANCE_GUIDE_FULL_SEARCH_REFRESH_MS;
-
       const matchThreshold = sampleSensitivityThreshold(tpl.sample);
       const highThreshold = clamp(Number((matchThreshold + liveGuideThresholdOffset).toFixed(2)), 0.35, 0.95);
 
@@ -915,141 +873,13 @@ export default function DebugCameraPage() {
             ) {
               bestDistanceGuideBox = box;
             }
-
-            if (prevTrack.box) {
-              const trackCx = prevTrack.box.x + prevTrack.box.w / 2;
-              const trackCy = prevTrack.box.y + prevTrack.box.h / 2;
-              const boxCx = box.x + box.w / 2;
-              const boxCy = box.y + box.h / 2;
-              const withinTrackedWindow =
-                Math.abs(boxCx - trackCx) <= DISTANCE_GUIDE_TRACK_SEARCH_WINDOW_RATIO &&
-                Math.abs(boxCy - trackCy) <= DISTANCE_GUIDE_TRACK_SEARCH_WINDOW_RATIO;
-
-              if (
-                withinTrackedWindow &&
-                Math.abs(box.scaleDeltaPct - prevTrack.box.scaleDeltaPct) <= DISTANCE_GUIDE_TRACK_SCALE_TOLERANCE_PCT
-              ) {
-                if (
-                  !bestTrackedDistanceGuideBox ||
-                  box.distanceGuidePriority > bestTrackedDistanceGuideBox.distanceGuidePriority ||
-                  (
-                    Math.abs(box.distanceGuidePriority - bestTrackedDistanceGuideBox.distanceGuidePriority) < 0.0001 &&
-                    box.score > bestTrackedDistanceGuideBox.score
-                  )
-                ) {
-                  bestTrackedDistanceGuideBox = box;
-                }
-              }
-            }
           }
         }
       }
 
       const nextResults = bestBox ? [bestBox] : [];
       const best = bestBox;
-
-      let nextTrack = prevTrack;
-      let selectedDistanceGuideBox: LiveBox | null = null;
-      let distanceGuideSource: "none" | "full" | "tracked" = "none";
-
-      if (prevTrack.status === "search") {
-        if (bestDistanceGuideBox) {
-          nextTrack = {
-            status: "candidate",
-            box: bestDistanceGuideBox,
-            stableCount: 1,
-            lostCount: 0,
-            source: "full",
-          };
-          selectedDistanceGuideBox = bestDistanceGuideBox;
-          distanceGuideSource = "full";
-        } else {
-          nextTrack = makeInitialDistanceGuideTrackState();
-        }
-      } else if (prevTrack.status === "candidate") {
-        if (bestDistanceGuideBox && prevTrack.box && isSimilarDistanceGuideBox(prevTrack.box, bestDistanceGuideBox)) {
-          const stableCount = prevTrack.stableCount + 1;
-          nextTrack = {
-            status: stableCount >= DISTANCE_GUIDE_TRACK_STABLE_REQUIRED ? "locked" : "candidate",
-            box: bestDistanceGuideBox,
-            stableCount,
-            lostCount: 0,
-            source: "full",
-          };
-          selectedDistanceGuideBox = bestDistanceGuideBox;
-          distanceGuideSource = "full";
-        } else if (bestDistanceGuideBox) {
-          nextTrack = {
-            status: "candidate",
-            box: bestDistanceGuideBox,
-            stableCount: 1,
-            lostCount: 0,
-            source: "full",
-          };
-          selectedDistanceGuideBox = bestDistanceGuideBox;
-          distanceGuideSource = "full";
-        } else {
-          nextTrack = makeInitialDistanceGuideTrackState();
-        }
-      } else {
-        if (bestTrackedDistanceGuideBox && prevTrack.box && isSimilarDistanceGuideBox(prevTrack.box, bestTrackedDistanceGuideBox)) {
-          nextTrack = {
-            status: "locked",
-            box: bestTrackedDistanceGuideBox,
-            stableCount: Math.min(prevTrack.stableCount + 1, 99),
-            lostCount: 0,
-            source: "tracked",
-          };
-          selectedDistanceGuideBox = bestTrackedDistanceGuideBox;
-          distanceGuideSource = "tracked";
-        } else if (
-          shouldRefreshFullSearch &&
-          bestDistanceGuideBox &&
-          prevTrack.box &&
-          isSimilarDistanceGuideBox(prevTrack.box, bestDistanceGuideBox)
-        ) {
-          nextTrack = {
-            status: "locked",
-            box: bestDistanceGuideBox,
-            stableCount: Math.min(prevTrack.stableCount + 1, 99),
-            lostCount: 0,
-            source: "full",
-          };
-          selectedDistanceGuideBox = bestDistanceGuideBox;
-          distanceGuideSource = "full";
-        } else {
-          const lostCount = prevTrack.lostCount + 1;
-          if (lostCount > DISTANCE_GUIDE_TRACK_MAX_LOST) {
-            if (bestDistanceGuideBox) {
-              nextTrack = {
-                status: "candidate",
-                box: bestDistanceGuideBox,
-                stableCount: 1,
-                lostCount: 0,
-                source: "full",
-              };
-              selectedDistanceGuideBox = bestDistanceGuideBox;
-              distanceGuideSource = "full";
-            } else {
-              nextTrack = makeInitialDistanceGuideTrackState();
-            }
-          } else {
-            nextTrack = {
-              ...prevTrack,
-              lostCount,
-            };
-            selectedDistanceGuideBox = prevTrack.box;
-            distanceGuideSource = prevTrack.source;
-          }
-        }
-      }
-
-      if (shouldRefreshFullSearch) {
-        lastDistanceGuideFullSearchAtRef.current = performance.now();
-      }
-      distanceGuideTrackRef.current = nextTrack;
-
-      const bestDistance = selectedDistanceGuideBox;
+      const bestDistance = bestDistanceGuideBox;
 
       const rawLabel = bestDistance ? bestDistance.rawHint : "none";
       const scoreText = best ? best.score.toFixed(3) : "--";
@@ -1067,13 +897,13 @@ export default function DebugCameraPage() {
         : "--";
 
       setLiveDistanceDebug(
-        `track:${nextTrack.status} stable:${nextTrack.stableCount} lost:${nextTrack.lostCount} src:${distanceGuideSource} score:${scoreText} p:${priorityText} gp:${guidePriorityText} c:${centerText} thr:${thresholdText} w:${widthPctText} h:${heightPctText} Δ:${deltaText} center:${guideCenterText} raw:${rawLabel}`
+        `score:${scoreText} p:${priorityText} gp:${guidePriorityText} c:${centerText} thr:${thresholdText} w:${widthPctText} h:${heightPctText} Δ:${deltaText} center:${guideCenterText} raw:${rawLabel}`
       );
 
-      const delta = bestDistance ? bestDistance.scaleDeltaPct : 0;
+      const delta = bestDistance ? bestDistance.scaleDeltaPct + liveDistanceScaleOffsetPct : 0;
 
       const nextHint =
-        nextTrack.status !== "locked" || !bestDistance || !bestDistance.inDistanceGuideCenterRoi
+        !bestDistance || !bestDistance.inDistanceGuideCenterRoi
           ? ""
           : delta >= DISTANCE_GUIDE_STEP3_PCT
           ? "もっと離れて下さい"
@@ -1133,7 +963,7 @@ export default function DebugCameraPage() {
     } finally {
       liveRunningRef.current = false;
     }
-  }, [isCapturing, isReady, liveGuideThresholdOffset, liveScaleOptions, liveRoiWidthRatio, liveRoiHeightRatio]);
+  }, [isCapturing, isReady, liveGuideThresholdOffset, liveDistanceScaleOffsetPct, liveScaleOptions, liveRoiWidthRatio, liveRoiHeightRatio]);
 
   useEffect(() => {
     if (liveTimerRef.current !== null) {
@@ -1490,6 +1320,7 @@ export default function DebugCameraPage() {
         hitLimit: 100,
         liveGuideThresholdOffset: DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET,
         liveGuideIntervalMs: DEFAULT_LIVE_GUIDE_INTERVAL_MS,
+        liveDistanceScaleOffsetPct: 7,
         liveScaleOptions: [...DEFAULT_LIVE_SCALE_OPTIONS],
         liveRoiWidthRatio: 0.5,
         liveRoiHeightRatio: 0.3,
@@ -1499,6 +1330,7 @@ export default function DebugCameraPage() {
         ...baseProfile,
         liveGuideThresholdOffset: clamp(Number(liveGuideThresholdOffset.toFixed(2)), -0.40, 0.40),
         liveGuideIntervalMs: clamp(Math.round(liveGuideIntervalMs), 100, 1000),
+        liveDistanceScaleOffsetPct: sanitizeLiveDistanceScaleOffsetPct(liveDistanceScaleOffsetPct),
         liveScaleOptions: sanitizeLiveScaleOptions(liveScaleOptions),
         liveRoiWidthRatio: sanitizeLiveRoiWidthRatio(liveRoiWidthRatio),
         liveRoiHeightRatio: sanitizeLiveRoiHeightRatio(liveRoiHeightRatio),
@@ -1530,6 +1362,7 @@ export default function DebugCameraPage() {
         if (typeof data.profile.version === "string" && data.profile.version.trim()) {
           setConfigVersion(data.profile.version.trim());
         }
+        setLiveDistanceScaleOffsetPct(sanitizeLiveDistanceScaleOffsetPct(data.profile.liveDistanceScaleOffsetPct));
         setLiveScaleOptions(sanitizeLiveScaleOptions(data.profile.liveScaleOptions));
         setLiveRoiWidthRatio(sanitizeLiveRoiWidthRatio(data.profile.liveRoiWidthRatio));
         setLiveRoiHeightRatio(sanitizeLiveRoiHeightRatio(data.profile.liveRoiHeightRatio));
@@ -1635,6 +1468,38 @@ export default function DebugCameraPage() {
       </div>
 
             <div className="space-y-2">
+        <div className="flex items-center justify-between text-sm">
+          <div>距離scale補正</div>
+          <div className="tabular-nums">{liveDistanceScaleOffsetPct >= 0 ? "+" : ""}{liveDistanceScaleOffsetPct}%</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setLiveDistanceScaleOffsetPct((prev) => Math.max(-20, prev - 1))}
+            className="w-10 h-10 rounded-xl border border-white/15 bg-white/5 text-lg"
+            aria-label="距離scale補正を下げる"
+          >
+            −
+          </button>
+          <input
+            type="range"
+            min={-20}
+            max={20}
+            step={1}
+            value={liveDistanceScaleOffsetPct}
+            onChange={(e) => setLiveDistanceScaleOffsetPct(sanitizeLiveDistanceScaleOffsetPct(Number(e.target.value)))}
+            className="flex-1"
+          />
+          <button
+            onClick={() => setLiveDistanceScaleOffsetPct((prev) => Math.min(20, prev + 1))}
+            className="w-10 h-10 rounded-xl border border-white/15 bg-white/5 text-lg"
+            aria-label="距離scale補正を上げる"
+          >
+            +
+          </button>
+        </div>
+      </div>
+
+      <div className="space-y-2">
         <div className="flex items-center justify-between text-sm">
           <div>距離検知ROI 横</div>
           <div className="tabular-nums">{Math.round(liveRoiWidthRatio * 100)}%</div>
@@ -1956,7 +1821,7 @@ export default function DebugCameraPage() {
       </div>
 
       <div
-        className={`absolute left-1/2 top-16 -translate-x-1/2 px-3 py-1.5 rounded-xl border border-white/10 bg-black/70 text-zinc-200 text-[11px] tabular-nums whitespace-nowrap transition-opacity duration-300 ${
+        className={`absolute left-1/2 top-16 -translate-x-1/2 px-3 py-1.5 rounded-xl border border-white/10 bg-black/70 text-zinc-200 text-[11px] tabular-nums whitespace-pre-line text-left max-w-[92vw] transition-opacity duration-300 ${
           liveDistanceDebug ? "opacity-100" : "opacity-0 pointer-events-none"
         }`}
       >
