@@ -22,6 +22,8 @@ type InspectionProfile = {
   liveScaleOptions: number[];
   liveRoiWidthRatio: number;
   liveRoiHeightRatio: number;
+  liveDistanceMedianWindow: number;
+  liveDistanceHintConfirmCount: number;
 };
 
 const BLOB_PATHNAME = "config/inspection-profile.json";
@@ -41,6 +43,8 @@ const DEFAULT_PROFILE: InspectionProfile = {
   liveScaleOptions: [...DEFAULT_LIVE_SCALE_OPTIONS],
   liveRoiWidthRatio: 0.5,
   liveRoiHeightRatio: 0.3,
+  liveDistanceMedianWindow: 5,
+  liveDistanceHintConfirmCount: 2,
 };
 
 function isFiniteNumber(value: unknown): value is number {
@@ -70,6 +74,16 @@ function sanitizeLiveRoiWidthRatio(value: unknown): number {
 function sanitizeLiveRoiHeightRatio(value: unknown): number {
   if (!isFiniteNumber(value)) return DEFAULT_PROFILE.liveRoiHeightRatio;
   return Math.min(0.4, Math.max(0.1, Number(value.toFixed(2))));
+}
+
+function sanitizeMedianWindow(value: unknown): number {
+  const n = typeof value === "number" && Number.isFinite(value) ? Math.round(value) : 5;
+  return [3, 5, 7, 9].includes(n) ? n : 5;
+}
+
+function sanitizeGuideConfirmCount(value: unknown): number {
+  const n = typeof value === "number" && Number.isFinite(value) ? Math.round(value) : 2;
+  return Math.min(3, Math.max(1, n));
 }
 
 function validateProfile(input: unknown): InspectionProfile {
@@ -126,6 +140,8 @@ function validateProfile(input: unknown): InspectionProfile {
   const liveScaleOptions = sanitizeLiveScaleOptions(data.liveScaleOptions);
   const liveRoiWidthRatio = sanitizeLiveRoiWidthRatio(data.liveRoiWidthRatio);
   const liveRoiHeightRatio = sanitizeLiveRoiHeightRatio(data.liveRoiHeightRatio);
+  const liveDistanceMedianWindow = sanitizeMedianWindow(data.liveDistanceMedianWindow);
+  const liveDistanceHintConfirmCount = sanitizeGuideConfirmCount(data.liveDistanceHintConfirmCount);
 
   return {
     profileName: data.profileName.trim(),
@@ -142,6 +158,8 @@ function validateProfile(input: unknown): InspectionProfile {
     liveScaleOptions,
     liveRoiWidthRatio,
     liveRoiHeightRatio,
+    liveDistanceMedianWindow,
+    liveDistanceHintConfirmCount,
   };
 }
 

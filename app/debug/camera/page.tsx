@@ -29,9 +29,12 @@ type InspectionProfile = {
   liveGuideThresholdOffset?: number;
   liveGuideIntervalMs?: number;
   liveDistanceScaleOffsetPct?: number;
+  liveDistanceMedianWindow?: number;
+  liveDistanceHintConfirmCount?: number;
   liveScaleOptions?: number[];
   liveRoiWidthRatio?: number;
   liveRoiHeightRatio?: number;
+  
 };
 
 const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
@@ -562,6 +565,8 @@ export default function DebugCameraPage() {
 
       setLiveDistanceScaleOffsetPct(sanitizeLiveDistanceScaleOffsetPct(sharedProfile?.liveDistanceScaleOffsetPct));
       setLiveScaleOptions(sanitizeLiveScaleOptions(sharedProfile?.liveScaleOptions));
+      setLiveDistanceMedianWindow(sanitizeMedianWindow(sharedProfile?.liveDistanceMedianWindow));
+      setLiveDistanceHintConfirmCount(sanitizeGuideConfirmCount(sharedProfile?.liveDistanceHintConfirmCount));
       setLiveRoiWidthRatio(sanitizeLiveRoiWidthRatio(sharedProfile?.liveRoiWidthRatio));
       setLiveRoiHeightRatio(sanitizeLiveRoiHeightRatio(sharedProfile?.liveRoiHeightRatio));
     } catch (error) {
@@ -1376,6 +1381,8 @@ export default function DebugCameraPage() {
         liveGuideThresholdOffset: clamp(Number(liveGuideThresholdOffset.toFixed(2)), -0.40, 0.40),
         liveGuideIntervalMs: clamp(Math.round(liveGuideIntervalMs), 100, 1000),
         liveDistanceScaleOffsetPct: sanitizeLiveDistanceScaleOffsetPct(liveDistanceScaleOffsetPct),
+        liveDistanceMedianWindow: sanitizeMedianWindow(liveDistanceMedianWindow),
+        liveDistanceHintConfirmCount: sanitizeGuideConfirmCount(liveDistanceHintConfirmCount),
         liveScaleOptions: sanitizeLiveScaleOptions(liveScaleOptions),
         liveRoiWidthRatio: sanitizeLiveRoiWidthRatio(liveRoiWidthRatio),
         liveRoiHeightRatio: sanitizeLiveRoiHeightRatio(liveRoiHeightRatio),
@@ -1408,6 +1415,8 @@ export default function DebugCameraPage() {
           setConfigVersion(data.profile.version.trim());
         }
         setLiveDistanceScaleOffsetPct(sanitizeLiveDistanceScaleOffsetPct(data.profile.liveDistanceScaleOffsetPct));
+        setLiveDistanceMedianWindow(sanitizeMedianWindow(data.profile.liveDistanceMedianWindow));
+        setLiveDistanceHintConfirmCount(sanitizeGuideConfirmCount(data.profile.liveDistanceHintConfirmCount));
         setLiveScaleOptions(sanitizeLiveScaleOptions(data.profile.liveScaleOptions));
         setLiveRoiWidthRatio(sanitizeLiveRoiWidthRatio(data.profile.liveRoiWidthRatio));
         setLiveRoiHeightRatio(sanitizeLiveRoiHeightRatio(data.profile.liveRoiHeightRatio));
