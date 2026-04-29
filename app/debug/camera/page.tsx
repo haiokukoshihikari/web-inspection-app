@@ -1544,6 +1544,52 @@ export default function DebugCameraPage() {
         </div>
       </div>
 
+            <div className="space-y-2">
+        <div className="flex items-center justify-between text-sm">
+          <div>中央値履歴数</div>
+          <div className="tabular-nums">{liveDistanceMedianWindow}</div>
+        </div>
+        <div className="flex items-center gap-2">
+          {[3, 5, 7, 9].map((option) => (
+            <button
+              key={`median-${option}`}
+              type="button"
+              onClick={() => setLiveDistanceMedianWindow(sanitizeMedianWindow(option))}
+              className={`px-3 py-2 rounded-xl border text-sm transition-colors ${
+                liveDistanceMedianWindow === option
+                  ? "border-cyan-400/40 bg-cyan-500/15 text-cyan-200"
+                  : "border-white/10 bg-white/5 text-zinc-300"
+              }`}
+            >
+              {option}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex items-center justify-between text-sm">
+          <div>案内切替回数</div>
+          <div className="tabular-nums">{liveDistanceHintConfirmCount}</div>
+        </div>
+        <div className="flex items-center gap-2">
+          {[1, 2, 3].map((option) => (
+            <button
+              key={`confirm-${option}`}
+              type="button"
+              onClick={() => setLiveDistanceHintConfirmCount(sanitizeGuideConfirmCount(option))}
+              className={`px-3 py-2 rounded-xl border text-sm transition-colors ${
+                liveDistanceHintConfirmCount === option
+                  ? "border-cyan-400/40 bg-cyan-500/15 text-cyan-200"
+                  : "border-white/10 bg-white/5 text-zinc-300"
+              }`}
+            >
+              {option}
+            </button>
+          ))}
+        </div>
+      </div>
+
       <div className="space-y-2">
         <div className="flex items-center justify-between text-sm">
           <div>距離検知ROI 横</div>
