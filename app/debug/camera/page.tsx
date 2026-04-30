@@ -1961,11 +1961,11 @@ export default function DebugCameraPage() {
       </div>
 
       <div
-        className={`absolute right-4 top-16 px-3 py-1.5 rounded-xl border border-white/10 bg-black/70 text-zinc-200 text-[11px] tabular-nums whitespace-pre-line text-left max-w-[52vw] transition-opacity duration-300 ${
+        className={`absolute right-2 top-2 px-2 py-1 rounded-lg border border-white/10 bg-black/75 text-zinc-200 text-[10px] leading-tight tabular-nums whitespace-pre-line text-left max-w-[38vw] transition-opacity duration-300 ${
           liveDistanceDebug ? "opacity-100" : "opacity-0 pointer-events-none"
         }`}
       >
-        {liveDistanceDebug || "score:-- thr:-- w:-- h:-- raw:none"}
+        {liveDistanceDebug || "score:--"}
       </div>
 
       {liveGuideOverlayMsg ? (
