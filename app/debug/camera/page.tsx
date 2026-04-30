@@ -177,7 +177,7 @@ function sanitizeLiveDistanceScaleOffsetPct(value: unknown): number {
 
 function sanitizeMedianWindow(value: unknown): number {
   const n = typeof value === "number" && Number.isFinite(value) ? Math.round(value) : 5;
-  return [3, 5, 7, 9].includes(n) ? n : 5;
+  return [9, 11, 13, 15].includes(n) ? n : 9;
 }
 
 function sanitizeGuideConfirmCount(value: unknown): number {
@@ -1599,7 +1599,7 @@ export default function DebugCameraPage() {
           <div className="tabular-nums">{liveDistanceMedianWindow}</div>
         </div>
         <div className="flex items-center gap-2">
-          {[3, 5, 7, 9].map((option) => (
+          {[9, 11, 13, 15].map((option) => (
             <button
               key={`median-${option}`}
               type="button"
