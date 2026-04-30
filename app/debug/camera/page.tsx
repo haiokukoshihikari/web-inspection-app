@@ -31,6 +31,8 @@ type InspectionProfile = {
   liveDistanceScaleOffsetPct?: number;
   liveDistanceMedianWindow?: number;
   liveDistanceHintConfirmCount?: number;
+  liveBlueBandTolerancePct?: number;
+  liveBlueBandCenterOffsetPct?: number;
   liveScaleOptions?: number[];
   liveRoiWidthRatio?: number;
   liveRoiHeightRatio?: number;
@@ -181,6 +183,16 @@ function sanitizeMedianWindow(value: unknown): number {
 function sanitizeGuideConfirmCount(value: unknown): number {
   const n = typeof value === "number" && Number.isFinite(value) ? Math.round(value) : 2;
   return Math.min(3, Math.max(1, n));
+}
+
+function sanitizeBlueBandTolerancePct(value: unknown): number {
+  const n = typeof value === "number" && Number.isFinite(value) ? Math.round(value) : 3;
+  return Math.min(8, Math.max(1, n));
+}
+
+function sanitizeBlueBandCenterOffsetPct(value: unknown): number {
+  const n = typeof value === "number" && Number.isFinite(value) ? Math.round(value) : 0;
+  return Math.min(10, Math.max(-10, n));
 }
 
 type CaptureDebugInfo = {
@@ -397,6 +409,8 @@ export default function DebugCameraPage() {
   const [liveDistanceScaleOffsetPct, setLiveDistanceScaleOffsetPct] = useState(7);
   const [liveDistanceMedianWindow, setLiveDistanceMedianWindow] = useState(5);
   const [liveDistanceHintConfirmCount, setLiveDistanceHintConfirmCount] = useState(2);
+  const [liveBlueBandTolerancePct, setLiveBlueBandTolerancePct] = useState(3);
+  const [liveBlueBandCenterOffsetPct, setLiveBlueBandCenterOffsetPct] = useState(0);
   const [liveScaleOptions, setLiveScaleOptions] = useState<number[]>([...DEFAULT_LIVE_SCALE_OPTIONS]);
   const [liveRoiWidthRatio, setLiveRoiWidthRatio] = useState(0.5);
   const [liveRoiHeightRatio, setLiveRoiHeightRatio] = useState(0.3);
@@ -567,6 +581,8 @@ export default function DebugCameraPage() {
       setLiveScaleOptions(sanitizeLiveScaleOptions(sharedProfile?.liveScaleOptions));
       setLiveDistanceMedianWindow(sanitizeMedianWindow(sharedProfile?.liveDistanceMedianWindow));
       setLiveDistanceHintConfirmCount(sanitizeGuideConfirmCount(sharedProfile?.liveDistanceHintConfirmCount));
+      setLiveBlueBandTolerancePct(sanitizeBlueBandTolerancePct(sharedProfile?.liveBlueBandTolerancePct));
+      setLiveBlueBandCenterOffsetPct(sanitizeBlueBandCenterOffsetPct(sharedProfile?.liveBlueBandCenterOffsetPct));
       setLiveRoiWidthRatio(sanitizeLiveRoiWidthRatio(sharedProfile?.liveRoiWidthRatio));
       setLiveRoiHeightRatio(sanitizeLiveRoiHeightRatio(sharedProfile?.liveRoiHeightRatio));
     } catch (error) {
@@ -958,10 +974,16 @@ export default function DebugCameraPage() {
         ? median(distanceGuideDeltaHistoryRef.current)
         : deltaRaw;
 
+      const blueDeltaRaw = best ? best.scaleDeltaPct + liveDistanceScaleOffsetPct : 0;
+      const blueDelta = blueDeltaRaw - liveBlueBandCenterOffsetPct;
+      const blueAccepted =
+        !!best && Math.abs(blueDelta) <= liveBlueBandTolerancePct;
+
       setLiveDistanceDebug(
         `score:${scoreText} p:${priorityText} gp:${guidePriorityText} c:${centerText} thr:${thresholdText}\n` +
         `w:${widthPctText} h:${heightPctText} Δraw:${deltaRaw >= 0 ? "+" : ""}${deltaRaw.toFixed(0)}% Δ:${delta >= 0 ? "+" : ""}${delta.toFixed(0)}% offset:${liveDistanceScaleOffsetPct >= 0 ? "+" : ""}${liveDistanceScaleOffsetPct}%\n` +
-        `center:${guideCenterText} raw:${rawLabel} med:${liveDistanceMedianWindow} confirm:${liveDistanceHintConfirmCount}`
+        `center:${guideCenterText} raw:${rawLabel}\n` +
+        `blueΔ:${blueDeltaRaw >= 0 ? "+" : ""}${blueDeltaRaw.toFixed(0)}% band:${liveBlueBandCenterOffsetPct >= 0 ? "+" : ""}${liveBlueBandCenterOffsetPct}%±${liveBlueBandTolerancePct}% ok:${blueAccepted ? "yes" : "no"}`
       );
 
       const nextHint =
@@ -1002,18 +1024,32 @@ export default function DebugCameraPage() {
       if (visibleHint) {
         setLiveBoxes([]);
         liveBoxesHoldUntilRef.current = 0;
-      } else if (nextResults.length > 0) {
+       } else if (nextResults.length > 0 && blueAccepted) {
         setLiveBoxes(nextResults);
         liveBoxesHoldUntilRef.current = now + Math.max(220, liveGuideIntervalMs * 1.2);
       } else if (now > liveBoxesHoldUntilRef.current) {
         setLiveBoxes([]);
       }
+
     } catch (error) {
       console.error('ライブ簡易検査エラー', error);
     } finally {
       liveRunningRef.current = false;
     }
-  }, [isCapturing, isReady, liveGuideThresholdOffset, liveDistanceScaleOffsetPct, liveScaleOptions, liveRoiWidthRatio, liveRoiHeightRatio]);
+  
+  }, [
+    isCapturing,
+    isReady,
+    liveGuideThresholdOffset,
+    liveDistanceScaleOffsetPct,
+    liveDistanceMedianWindow,
+    liveDistanceHintConfirmCount,
+    liveBlueBandTolerancePct,
+    liveBlueBandCenterOffsetPct,
+    liveScaleOptions,
+    liveRoiWidthRatio,
+    liveRoiHeightRatio,
+  ]);
 
   useEffect(() => {
     if (liveTimerRef.current !== null) {
@@ -1383,6 +1419,8 @@ export default function DebugCameraPage() {
         liveDistanceScaleOffsetPct: sanitizeLiveDistanceScaleOffsetPct(liveDistanceScaleOffsetPct),
         liveDistanceMedianWindow: sanitizeMedianWindow(liveDistanceMedianWindow),
         liveDistanceHintConfirmCount: sanitizeGuideConfirmCount(liveDistanceHintConfirmCount),
+        liveBlueBandTolerancePct: sanitizeBlueBandTolerancePct(liveBlueBandTolerancePct),
+        liveBlueBandCenterOffsetPct: sanitizeBlueBandCenterOffsetPct(liveBlueBandCenterOffsetPct),
         liveScaleOptions: sanitizeLiveScaleOptions(liveScaleOptions),
         liveRoiWidthRatio: sanitizeLiveRoiWidthRatio(liveRoiWidthRatio),
         liveRoiHeightRatio: sanitizeLiveRoiHeightRatio(liveRoiHeightRatio),
@@ -1417,6 +1455,8 @@ export default function DebugCameraPage() {
         setLiveDistanceScaleOffsetPct(sanitizeLiveDistanceScaleOffsetPct(data.profile.liveDistanceScaleOffsetPct));
         setLiveDistanceMedianWindow(sanitizeMedianWindow(data.profile.liveDistanceMedianWindow));
         setLiveDistanceHintConfirmCount(sanitizeGuideConfirmCount(data.profile.liveDistanceHintConfirmCount));
+        setLiveBlueBandTolerancePct(sanitizeBlueBandTolerancePct(data.profile.liveBlueBandTolerancePct));
+        setLiveBlueBandCenterOffsetPct(sanitizeBlueBandCenterOffsetPct(data.profile.liveBlueBandCenterOffsetPct));
         setLiveScaleOptions(sanitizeLiveScaleOptions(data.profile.liveScaleOptions));
         setLiveRoiWidthRatio(sanitizeLiveRoiWidthRatio(data.profile.liveRoiWidthRatio));
         setLiveRoiHeightRatio(sanitizeLiveRoiHeightRatio(data.profile.liveRoiHeightRatio));
