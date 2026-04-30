@@ -1953,7 +1953,7 @@ export default function DebugCameraPage() {
       ) : null}
 
       <div
-        className={`absolute left-1/2 top-6 -translate-x-1/2 px-4 py-2 rounded-xl border border-amber-300/30 bg-black/70 text-amber-200 text-sm transition-opacity duration-300 ${
+        className={`absolute right-2 top-2 px-3 py-1.5 rounded-xl border border-white/10 bg-black/70 text-zinc-200 text-[11px] tabular-nums whitespace-pre-line text-left max-w-[46vw] transition-opacity duration-300 ${
           liveDistanceGuide ? "opacity-100" : "opacity-0 pointer-events-none"
         }`}
       >
