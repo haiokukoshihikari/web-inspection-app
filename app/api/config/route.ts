@@ -19,6 +19,7 @@ type InspectionProfile = {
   hitLimit: number;
   liveGuideThresholdOffset: number;
   liveGuideIntervalMs: number;
+  liveDistanceScaleOffsetPct: number;
   liveScaleOptions: number[];
   liveRoiWidthRatio: number;
   liveRoiHeightRatio: number;
@@ -40,6 +41,7 @@ const DEFAULT_PROFILE: InspectionProfile = {
   hitLimit: 100,
   liveGuideThresholdOffset: 0.12,
   liveGuideIntervalMs: 1500,
+  liveDistanceScaleOffsetPct: 7,
   liveScaleOptions: [...DEFAULT_LIVE_SCALE_OPTIONS],
   liveRoiWidthRatio: 0.5,
   liveRoiHeightRatio: 0.3,
@@ -76,13 +78,18 @@ function sanitizeLiveRoiHeightRatio(value: unknown): number {
   return Math.min(0.4, Math.max(0.1, Number(value.toFixed(2))));
 }
 
+function sanitizeLiveDistanceScaleOffsetPct(value: unknown): number {
+  if (!isFiniteNumber(value)) return DEFAULT_PROFILE.liveDistanceScaleOffsetPct;
+  return Math.min(20, Math.max(-20, Math.round(value)));
+}
+
 function sanitizeMedianWindow(value: unknown): number {
-  const n = typeof value === "number" && Number.isFinite(value) ? Math.round(value) : 5;
-  return [3, 5, 7, 9].includes(n) ? n : 5;
+  const n = isFiniteNumber(value) ? Math.round(value) : DEFAULT_PROFILE.liveDistanceMedianWindow;
+  return [3, 5, 7, 9, 11, 13, 15].includes(n) ? n : DEFAULT_PROFILE.liveDistanceMedianWindow;
 }
 
 function sanitizeGuideConfirmCount(value: unknown): number {
-  const n = typeof value === "number" && Number.isFinite(value) ? Math.round(value) : 2;
+  const n = isFiniteNumber(value) ? Math.round(value) : DEFAULT_PROFILE.liveDistanceHintConfirmCount;
   return Math.min(3, Math.max(1, n));
 }
 
@@ -137,6 +144,7 @@ function validateProfile(input: unknown): InspectionProfile {
     ? data.liveGuideIntervalMs
     : DEFAULT_PROFILE.liveGuideIntervalMs;
 
+  const liveDistanceScaleOffsetPct = sanitizeLiveDistanceScaleOffsetPct(data.liveDistanceScaleOffsetPct);
   const liveScaleOptions = sanitizeLiveScaleOptions(data.liveScaleOptions);
   const liveRoiWidthRatio = sanitizeLiveRoiWidthRatio(data.liveRoiWidthRatio);
   const liveRoiHeightRatio = sanitizeLiveRoiHeightRatio(data.liveRoiHeightRatio);
@@ -155,6 +163,7 @@ function validateProfile(input: unknown): InspectionProfile {
     hitLimit: data.hitLimit,
     liveGuideThresholdOffset,
     liveGuideIntervalMs,
+    liveDistanceScaleOffsetPct,
     liveScaleOptions,
     liveRoiWidthRatio,
     liveRoiHeightRatio,
