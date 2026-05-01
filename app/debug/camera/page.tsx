@@ -979,17 +979,18 @@ export default function DebugCameraPage() {
       const blueAccepted =
         !!best && Math.abs(blueDelta) <= liveBlueBandTolerancePct;
 
-      setLiveDistanceDebug(
-        `score:${scoreText} p:${priorityText} gp:${guidePriorityText} c:${centerText} thr:${thresholdText}\n` +
-        `w:${widthPctText} h:${heightPctText} Δraw:${deltaRaw >= 0 ? "+" : ""}${deltaRaw.toFixed(0)}% Δ:${delta >= 0 ? "+" : ""}${delta.toFixed(0)}% offset:${liveDistanceScaleOffsetPct >= 0 ? "+" : ""}${liveDistanceScaleOffsetPct}%\n` +
-        `center:${guideCenterText} raw:${rawLabel}\n` +
-        `blueΔ:${blueDeltaRaw >= 0 ? "+" : ""}${blueDeltaRaw.toFixed(0)}% band:${liveBlueBandCenterOffsetPct >= 0 ? "+" : ""}${liveBlueBandCenterOffsetPct}%±${liveBlueBandTolerancePct}% ok:${blueAccepted ? "yes" : "no"}`
-      );
-
-      const nextHint =
+       const nextHint =
         !bestDistance || !bestDistance.inDistanceGuideCenterRoi
           ? ""
           : nextDistanceGuideHintWithHysteresis(distanceGuideCurrentHintRef.current, delta);
+          
+      setLiveDistanceDebug(
+        `hint:${nextHint || "-"} blue:${blueAccepted ? "yes" : "no"}\n` +
+        `Δ:${delta >= 0 ? "+" : ""}${delta.toFixed(0)}% offset:${liveDistanceScaleOffsetPct >= 0 ? "+" : ""}${liveDistanceScaleOffsetPct}%\n` +
+        `blueΔ:${blueDeltaRaw >= 0 ? "+" : ""}${blueDeltaRaw.toFixed(0)}%`
+      );
+
+     
 
       const streak = nextDistanceGuideState(distanceGuideStreakRef.current, nextHint);
       distanceGuideStreakRef.current = streak;
