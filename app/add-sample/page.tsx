@@ -15,7 +15,7 @@ const MAX_BOX_W = 0.8;
 const MIN_BOX_H = 0.06;
 const MAX_BOX_H = 0.6;
 const MAX_IMAGE_SCALE = 2.5;
-const CAMERA_BASE_LONG_SIDE = 640;
+const CAMERA_BASE_LONG_SIDE = 960;
 
 type CompareResolutionMode = 1200 | 1600 | 2000 | 2400;
 
