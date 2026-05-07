@@ -99,6 +99,66 @@ type Rect = {
   height: number;
 };
 
+type CameraDebugSnapshot = {
+  collectedAt: string;
+  trackLabel: string;
+  settings: Record<string, unknown>;
+  capabilities: Record<string, unknown>;
+  constraints: Record<string, unknown>;
+  photoCapabilities: Record<string, unknown> | null;
+  photoSettings: Record<string, unknown> | null;
+  error?: string;
+};
+
+function formatCameraDebugValue(value: unknown): string {
+  if (typeof value === "number") {
+    return Number.isInteger(value) ? String(value) : value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+  }
+  if (typeof value === "string" && value.trim()) return value;
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  return "-";
+}
+
+function toPlainRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object") return {};
+  try {
+    return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+  } catch {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>));
+  }
+}
+
+function createCameraDebugSummary(snapshot: CameraDebugSnapshot | null): string {
+  if (!snapshot) {
+    return "focus:-\nmode:-\nzoom:-\nsize:-";
+  }
+
+  const settings = snapshot.settings || {};
+  const capabilities = snapshot.capabilities || {};
+  const photoSettings = snapshot.photoSettings || {};
+  const photoCapabilities = snapshot.photoCapabilities || {};
+  const focusDistance =
+    settings.focusDistance ??
+    photoSettings.focusDistance ??
+    capabilities.focusDistance ??
+    photoCapabilities.focusDistance;
+  const focusMode =
+    settings.focusMode ??
+    photoSettings.focusMode ??
+    capabilities.focusMode ??
+    photoCapabilities.focusMode;
+  const zoom = settings.zoom ?? photoSettings.zoom ?? capabilities.zoom ?? photoCapabilities.zoom;
+  const width = settings.width ?? photoSettings.imageWidth ?? photoCapabilities.imageWidth;
+  const height = settings.height ?? photoSettings.imageHeight ?? photoCapabilities.imageHeight;
+
+  return [
+    `focus:${formatCameraDebugValue(focusDistance)}`,
+    `mode:${formatCameraDebugValue(focusMode)}`,
+    `zoom:${formatCameraDebugValue(zoom)}`,
+    `size:${formatCameraDebugValue(width)}x${formatCameraDebugValue(height)}`,
+  ].join("\n");
+}
+
 function calcContainRect(
   containerWidth: number,
   containerHeight: number,
@@ -423,6 +483,10 @@ export default function DebugCameraPage() {
   const [firstSamplePreviewUrl, setFirstSamplePreviewUrl] = useState("");
   const [cameraTemplateInfo, setCameraTemplateInfo] = useState<{ width: number; height: number } | null>(null);
   const [videoDisplayRect, setVideoDisplayRect] = useState<Rect>({ left: 0, top: 0, width: 0, height: 0 });
+  const [cameraDebugSnapshot, setCameraDebugSnapshot] = useState<CameraDebugSnapshot | null>(null);
+  const [cameraDebugSummary, setCameraDebugSummary] = useState("focus:-\nmode:-\nzoom:-\nsize:-");
+  const [cameraDebugOpen, setCameraDebugOpen] = useState(false);
+  const [cameraDebugCopiedMsg, setCameraDebugCopiedMsg] = useState("");
   const liveTemplateRef = useRef<{
     sample: SampleItem;
     variants: Array<{
@@ -467,6 +531,102 @@ export default function DebugCameraPage() {
   const resetSaveState = useCallback(() => {
     setSaveStep("idle");
   }, []);
+
+  const collectCameraDebugInfo = useCallback(async () => {
+    const stream = streamRef.current;
+    const track = stream?.getVideoTracks?.()[0];
+
+    if (!track) {
+      const empty: CameraDebugSnapshot = {
+        collectedAt: new Date().toISOString(),
+        trackLabel: "no video track",
+        settings: {},
+        capabilities: {},
+        constraints: {},
+        photoCapabilities: null,
+        photoSettings: null,
+        error: "video track がありません",
+      };
+      setCameraDebugSnapshot(empty);
+      setCameraDebugSummary(createCameraDebugSummary(empty));
+      return empty;
+    }
+
+    let photoCapabilities: Record<string, unknown> | null = null;
+    let photoSettings: Record<string, unknown> | null = null;
+    let error = "";
+
+    try {
+      const ImageCaptureCtor = (window as unknown as { ImageCapture?: new (track: MediaStreamTrack) => {
+        getPhotoCapabilities?: () => Promise<unknown>;
+        getPhotoSettings?: () => Promise<unknown>;
+      } }).ImageCapture;
+
+      if (ImageCaptureCtor) {
+        const imageCapture = new ImageCaptureCtor(track);
+        if (typeof imageCapture.getPhotoCapabilities === "function") {
+          try {
+            photoCapabilities = toPlainRecord(await imageCapture.getPhotoCapabilities());
+          } catch (photoError) {
+            error += `getPhotoCapabilities: ${photoError instanceof Error ? photoError.message : String(photoError)}; `;
+          }
+        }
+        if (typeof imageCapture.getPhotoSettings === "function") {
+          try {
+            photoSettings = toPlainRecord(await imageCapture.getPhotoSettings());
+          } catch (photoError) {
+            error += `getPhotoSettings: ${photoError instanceof Error ? photoError.message : String(photoError)}; `;
+          }
+        }
+      } else {
+        error += "ImageCapture unsupported; ";
+      }
+    } catch (imageCaptureError) {
+      error += `ImageCapture: ${imageCaptureError instanceof Error ? imageCaptureError.message : String(imageCaptureError)}; `;
+    }
+
+    const snapshot: CameraDebugSnapshot = {
+      collectedAt: new Date().toISOString(),
+      trackLabel: track.label || "unknown",
+      settings: typeof track.getSettings === "function" ? toPlainRecord(track.getSettings()) : {},
+      capabilities: typeof track.getCapabilities === "function" ? toPlainRecord(track.getCapabilities()) : {},
+      constraints: typeof track.getConstraints === "function" ? toPlainRecord(track.getConstraints()) : {},
+      photoCapabilities,
+      photoSettings,
+      ...(error.trim() ? { error: error.trim() } : {}),
+    };
+
+    setCameraDebugSnapshot(snapshot);
+    setCameraDebugSummary(createCameraDebugSummary(snapshot));
+    return snapshot;
+  }, []);
+
+  const copyCameraDebugInfo = useCallback(async () => {
+    const snapshot = cameraDebugSnapshot ?? await collectCameraDebugInfo();
+    const text = JSON.stringify(snapshot, null, 2);
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.style.position = "fixed";
+        textarea.style.left = "-9999px";
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+      setCameraDebugCopiedMsg("コピーしました");
+      window.setTimeout(() => setCameraDebugCopiedMsg(""), 1600);
+    } catch (error) {
+      console.error("カメラ情報のコピーに失敗しました", error);
+      setCameraDebugCopiedMsg("コピー失敗");
+      window.setTimeout(() => setCameraDebugCopiedMsg(""), 2000);
+    }
+  }, [cameraDebugSnapshot, collectCameraDebugInfo]);
 
   const stopCamera = useCallback(() => {
     try {
@@ -560,6 +720,27 @@ export default function DebugCameraPage() {
       stopCamera();
     };
   }, [startCamera, stopCamera]);
+
+  useEffect(() => {
+    if (!isReady) return;
+
+    let cancelled = false;
+
+    const refresh = async () => {
+      if (cancelled) return;
+      await collectCameraDebugInfo();
+    };
+
+    void refresh();
+    const timer = window.setInterval(() => {
+      void refresh();
+    }, 1500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [isReady, collectCameraDebugInfo]);
 
   useEffect(() => {
     try {
@@ -1480,6 +1661,56 @@ export default function DebugCameraPage() {
     }
   };
 
+  const CameraDebugPanel = (
+    <div className="rounded-2xl border border-white/10 bg-zinc-950/95 px-4 py-3 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium">カメラ情報</div>
+          <div className="mt-1 text-xs text-zinc-400">距離補助に使えそうな値の確認用</div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setCameraDebugOpen((prev) => !prev)}
+          className="rounded-xl border border-white/15 bg-white/5 px-3 py-1.5 text-sm text-zinc-200"
+        >
+          {cameraDebugOpen ? "閉じる" : "詳細"}
+        </button>
+      </div>
+
+      <div className="rounded-xl border border-white/10 bg-black/30 p-3 text-xs text-zinc-200 leading-relaxed tabular-nums whitespace-pre-line">
+        {cameraDebugSummary}
+      </div>
+
+      {cameraDebugOpen ? (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void collectCameraDebugInfo()}
+              className="rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-sm text-zinc-200"
+            >
+              再取得
+            </button>
+            <button
+              type="button"
+              onClick={() => void copyCameraDebugInfo()}
+              className="rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-3 py-2 text-sm text-cyan-200"
+            >
+              コピー
+            </button>
+            {cameraDebugCopiedMsg ? (
+              <span className="text-xs text-cyan-300">{cameraDebugCopiedMsg}</span>
+            ) : null}
+          </div>
+
+          <pre className="max-h-64 overflow-auto rounded-xl border border-white/10 bg-black/40 p-3 text-[10px] leading-relaxed text-zinc-300 whitespace-pre-wrap break-words">
+            {cameraDebugSnapshot ? JSON.stringify(cameraDebugSnapshot, null, 2) : "未取得"}
+          </pre>
+        </div>
+      ) : null}
+    </div>
+  );
+
   const DebugGuideControls = (
     <div className="rounded-2xl border border-white/10 bg-zinc-950/95 px-4 py-3 space-y-3">
       <div className="flex items-center justify-between">
@@ -1967,6 +2198,10 @@ export default function DebugCameraPage() {
         {liveDistanceDebug || "score:--"}
       </div>
 
+      <div className="absolute left-2 top-2 px-2 py-1 rounded-lg border border-cyan-400/20 bg-black/75 text-cyan-100 text-[10px] leading-tight tabular-nums whitespace-pre-line text-left max-w-[34vw]">
+        {cameraDebugSummary}
+      </div>
+
       {liveGuideOverlayMsg ? (
         <div className={`absolute right-4 top-6 px-4 py-2 rounded-xl border text-sm ${
           liveGuideOverlayMsg.includes("失敗") || liveGuideOverlayMsg.includes("タイムアウト")
@@ -2004,7 +2239,8 @@ export default function DebugCameraPage() {
               {BackButton}
               {SettingsButton}
             </div>
-            <div className="flex-1 min-h-0 overflow-auto">
+            <div className="flex-1 min-h-0 overflow-auto space-y-3">
+              {CameraDebugPanel}
               {DebugGuideControls}
             </div>
             <div className="flex items-center justify-between gap-3">
@@ -2023,7 +2259,8 @@ export default function DebugCameraPage() {
             {PreviewArea}
           </div>
 
-          <div className="shrink-0 bg-black px-4 pt-2 pb-3 max-h-[34vh] overflow-auto">
+          <div className="shrink-0 bg-black px-4 pt-2 pb-3 max-h-[34vh] overflow-auto space-y-3">
+            {CameraDebugPanel}
             {DebugGuideControls}
           </div>
 
