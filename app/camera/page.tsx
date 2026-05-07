@@ -1992,20 +1992,24 @@ export default function CameraPage() {
 
       {isLandscape ? (
         <div className="flex-1 min-h-0 flex bg-black overflow-hidden">
-          <div className="w-72 shrink-0 p-3 flex flex-col gap-3 bg-black">
-            <div className="flex items-start justify-between">
-              {BackButton}
-              {SettingsButton}
-            </div>
-            <div className="flex-1 min-h-0" />
-            <div className="flex items-center justify-between gap-3">
+          <div className="w-20 shrink-0 relative">
+            <div className="absolute left-1/2 bottom-4 -translate-x-1/2">
               {PhotoButton}
-              {ShutterButton}
             </div>
           </div>
 
           <div className="flex-1 min-w-0 min-h-0 overflow-hidden">
             {PreviewArea}
+          </div>
+
+          <div className="w-24 shrink-0 relative">
+            <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+              {ShutterButton}
+            </div>
+
+            <div className="absolute left-1/2 bottom-4 -translate-x-1/2">
+              {SettingsButton}
+            </div>
           </div>
         </div>
       ) : (
