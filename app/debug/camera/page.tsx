@@ -2108,35 +2108,48 @@ export default function DebugCameraPage() {
       />
 
       <div className="absolute inset-0 pointer-events-none">
-        <div
-          className="absolute border border-white/70 rounded-md"
-          style={{
-            width: videoDisplayRect.width * 0.75,
-            height: videoDisplayRect.height * 0.75,
-            left: videoDisplayRect.left + videoDisplayRect.width * 0.125,
-            top: videoDisplayRect.top + videoDisplayRect.height * 0.125,
-          }}
-        />
-        <div
-          className="absolute bg-white/45"
-          style={{
-            width: "1px",
-            height: videoDisplayRect.height * 0.75,
-            left: videoDisplayRect.left + videoDisplayRect.width * 0.5,
-            top: videoDisplayRect.top + videoDisplayRect.height * 0.125,
-            transform: "translateX(-0.5px)",
-          }}
-        />
-        <div
-          className="absolute bg-white/45"
-          style={{
-            height: "1px",
-            width: videoDisplayRect.width * 0.75,
-            left: videoDisplayRect.left + videoDisplayRect.width * 0.125,
-            top: videoDisplayRect.top + videoDisplayRect.height * 0.5,
-            transform: "translateY(-0.5px)",
-          }}
-        />
+        {videoDisplayRect.width > 0 && videoDisplayRect.height > 0 ? (() => {
+          const roiRatioW = Math.max(0.05, Math.min(1, liveRoiWidthRatio));
+          const roiRatioH = Math.max(0.05, Math.min(1, liveRoiHeightRatio));
+          const roiLeft = videoDisplayRect.left + videoDisplayRect.width * (1 - roiRatioW) / 2;
+          const roiTop = videoDisplayRect.top + videoDisplayRect.height * (1 - roiRatioH) / 2;
+          const roiWidth = videoDisplayRect.width * roiRatioW;
+          const roiHeight = videoDisplayRect.height * roiRatioH;
+
+          return (
+            <>
+              <div
+                className="absolute border-2 border-white/75 rounded-md"
+                style={{
+                  width: roiWidth,
+                  height: roiHeight,
+                  left: roiLeft,
+                  top: roiTop,
+                }}
+              />
+              <div
+                className="absolute bg-white/45"
+                style={{
+                  width: "1px",
+                  height: roiHeight,
+                  left: roiLeft + roiWidth / 2,
+                  top: roiTop,
+                  transform: "translateX(-0.5px)",
+                }}
+              />
+              <div
+                className="absolute bg-white/45"
+                style={{
+                  height: "1px",
+                  width: roiWidth,
+                  left: roiLeft,
+                  top: roiTop + roiHeight / 2,
+                  transform: "translateY(-0.5px)",
+                }}
+              />
+            </>
+          );
+        })() : null}
 
 
         {liveBoxes.map((box, index) => (
