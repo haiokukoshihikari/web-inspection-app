@@ -6,11 +6,12 @@ import { useRouter } from "next/navigation";
 const SAMPLES_KEY = "inspection:samples";
 const RESOLUTION_KEY = "inspection:compareResolution";
 const PENDING_SELECTED_SAMPLE_ID_KEY = "inspection:pendingSelectedSampleId";
+const CAPTURED_LIVE_FRAME_KEY = "capturedLiveFrameAtCapture";
 
 const CAMERA_BASE_LONG_SIDE = 960;
 
 const MAX_SAMPLES = 6;
-const PAGE_VERSION = "add-sample-stable-06";
+const PAGE_VERSION = "add-sample-live-preview-01";
 
 const MIN_BOX_W = 0.08;
 const MAX_BOX_W = 0.8;
@@ -57,6 +58,80 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
+type CropPreview = {
+  url: string;
+  width: number;
+  height: number;
+};
+
+async function createCropPreview(
+  imageSrc: string,
+  cropRatio: { x: number; y: number; width: number; height: number },
+  maxPreviewSide = 360
+): Promise<CropPreview | null> {
+  if (!imageSrc) return null;
+  const img = await loadImage(imageSrc);
+  const naturalWidth = img.naturalWidth;
+  const naturalHeight = img.naturalHeight;
+  if (!naturalWidth || !naturalHeight || cropRatio.width <= 0 || cropRatio.height <= 0) return null;
+
+  const srcX = clamp(Math.round(cropRatio.x * naturalWidth), 0, Math.max(0, naturalWidth - 1));
+  const srcY = clamp(Math.round(cropRatio.y * naturalHeight), 0, Math.max(0, naturalHeight - 1));
+  const srcW = clamp(Math.round(cropRatio.width * naturalWidth), 1, naturalWidth - srcX);
+  const srcH = clamp(Math.round(cropRatio.height * naturalHeight), 1, naturalHeight - srcY);
+
+  const scale = Math.min(1, maxPreviewSide / Math.max(srcW, srcH));
+  const outW = Math.max(1, Math.round(srcW * scale));
+  const outH = Math.max(1, Math.round(srcH * scale));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = outW;
+  canvas.height = outH;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+
+  ctx.drawImage(img, srcX, srcY, srcW, srcH, 0, 0, outW, outH);
+  return { url: canvas.toDataURL("image/png"), width: srcW, height: srcH };
+}
+
+function CropPreviewCard({
+  title,
+  subtitle,
+  preview,
+  emptyText,
+}: {
+  title: string;
+  subtitle: string;
+  preview: CropPreview | null;
+  emptyText: string;
+}) {
+  return (
+    <div className="min-w-0 flex-1 rounded-2xl border border-zinc-800 bg-zinc-950/80 p-3">
+      <div className="flex items-baseline justify-between gap-2">
+        <div className="text-sm font-medium text-zinc-100">{title}</div>
+        {preview ? (
+          <div className="text-[10px] text-zinc-500 tabular-nums">
+            {preview.width}×{preview.height}
+          </div>
+        ) : null}
+      </div>
+      <div className="mt-0.5 text-[11px] text-zinc-500">{subtitle}</div>
+      <div className="mt-2 aspect-square rounded-xl border border-white/10 bg-black/70 overflow-hidden flex items-center justify-center">
+        {preview ? (
+          <div className="relative max-w-full max-h-full">
+            <img src={preview.url} alt={title} className="max-w-full max-h-full object-contain block select-none" draggable={false} />
+            <div className="absolute inset-0 border border-white/70 pointer-events-none" />
+            <div className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-white/70 pointer-events-none" />
+            <div className="absolute left-0 top-1/2 h-px w-full -translate-y-1/2 bg-white/70 pointer-events-none" />
+          </div>
+        ) : (
+          <div className="px-3 text-center text-xs text-zinc-500">{emptyText}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function AddSamplePage() {
   const router = useRouter();
   const frameRef = useRef<HTMLDivElement | null>(null);
@@ -84,6 +159,9 @@ export default function AddSamplePage() {
   });
 
   const [capturedImage, setCapturedImage] = useState("");
+  const [capturedLiveFrame, setCapturedLiveFrame] = useState("");
+  const [reviewPreview, setReviewPreview] = useState<CropPreview | null>(null);
+  const [livePreview, setLivePreview] = useState<CropPreview | null>(null);
   const [compareResolution, setCompareResolution] =
     useState<CompareResolutionMode>(1200);
 
@@ -108,6 +186,11 @@ export default function AddSamplePage() {
       const stored = sessionStorage.getItem("capturedImage");
       if (stored && stored.startsWith("data:image/")) {
         setCapturedImage(stored);
+      }
+
+      const liveStored = sessionStorage.getItem(CAPTURED_LIVE_FRAME_KEY);
+      if (liveStored && liveStored.startsWith("data:image/")) {
+        setCapturedLiveFrame(liveStored);
       }
 
       const savedRes = localStorage.getItem(RESOLUTION_KEY);
@@ -220,41 +303,81 @@ export default function AddSamplePage() {
     imagePanY,
   ]);
 
+  const cropRatio = useMemo(() => {
+    if (!compareBasis.width || !compareBasis.height || !cropRectImage.width || !cropRectImage.height) {
+      return { x: 0, y: 0, width: 0, height: 0 };
+    }
+
+    return {
+      x: cropRectImage.x / compareBasis.width,
+      y: cropRectImage.y / compareBasis.height,
+      width: cropRectImage.width / compareBasis.width,
+      height: cropRectImage.height / compareBasis.height,
+    };
+  }, [cropRectImage, compareBasis.width, compareBasis.height]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const updatePreviews = async () => {
+      if (!capturedImage || !cropRatio.width || !cropRatio.height) {
+        setReviewPreview(null);
+        setLivePreview(null);
+        return;
+      }
+
+      try {
+        const [review, live] = await Promise.all([
+          createCropPreview(capturedImage, cropRatio),
+          capturedLiveFrame ? createCropPreview(capturedLiveFrame, cropRatio) : Promise.resolve(null),
+        ]);
+        if (cancelled) return;
+        setReviewPreview(review);
+        setLivePreview(live);
+      } catch (error) {
+        console.error("見本確認プレビューの作成に失敗しました", error);
+        if (!cancelled) {
+          setReviewPreview(null);
+          setLivePreview(null);
+        }
+      }
+    };
+
+    void updatePreviews();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [capturedImage, capturedLiveFrame, cropRatio]);
+
   const getDistance = (
     a: { x: number; y: number },
     b: { x: number; y: number }
   ) => Math.hypot(a.x - b.x, a.y - b.y);
 
   // 枠は固定なので、画像が枠から外れない範囲でだけ移動・拡大できる
+  // 縦向き・横向きとも同じ計算にするため、固定枠の端が画像外へ出ない pan 範囲を直接求める
   const clampPan = (
     nextPanX: number,
     nextPanY: number,
     nextScale = imageScale
   ) => {
+    if (!baseRect.width || !baseRect.height || !displayBox.width || !displayBox.height) {
+      return { x: nextPanX, y: nextPanY };
+    }
+
     const scaledWidth = baseRect.width * nextScale;
     const scaledHeight = baseRect.height * nextScale;
 
-    let correctedPanX = nextPanX;
-    let correctedPanY = nextPanY;
+    const minPanX = displayBox.left + displayBox.width - baseRect.left - (scaledWidth + baseRect.width) / 2;
+    const maxPanX = displayBox.left - baseRect.left + (scaledWidth - baseRect.width) / 2;
+    const minPanY = displayBox.top + displayBox.height - baseRect.top - (scaledHeight + baseRect.height) / 2;
+    const maxPanY = displayBox.top - baseRect.top + (scaledHeight - baseRect.height) / 2;
 
-    const imageLeft =
-      baseRect.left + correctedPanX - (scaledWidth - baseRect.width) / 2;
-    const imageTop =
-      baseRect.top + correctedPanY - (scaledHeight - baseRect.height) / 2;
-    const imageRight = imageLeft + scaledWidth;
-    const imageBottom = imageTop + scaledHeight;
-
-    const boxLeft = displayBox.left;
-    const boxTop = displayBox.top;
-    const boxRight = displayBox.left + displayBox.width;
-    const boxBottom = displayBox.top + displayBox.height;
-
-    if (imageLeft > boxLeft) correctedPanX -= imageLeft - boxLeft;
-    if (imageRight < boxRight) correctedPanX += boxRight - imageRight;
-    if (imageTop > boxTop) correctedPanY -= imageTop - boxTop;
-    if (imageBottom < boxBottom) correctedPanY += boxBottom - imageBottom;
-
-    return { x: correctedPanX, y: correctedPanY };
+    return {
+      x: clamp(nextPanX, Math.min(minPanX, maxPanX), Math.max(minPanX, maxPanX)),
+      y: clamp(nextPanY, Math.min(minPanY, maxPanY), Math.max(minPanY, maxPanY)),
+    };
   };
 
   const onFramePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -325,7 +448,7 @@ export default function AddSamplePage() {
       const nextScale = clamp(rawScale, 1, MAX_IMAGE_SCALE);
       setImageScale(nextScale);
 
-      const next = clampPan(imagePanX, imagePanY, nextScale);
+      const next = clampPan(dragRef.current.startPanX, dragRef.current.startPanY, nextScale);
       setImagePanX(next.x);
       setImagePanY(next.y);
     }
@@ -362,6 +485,7 @@ export default function AddSamplePage() {
     if (!frameRef.current || !imgRef.current) return;
 
     const sourceImg = await loadImage(capturedImage);
+    const liveSourceImg = capturedLiveFrame ? await loadImage(capturedLiveFrame) : null;
     const naturalWidth = sourceImg.naturalWidth;
     const naturalHeight = sourceImg.naturalHeight;
     if (!naturalWidth || !naturalHeight) return;
@@ -378,16 +502,6 @@ export default function AddSamplePage() {
 
     compareCtx.drawImage(sourceImg, 0, 0, compareWidth, compareHeight);
 
-    const cameraBaseScale = Math.min(1, CAMERA_BASE_LONG_SIDE / Math.max(naturalWidth, naturalHeight));
-    const cameraBaseWidth = Math.max(1, Math.round(naturalWidth * cameraBaseScale));
-    const cameraBaseHeight = Math.max(1, Math.round(naturalHeight * cameraBaseScale));
-
-    const cameraBaseCanvas = document.createElement("canvas");
-    cameraBaseCanvas.width = cameraBaseWidth;
-    cameraBaseCanvas.height = cameraBaseHeight;
-    const cameraBaseCtx = cameraBaseCanvas.getContext("2d");
-    if (!cameraBaseCtx) return;
-    cameraBaseCtx.drawImage(sourceImg, 0, 0, cameraBaseWidth, cameraBaseHeight);
 
     // 実際に表示されている画像位置から逆算する（app/add-sample と同方式）
     const frameRect = frameRef.current.getBoundingClientRect();
@@ -409,10 +523,6 @@ export default function AddSamplePage() {
     srcW = clamp(srcW, 1, compareWidth - srcX);
     srcH = clamp(srcH, 1, compareHeight - srcY);
 
-    const cameraSrcX = clamp(Math.round((srcX / compareWidth) * cameraBaseWidth), 0, cameraBaseWidth - 1);
-    const cameraSrcY = clamp(Math.round((srcY / compareHeight) * cameraBaseHeight), 0, cameraBaseHeight - 1);
-    const cameraSrcW = clamp(Math.round((srcW / compareWidth) * cameraBaseWidth), 1, cameraBaseWidth - cameraSrcX);
-    const cameraSrcH = clamp(Math.round((srcH / compareHeight) * cameraBaseHeight), 1, cameraBaseHeight - cameraSrcY);
 
     const cropCanvas = document.createElement("canvas");
     cropCanvas.width = srcW;
@@ -434,6 +544,18 @@ export default function AddSamplePage() {
 
     const compareUrl = cropCanvas.toDataURL("image/png");
 
+    const liveBaseImg = liveSourceImg ?? sourceImg;
+    const liveBaseNaturalWidth = liveBaseImg.naturalWidth;
+    const liveBaseNaturalHeight = liveBaseImg.naturalHeight;
+    const liveCropX = clamp(Math.round((srcX / compareWidth) * liveBaseNaturalWidth), 0, liveBaseNaturalWidth - 1);
+    const liveCropY = clamp(Math.round((srcY / compareHeight) * liveBaseNaturalHeight), 0, liveBaseNaturalHeight - 1);
+    const liveCropW = clamp(Math.round((srcW / compareWidth) * liveBaseNaturalWidth), 1, liveBaseNaturalWidth - liveCropX);
+    const liveCropH = clamp(Math.round((srcH / compareHeight) * liveBaseNaturalHeight), 1, liveBaseNaturalHeight - liveCropY);
+
+    const cameraBaseScale = Math.min(1, CAMERA_BASE_LONG_SIDE / Math.max(liveCropW, liveCropH));
+    const cameraSrcW = Math.max(1, Math.round(liveCropW * cameraBaseScale));
+    const cameraSrcH = Math.max(1, Math.round(liveCropH * cameraBaseScale));
+
     const cameraCropCanvas = document.createElement("canvas");
     cameraCropCanvas.width = cameraSrcW;
     cameraCropCanvas.height = cameraSrcH;
@@ -441,11 +563,11 @@ export default function AddSamplePage() {
     if (!cameraCropCtx) return;
 
     cameraCropCtx.drawImage(
-      cameraBaseCanvas,
-      cameraSrcX,
-      cameraSrcY,
-      cameraSrcW,
-      cameraSrcH,
+      liveBaseImg,
+      liveCropX,
+      liveCropY,
+      liveCropW,
+      liveCropH,
       0,
       0,
       cameraSrcW,
@@ -616,6 +738,32 @@ export default function AddSamplePage() {
 
         <div className="text-center text-xs text-zinc-400">
           1本指で画像移動 / 2本指で拡大縮小 / 枠は中央固定
+        </div>
+
+        <div className="rounded-3xl border border-zinc-800 bg-zinc-900/60 p-3 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-medium text-zinc-100">見本確認</div>
+              <div className="text-[11px] text-zinc-500">補助線は表示確認用です。保存画像には入りません。</div>
+            </div>
+            <div className="text-[10px] text-zinc-500">
+              liveFrame: {capturedLiveFrame ? "あり" : "なし"}
+            </div>
+          </div>
+          <div className="flex gap-3">
+            <CropPreviewCard
+              title="review用"
+              subtitle="撮影画像由来"
+              preview={reviewPreview}
+              emptyText="切り抜き未作成"
+            />
+            <CropPreviewCard
+              title="live用"
+              subtitle="ライブビュー由来"
+              preview={livePreview}
+              emptyText={capturedLiveFrame ? "切り抜き未作成" : "liveFrameなし"}
+            />
+          </div>
         </div>
 
         <div className="flex items-center justify-center gap-3">

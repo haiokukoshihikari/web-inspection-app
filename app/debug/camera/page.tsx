@@ -42,6 +42,7 @@ type InspectionProfile = {
 const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
 
 const SAMPLES_KEY = "inspection:samples";
+const CAPTURED_LIVE_FRAME_KEY = "capturedLiveFrameAtCapture";
 const DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET = 0.12;
 const DEFAULT_LIVE_GUIDE_INTERVAL_MS = 1500;
 const LIVE_MAX_BOXES = 1;
@@ -55,8 +56,6 @@ const DISTANCE_GUIDE_STEP1_PCT = 5;
 const DISTANCE_GUIDE_STEP2_PCT = 10;
 const DISTANCE_GUIDE_STEP3_PCT = 20;
 const DISTANCE_GUIDE_STREAK_REQUIRED = 2;
-const DISTANCE_GUIDE_CENTER_ROI_WIDTH_RATIO = 0.15;
-const DISTANCE_GUIDE_CENTER_ROI_HEIGHT_RATIO = 0.15;
 const DISTANCE_GUIDE_SCALE_WEIGHT = 0.08;
 const DISTANCE_GUIDE_SCORE_WEIGHT = 0.02;
 
@@ -107,6 +106,7 @@ type CameraDebugSnapshot = {
   constraints: Record<string, unknown>;
   photoCapabilities: Record<string, unknown> | null;
   photoSettings: Record<string, unknown> | null;
+  videoFrame?: { width: number; height: number };
   error?: string;
 };
 
@@ -150,12 +150,16 @@ function createCameraDebugSummary(snapshot: CameraDebugSnapshot | null): string 
   const zoom = settings.zoom ?? photoSettings.zoom ?? capabilities.zoom ?? photoCapabilities.zoom;
   const width = settings.width ?? photoSettings.imageWidth ?? photoCapabilities.imageWidth;
   const height = settings.height ?? photoSettings.imageHeight ?? photoCapabilities.imageHeight;
+  const videoSize = snapshot.videoFrame?.width && snapshot.videoFrame?.height
+    ? `${snapshot.videoFrame.width}x${snapshot.videoFrame.height}`
+    : "-";
 
   return [
     `focus:${formatCameraDebugValue(focusDistance)}`,
     `mode:${formatCameraDebugValue(focusMode)}`,
     `zoom:${formatCameraDebugValue(zoom)}`,
     `size:${formatCameraDebugValue(width)}x${formatCameraDebugValue(height)}`,
+    `video:${videoSize}`,
   ].join("\n");
 }
 
@@ -545,6 +549,7 @@ export default function DebugCameraPage() {
         constraints: {},
         photoCapabilities: null,
         photoSettings: null,
+        videoFrame: videoRef.current ? { width: videoRef.current.videoWidth || 0, height: videoRef.current.videoHeight || 0 } : undefined,
         error: "video track がありません",
       };
       setCameraDebugSnapshot(empty);
@@ -593,6 +598,7 @@ export default function DebugCameraPage() {
       constraints: typeof track.getConstraints === "function" ? toPlainRecord(track.getConstraints()) : {},
       photoCapabilities,
       photoSettings,
+      videoFrame: videoRef.current ? { width: videoRef.current.videoWidth || 0, height: videoRef.current.videoHeight || 0 } : undefined,
       ...(error.trim() ? { error: error.trim() } : {}),
     };
 
@@ -1011,17 +1017,17 @@ export default function DebugCameraPage() {
 
       const distanceGuideCenterRoiW = Math.max(
         maxTplWidth + 4,
-        Math.round(pw * DISTANCE_GUIDE_CENTER_ROI_WIDTH_RATIO)
+        Math.round(pw * liveRoiWidthRatio)
       );
       const distanceGuideCenterRoiH = Math.max(
         maxTplHeight + 4,
-        Math.round(ph * DISTANCE_GUIDE_CENTER_ROI_HEIGHT_RATIO)
+        Math.round(ph * liveRoiHeightRatio)
       );
       const distanceGuideCenterRoiX = Math.round((pw - distanceGuideCenterRoiW) / 2);
       const distanceGuideCenterRoiY = Math.round((ph - distanceGuideCenterRoiH) / 2);
 
       setLiveProcessInfo(
-        `${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} / scale ±${liveScaleOptions.join("/")}% / roi ${Math.round(liveRoiWidthRatio * 100)}x${Math.round(liveRoiHeightRatio * 100)}% / d-roi ${Math.round(DISTANCE_GUIDE_CENTER_ROI_WIDTH_RATIO * 100)}x${Math.round(DISTANCE_GUIDE_CENTER_ROI_HEIGHT_RATIO * 100)}%`
+        `${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} / scale ±${liveScaleOptions.join("/")}% / roi ${Math.round(liveRoiWidthRatio * 100)}x${Math.round(liveRoiHeightRatio * 100)}% / d-roi linked`
       );
       let bestBox: LiveBox | null = null;
       let bestDistanceGuideBox: LiveBox | null = null;
@@ -1364,6 +1370,18 @@ export default function DebugCameraPage() {
   );
 
 
+  const saveLiveFrameAtCapture = useCallback((sourceCanvas: HTMLCanvasElement) => {
+    try {
+      sessionStorage.removeItem(CAPTURED_LIVE_FRAME_KEY);
+      const dataUrl = sourceCanvas.toDataURL("image/jpeg", 0.9);
+      if (dataUrl && dataUrl.startsWith("data:image/")) {
+        sessionStorage.setItem(CAPTURED_LIVE_FRAME_KEY, dataUrl);
+      }
+    } catch (error) {
+      console.error("ライブビュー画像の保存に失敗しました", error);
+    }
+  }, []);
+
   const savePendingSharedProfile = useCallback(() => {
     try {
       if (!sharedProfile) {
@@ -1410,6 +1428,7 @@ export default function DebugCameraPage() {
 
       setSaveStep("canvas_draw");
       ctx.drawImage(video, 0, 0, vw, vh);
+      saveLiveFrameAtCapture(canvas);
 
       setSaveStep("image_resize");
 
@@ -2119,25 +2138,6 @@ export default function DebugCameraPage() {
           }}
         />
 
-        <div
-          className={`absolute rounded-xl border ${liveGuideActive ? "border-cyan-400/40" : "border-white/20"}`}
-          style={{
-            width: videoDisplayRect.width * liveRoiWidthRatio,
-            height: videoDisplayRect.height * liveRoiHeightRatio,
-            left: videoDisplayRect.left + videoDisplayRect.width * ((1 - liveRoiWidthRatio) / 2),
-            top: videoDisplayRect.top + videoDisplayRect.height * ((1 - liveRoiHeightRatio) / 2),
-          }}
-        />
-
-        <div
-          className="absolute rounded-lg border border-amber-400/30"
-          style={{
-            width: videoDisplayRect.width * DISTANCE_GUIDE_CENTER_ROI_WIDTH_RATIO,
-            height: videoDisplayRect.height * DISTANCE_GUIDE_CENTER_ROI_HEIGHT_RATIO,
-            left: videoDisplayRect.left + videoDisplayRect.width * ((1 - DISTANCE_GUIDE_CENTER_ROI_WIDTH_RATIO) / 2),
-            top: videoDisplayRect.top + videoDisplayRect.height * ((1 - DISTANCE_GUIDE_CENTER_ROI_HEIGHT_RATIO) / 2),
-          }}
-        />
 
         {liveBoxes.map((box, index) => (
           <div
