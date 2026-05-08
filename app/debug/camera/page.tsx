@@ -2190,18 +2190,23 @@ export default function DebugCameraPage() {
         })() : null}
 
 
-        {liveBoxes.map((box, index) => (
-          <div
-            key={`live-box-${index}-${box.x}-${box.y}`}
-            className="absolute rounded-md border-[3px] border-sky-400 transition-opacity duration-200"
-            style={{
-              left: videoDisplayRect.left + videoDisplayRect.width * box.x,
-              top: videoDisplayRect.top + videoDisplayRect.height * box.y,
-              width: videoDisplayRect.width * box.w,
-              height: videoDisplayRect.height * box.h,
-            }}
-          />
-        ))}
+        {liveBoxes.map((box, index) => {
+          const displayLeft = box.x + Math.max(0, (box.w - box.matchW) / 2);
+          const displayTop = box.y + Math.max(0, (box.h - box.matchH) / 2);
+
+          return (
+            <div
+              key={`live-box-${index}-${box.x}-${box.y}`}
+              className="absolute rounded-md border-[3px] border-sky-400 transition-opacity duration-200"
+              style={{
+                left: videoDisplayRect.left + videoDisplayRect.width * displayLeft,
+                top: videoDisplayRect.top + videoDisplayRect.height * displayTop,
+                width: videoDisplayRect.width * box.matchW,
+                height: videoDisplayRect.height * box.matchH,
+              }}
+            />
+          );
+        })}
       </div>
 
       {!isReady && !errorMsg ? (
