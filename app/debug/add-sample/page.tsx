@@ -11,7 +11,7 @@ const CAPTURED_LIVE_FRAME_KEY = "capturedLiveFrameAtCapture";
 const CAMERA_BASE_LONG_SIDE = 960;
 
 const MAX_SAMPLES = 6;
-const PAGE_VERSION = "add-sample-live-preview-01";
+const PAGE_VERSION = "add-sample-live-preview-02-portrait-guard";
 
 const MIN_BOX_W = 0.08;
 const MAX_BOX_W = 0.8;
@@ -180,6 +180,22 @@ export default function AddSamplePage() {
   const [imageScale, setImageScale] = useState(1);
   const [imagePanX, setImagePanX] = useState(0);
   const [imagePanY, setImagePanY] = useState(0);
+  const [isLandscape, setIsLandscape] = useState(false);
+
+  useEffect(() => {
+    const updateOrientation = () => {
+      setIsLandscape(window.innerWidth > window.innerHeight);
+    };
+
+    updateOrientation();
+    window.addEventListener("resize", updateOrientation);
+    window.addEventListener("orientationchange", updateOrientation);
+
+    return () => {
+      window.removeEventListener("resize", updateOrientation);
+      window.removeEventListener("orientationchange", updateOrientation);
+    };
+  }, []);
 
   useEffect(() => {
     try {
@@ -634,6 +650,34 @@ export default function AddSamplePage() {
     sessionStorage.setItem(PENDING_SELECTED_SAMPLE_ID_KEY, nextItem.id);
     router.push("/debug/review");
   };
+
+  if (isLandscape) {
+    return (
+      <main className="min-h-screen bg-black text-white flex items-center justify-center p-6">
+        <div className="fixed right-2 bottom-2 z-[9999] text-[10px] px-2 py-1 rounded bg-black/70 text-zinc-300 border border-white/10 pointer-events-none">
+          {PAGE_VERSION}
+        </div>
+        <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-zinc-950/90 p-6 text-center shadow-2xl">
+          <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full border border-white/10 bg-white/5 text-4xl">
+            ↻
+          </div>
+          <h1 className="text-xl font-bold text-white">端末を縦向きに戻してください</h1>
+          <p className="mt-3 text-sm leading-6 text-zinc-300">
+            見本登録は位置ズレ防止のため、縦向きで行ってください。
+          </p>
+          <p className="mt-2 text-xs leading-5 text-zinc-500">
+            端末を縦向きに戻すと、自動で見本選択画面に戻ります。
+          </p>
+          <button
+            onClick={() => router.push("/debug/review")}
+            className="mt-6 rounded-2xl border border-zinc-700 bg-zinc-900 px-5 py-3 text-sm text-zinc-200"
+          >
+            reviewへ戻る
+          </button>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-screen bg-black text-white flex flex-col">
