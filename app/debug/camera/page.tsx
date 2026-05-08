@@ -467,6 +467,7 @@ export default function DebugCameraPage() {
 
   const [saveStep, setSaveStep] = useState<SaveStep>("idle");
   const [liveBoxes, setLiveBoxes] = useState<LiveBox[]>([]);
+  const [liveSearchRoiRect, setLiveSearchRoiRect] = useState<Rect | null>(null);
   const [liveGuideActive, setLiveGuideActive] = useState(false);
   const [liveGuideThresholdOffset, setLiveGuideThresholdOffset] = useState(DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET);
   const [liveGuideIntervalMs, setLiveGuideIntervalMs] = useState(DEFAULT_LIVE_GUIDE_INTERVAL_MS);
@@ -486,6 +487,7 @@ export default function DebugCameraPage() {
   const [liveDistanceDebug, setLiveDistanceDebug] = useState("");
   const [firstSamplePreviewUrl, setFirstSamplePreviewUrl] = useState("");
   const [cameraTemplateInfo, setCameraTemplateInfo] = useState<{ width: number; height: number } | null>(null);
+  const [liveTemplateSourceType, setLiveTemplateSourceType] = useState<"live" | "review" | "thumb" | "none">("none");
   const [videoDisplayRect, setVideoDisplayRect] = useState<Rect>({ left: 0, top: 0, width: 0, height: 0 });
   const [cameraDebugSnapshot, setCameraDebugSnapshot] = useState<CameraDebugSnapshot | null>(null);
   const [cameraDebugSummary, setCameraDebugSummary] = useState("focus:-\nmode:-\nzoom:-\nsize:-");
@@ -505,6 +507,7 @@ export default function DebugCameraPage() {
     baseHeight: number;
     baseRawWidth: number;
     baseRawHeight: number;
+    sourceType: "live" | "review" | "thumb";
   } | null>(null);
   const liveRunningRef = useRef(false);
   const liveTimerRef = useRef<number | null>(null);
@@ -882,7 +885,9 @@ export default function DebugCameraPage() {
         const raw = localStorage.getItem(SAMPLES_KEY);
         if (!raw) {
           liveTemplateRef.current = null;
+          setLiveTemplateSourceType("none");
           setLiveBoxes([]);
+          setLiveSearchRoiRect(null);
           setLiveGuideActive(false);
           return;
         }
@@ -890,7 +895,9 @@ export default function DebugCameraPage() {
         const parsed = JSON.parse(raw);
         if (!Array.isArray(parsed) || parsed.length === 0) {
           liveTemplateRef.current = null;
+          setLiveTemplateSourceType("none");
           setLiveBoxes([]);
+          setLiveSearchRoiRect(null);
           setLiveGuideActive(false);
           return;
         }
@@ -902,21 +909,34 @@ export default function DebugCameraPage() {
           }))
           .sort((a, b) => (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER));
 
-        const sample = sortedSamples.find(
-          (item) => !!(item.cameraCompareUrl || item.compareUrl || item.thumbUrl)
-        );
+        const sample =
+          sortedSamples.find((item) => !!item.cameraCompareUrl) ||
+          sortedSamples.find((item) => !!(item.compareUrl || item.thumbUrl));
 
         if (!sample) {
           liveTemplateRef.current = null;
+          setLiveTemplateSourceType("none");
           setLiveBoxes([]);
+          setLiveSearchRoiRect(null);
           setLiveGuideActive(false);
           return;
         }
 
-        const src = sample.cameraCompareUrl || sample.compareUrl || sample.thumbUrl;
+        const sourceType: "live" | "review" | "thumb" = sample.cameraCompareUrl
+          ? "live"
+          : sample.compareUrl
+          ? "review"
+          : "thumb";
+        const src = sourceType === "live"
+          ? sample.cameraCompareUrl
+          : sourceType === "review"
+          ? sample.compareUrl
+          : sample.thumbUrl;
         if (!src) {
           liveTemplateRef.current = null;
+          setLiveTemplateSourceType("none");
           setLiveBoxes([]);
+          setLiveSearchRoiRect(null);
           setLiveGuideActive(false);
           return;
         }
@@ -951,11 +971,13 @@ export default function DebugCameraPage() {
           };
         });
 
-        liveTemplateRef.current = { sample, variants, baseWidth, baseHeight, baseRawWidth: img.naturalWidth, baseRawHeight: img.naturalHeight };
+        liveTemplateRef.current = { sample, variants, baseWidth, baseHeight, baseRawWidth: img.naturalWidth, baseRawHeight: img.naturalHeight, sourceType };
         setLiveGuideActive(true);
       } catch (error) {
         console.error('ライブ簡易検査の見本読み込みに失敗しました', error);
         liveTemplateRef.current = null;
+        setLiveTemplateSourceType("none");
+        setLiveSearchRoiRect(null);
         setLiveGuideActive(false);
       }
     };
@@ -978,6 +1000,7 @@ export default function DebugCameraPage() {
     const tpl = liveTemplateRef.current;
     if (!video || !tpl) {
       setLiveBoxes([]);
+      setLiveSearchRoiRect(null);
       liveBoxesHoldUntilRef.current = 0;
       distanceGuideStreakRef.current = { hint: "", count: 0 };
       distanceGuideShownAtRef.current = 0;
@@ -1008,26 +1031,26 @@ export default function DebugCameraPage() {
 
       const maxTplWidth = Math.max(...tpl.variants.map((v) => v.width));
       const maxTplHeight = Math.max(...tpl.variants.map((v) => v.height));
-      const roiW = Math.max(maxTplWidth + 4, Math.round(pw * liveRoiWidthRatio));
-      const roiH = Math.max(maxTplHeight + 4, Math.round(ph * liveRoiHeightRatio));
+      const roiW = Math.min(pw, Math.max(maxTplWidth + 4, Math.round(pw * liveRoiWidthRatio)));
+      const roiH = Math.min(ph, Math.max(maxTplHeight + 4, Math.round(ph * liveRoiHeightRatio)));
       const roiX = Math.round((pw - roiW) / 2);
       const roiY = Math.round((ph - roiH) / 2);
+      setLiveSearchRoiRect({
+        left: roiX / pw,
+        top: roiY / ph,
+        width: roiW / pw,
+        height: roiH / ph,
+      });
 
       const gray = edgeNormalize(toGrayArray(ctx, pw, ph), pw, ph);
 
-      const distanceGuideCenterRoiW = Math.max(
-        maxTplWidth + 4,
-        Math.round(pw * liveRoiWidthRatio)
-      );
-      const distanceGuideCenterRoiH = Math.max(
-        maxTplHeight + 4,
-        Math.round(ph * liveRoiHeightRatio)
-      );
-      const distanceGuideCenterRoiX = Math.round((pw - distanceGuideCenterRoiW) / 2);
-      const distanceGuideCenterRoiY = Math.round((ph - distanceGuideCenterRoiH) / 2);
+      const distanceGuideCenterRoiW = roiW;
+      const distanceGuideCenterRoiH = roiH;
+      const distanceGuideCenterRoiX = roiX;
+      const distanceGuideCenterRoiY = roiY;
 
       setLiveProcessInfo(
-        `${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} / scale ±${liveScaleOptions.join("/")}% / roi ${Math.round(liveRoiWidthRatio * 100)}x${Math.round(liveRoiHeightRatio * 100)}% / d-roi linked`
+        `${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} (${tpl.sourceType}) / scale ±${liveScaleOptions.join("/")}% / roi ${Math.round((roiW / pw) * 100)}x${Math.round((roiH / ph) * 100)}% / d-roi linked`
       );
       let bestBox: LiveBox | null = null;
       let bestDistanceGuideBox: LiveBox | null = null;
@@ -1172,9 +1195,9 @@ export default function DebugCameraPage() {
           : nextDistanceGuideHintWithHysteresis(distanceGuideCurrentHintRef.current, delta);
 
       setLiveDistanceDebug(
-        `hint:${nextHint || "-"} blue:${blueAccepted ? "yes" : "no"}\n` +
+        `hint:${nextHint || "-"} blue:${blueAccepted ? "yes" : "no"} roiHit:${guideCenterText} src:${tpl.sourceType}\n` +
         `Δ:${delta >= 0 ? "+" : ""}${delta.toFixed(0)}% offset:${liveDistanceScaleOffsetPct >= 0 ? "+" : ""}${liveDistanceScaleOffsetPct}%\n` +
-        `blueΔ:${blueDeltaRaw >= 0 ? "+" : ""}${blueDeltaRaw.toFixed(0)}%`
+        `blueΔ:${blueDeltaRaw >= 0 ? "+" : ""}${blueDeltaRaw.toFixed(0)}% score:${scoreText}`
       );
 
       const streak = nextDistanceGuideState(distanceGuideStreakRef.current, nextHint);
@@ -1995,10 +2018,21 @@ export default function DebugCameraPage() {
                     </div>
                   </div>
 
-            <div className="text-xs text-zinc-400">
-              {cameraTemplateInfo
-                ? `${cameraTemplateInfo.width} × ${cameraTemplateInfo.height}`
-                : "サイズ取得中…"}
+            <div className="text-xs text-zinc-400 space-y-1">
+              <div>
+                {cameraTemplateInfo
+                  ? `${cameraTemplateInfo.width} × ${cameraTemplateInfo.height}`
+                  : "サイズ取得中…"}
+              </div>
+              <div>
+                使用元: {liveTemplateSourceType === "live"
+                  ? "liveFrame由来"
+                  : liveTemplateSourceType === "review"
+                  ? "撮影画像由来"
+                  : liveTemplateSourceType === "thumb"
+                  ? "サムネイル由来"
+                  : "未読込"}
+              </div>
             </div>
           </>
         ) : (
@@ -2109,12 +2143,16 @@ export default function DebugCameraPage() {
 
       <div className="absolute inset-0 pointer-events-none">
         {videoDisplayRect.width > 0 && videoDisplayRect.height > 0 ? (() => {
-          const roiRatioW = Math.max(0.05, Math.min(1, liveRoiWidthRatio));
-          const roiRatioH = Math.max(0.05, Math.min(1, liveRoiHeightRatio));
-          const roiLeft = videoDisplayRect.left + videoDisplayRect.width * (1 - roiRatioW) / 2;
-          const roiTop = videoDisplayRect.top + videoDisplayRect.height * (1 - roiRatioH) / 2;
-          const roiWidth = videoDisplayRect.width * roiRatioW;
-          const roiHeight = videoDisplayRect.height * roiRatioH;
+          const roiRect = liveSearchRoiRect ?? {
+            left: (1 - Math.max(0.05, Math.min(1, liveRoiWidthRatio))) / 2,
+            top: (1 - Math.max(0.05, Math.min(1, liveRoiHeightRatio))) / 2,
+            width: Math.max(0.05, Math.min(1, liveRoiWidthRatio)),
+            height: Math.max(0.05, Math.min(1, liveRoiHeightRatio)),
+          };
+          const roiLeft = videoDisplayRect.left + videoDisplayRect.width * roiRect.left;
+          const roiTop = videoDisplayRect.top + videoDisplayRect.height * roiRect.top;
+          const roiWidth = videoDisplayRect.width * roiRect.width;
+          const roiHeight = videoDisplayRect.height * roiRect.height;
 
           return (
             <>
