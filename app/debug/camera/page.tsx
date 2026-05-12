@@ -2143,6 +2143,13 @@ export default function DebugCameraPage() {
 
       <div className="absolute inset-0 pointer-events-none">
         {videoDisplayRect.width > 0 && videoDisplayRect.height > 0 ? (() => {
+          const guideWidth = videoDisplayRect.width * 0.75;
+          const guideHeight = videoDisplayRect.height * 0.75;
+          const guideLeft = videoDisplayRect.left + (videoDisplayRect.width - guideWidth) / 2;
+          const guideTop = videoDisplayRect.top + (videoDisplayRect.height - guideHeight) / 2;
+          const videoCenterX = videoDisplayRect.left + videoDisplayRect.width / 2;
+          const videoCenterY = videoDisplayRect.top + videoDisplayRect.height / 2;
+
           const roiRect = liveSearchRoiRect ?? {
             left: (1 - Math.max(0.05, Math.min(1, liveRoiWidthRatio))) / 2,
             top: (1 - Math.max(0.05, Math.min(1, liveRoiHeightRatio))) / 2,
@@ -2156,6 +2163,38 @@ export default function DebugCameraPage() {
 
           return (
             <>
+              {/* 撮影位置合わせ用のライブビュー補助線。検知範囲ではなく、画面全体の75%目安。 */}
+              <div
+                className="absolute border border-white/35 rounded-md"
+                style={{
+                  width: guideWidth,
+                  height: guideHeight,
+                  left: guideLeft,
+                  top: guideTop,
+                }}
+              />
+              <div
+                className="absolute bg-white/25"
+                style={{
+                  width: "1px",
+                  height: videoDisplayRect.height,
+                  left: videoCenterX,
+                  top: videoDisplayRect.top,
+                  transform: "translateX(-0.5px)",
+                }}
+              />
+              <div
+                className="absolute bg-white/25"
+                style={{
+                  height: "1px",
+                  width: videoDisplayRect.width,
+                  left: videoDisplayRect.left,
+                  top: videoCenterY,
+                  transform: "translateY(-0.5px)",
+                }}
+              />
+
+              {/* 距離検知ROI。実際の探索範囲に連動。 */}
               <div
                 className="absolute border-2 border-white/75 rounded-md"
                 style={{
