@@ -42,7 +42,6 @@ type InspectionProfile = {
 const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
 
 const SAMPLES_KEY = "inspection:samples";
-const CAPTURED_LIVE_FRAME_KEY = "capturedLiveFrameAtCapture";
 const DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET = 0.12;
 const DEFAULT_LIVE_GUIDE_INTERVAL_MS = 1500;
 const LIVE_MAX_BOXES = 1;
@@ -66,6 +65,7 @@ type SampleItem = {
   thumbUrl?: string;
   compareUrl?: string;
   cameraCompareUrl?: string;
+  cameraCompareSource?: "review-resized" | "live-frame" | "review";
   aspectRatio?: number;
   savedResolution?: number;
   cameraBaseLongSide?: number;
@@ -1393,18 +1393,6 @@ export default function DebugCameraPage() {
   );
 
 
-  const saveLiveFrameAtCapture = useCallback((sourceCanvas: HTMLCanvasElement) => {
-    try {
-      sessionStorage.removeItem(CAPTURED_LIVE_FRAME_KEY);
-      const dataUrl = sourceCanvas.toDataURL("image/jpeg", 0.9);
-      if (dataUrl && dataUrl.startsWith("data:image/")) {
-        sessionStorage.setItem(CAPTURED_LIVE_FRAME_KEY, dataUrl);
-      }
-    } catch (error) {
-      console.error("ライブビュー画像の保存に失敗しました", error);
-    }
-  }, []);
-
   const savePendingSharedProfile = useCallback(() => {
     try {
       if (!sharedProfile) {
@@ -1422,6 +1410,7 @@ export default function DebugCameraPage() {
     if (!videoRef.current || isCapturing || !isReady) return;
 
     resetSaveState();
+    try { sessionStorage.removeItem("capturedLiveFrameAtCapture"); } catch {}
 
     const video = videoRef.current;
     const vw = video.videoWidth;
@@ -1451,7 +1440,6 @@ export default function DebugCameraPage() {
 
       setSaveStep("canvas_draw");
       ctx.drawImage(video, 0, 0, vw, vh);
-      saveLiveFrameAtCapture(canvas);
 
       setSaveStep("image_resize");
 
@@ -1487,6 +1475,7 @@ export default function DebugCameraPage() {
 
     try {
       setErrorMsg("");
+      try { sessionStorage.removeItem("capturedLiveFrameAtCapture"); } catch {}
       setIsCapturing(true);
       setSaveStep("capture_start");
 
@@ -2026,7 +2015,7 @@ export default function DebugCameraPage() {
               </div>
               <div>
                 使用元: {liveTemplateSourceType === "live"
-                  ? "liveFrame由来"
+                  ? "reviewリサイズ/live用"
                   : liveTemplateSourceType === "review"
                   ? "撮影画像由来"
                   : liveTemplateSourceType === "thumb"

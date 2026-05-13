@@ -6,12 +6,10 @@ import { useRouter } from "next/navigation";
 const SAMPLES_KEY = "inspection:samples";
 const RESOLUTION_KEY = "inspection:compareResolution";
 const PENDING_SELECTED_SAMPLE_ID_KEY = "inspection:pendingSelectedSampleId";
-const CAPTURED_LIVE_FRAME_KEY = "capturedLiveFrameAtCapture";
-
 const CAMERA_BASE_LONG_SIDE = 960;
 
 const MAX_SAMPLES = 6;
-const PAGE_VERSION = "add-sample-live-preview-02-portrait-guard";
+const PAGE_VERSION = "add-sample-review-resized-live-01";
 
 const MIN_BOX_W = 0.08;
 const MAX_BOX_W = 0.8;
@@ -32,6 +30,11 @@ type SampleItem = {
   aspectRatio?: number;
   savedResolution?: CompareResolutionMode;
   cameraBaseLongSide?: number;
+  cameraCompareSource?: "review-resized" | "live-frame" | "review";
+  captureOriginalWidth?: number;
+  captureOriginalHeight?: number;
+  captureStoredWidth?: number;
+  captureStoredHeight?: number;
 };
 
 const SAMPLE_COLORS = [
@@ -42,6 +45,53 @@ const SAMPLE_COLORS = [
   "border-cyan-400 bg-cyan-500/20",
   "border-rose-400 bg-rose-500/20",
 ];
+
+
+type CaptureDebugInfo = {
+  sourceType?: "camera" | "file";
+  originalWidth?: number;
+  originalHeight?: number;
+  storedWidth?: number;
+  storedHeight?: number;
+  quality?: number;
+  dataUrlLength?: number;
+};
+
+function readCaptureDebugInfo(): CaptureDebugInfo | null {
+  try {
+    const raw = sessionStorage.getItem("captureDebugInfo");
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as CaptureDebugInfo;
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function getLiveResizeScale(
+  captureInfo: CaptureDebugInfo | null,
+  imageWidth: number,
+  imageHeight: number,
+  compareWidth: number,
+  compareHeight: number
+) {
+  const originalWidth =
+    typeof captureInfo?.originalWidth === "number" && Number.isFinite(captureInfo.originalWidth) && captureInfo.originalWidth > 0
+      ? captureInfo.originalWidth
+      : imageWidth;
+  const originalHeight =
+    typeof captureInfo?.originalHeight === "number" && Number.isFinite(captureInfo.originalHeight) && captureInfo.originalHeight > 0
+      ? captureInfo.originalHeight
+      : imageHeight;
+
+  return {
+    x: originalWidth / Math.max(1, compareWidth),
+    y: originalHeight / Math.max(1, compareHeight),
+    originalWidth,
+    originalHeight,
+  };
+}
 
 type PointerMap = Record<number, { x: number; y: number }>;
 
@@ -92,6 +142,59 @@ async function createCropPreview(
 
   ctx.drawImage(img, srcX, srcY, srcW, srcH, 0, 0, outW, outH);
   return { url: canvas.toDataURL("image/png"), width: srcW, height: srcH };
+}
+
+async function createReviewResizedPreview(
+  imageSrc: string,
+  cropRatio: { x: number; y: number; width: number; height: number },
+  captureInfo: CaptureDebugInfo | null,
+  compareResolution: CompareResolutionMode,
+  maxPreviewSide = 360
+): Promise<CropPreview | null> {
+  if (!imageSrc) return null;
+  const img = await loadImage(imageSrc);
+  const naturalWidth = img.naturalWidth;
+  const naturalHeight = img.naturalHeight;
+  if (!naturalWidth || !naturalHeight || cropRatio.width <= 0 || cropRatio.height <= 0) return null;
+
+  const compareScale = Math.min(1, compareResolution / naturalWidth);
+  const compareWidth = Math.max(1, Math.round(naturalWidth * compareScale));
+  const compareHeight = Math.max(1, Math.round(naturalHeight * compareScale));
+
+  const srcX = clamp(Math.round(cropRatio.x * compareWidth), 0, Math.max(0, compareWidth - 1));
+  const srcY = clamp(Math.round(cropRatio.y * compareHeight), 0, Math.max(0, compareHeight - 1));
+  const srcW = clamp(Math.round(cropRatio.width * compareWidth), 1, compareWidth - srcX);
+  const srcH = clamp(Math.round(cropRatio.height * compareHeight), 1, compareHeight - srcY);
+
+  const { x: liveScaleX, y: liveScaleY } = getLiveResizeScale(
+    captureInfo,
+    naturalWidth,
+    naturalHeight,
+    compareWidth,
+    compareHeight
+  );
+  const liveW = Math.max(1, Math.round(srcW * liveScaleX));
+  const liveH = Math.max(1, Math.round(srcH * liveScaleY));
+
+  const displayScale = Math.min(1, maxPreviewSide / Math.max(liveW, liveH));
+  const outW = Math.max(1, Math.round(liveW * displayScale));
+  const outH = Math.max(1, Math.round(liveH * displayScale));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = outW;
+  canvas.height = outH;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+
+  const compareCanvas = document.createElement("canvas");
+  compareCanvas.width = compareWidth;
+  compareCanvas.height = compareHeight;
+  const compareCtx = compareCanvas.getContext("2d");
+  if (!compareCtx) return null;
+  compareCtx.drawImage(img, 0, 0, compareWidth, compareHeight);
+
+  ctx.drawImage(compareCanvas, srcX, srcY, srcW, srcH, 0, 0, outW, outH);
+  return { url: canvas.toDataURL("image/png"), width: liveW, height: liveH };
 }
 
 function CropPreviewCard({
@@ -159,7 +262,7 @@ export default function AddSamplePage() {
   });
 
   const [capturedImage, setCapturedImage] = useState("");
-  const [capturedLiveFrame, setCapturedLiveFrame] = useState("");
+  const [captureInfo, setCaptureInfo] = useState<CaptureDebugInfo | null>(null);
   const [reviewPreview, setReviewPreview] = useState<CropPreview | null>(null);
   const [livePreview, setLivePreview] = useState<CropPreview | null>(null);
   const [compareResolution, setCompareResolution] =
@@ -204,10 +307,7 @@ export default function AddSamplePage() {
         setCapturedImage(stored);
       }
 
-      const liveStored = sessionStorage.getItem(CAPTURED_LIVE_FRAME_KEY);
-      if (liveStored && liveStored.startsWith("data:image/")) {
-        setCapturedLiveFrame(liveStored);
-      }
+      setCaptureInfo(readCaptureDebugInfo());
 
       const savedRes = localStorage.getItem(RESOLUTION_KEY);
       if (savedRes) {
@@ -345,7 +445,7 @@ export default function AddSamplePage() {
       try {
         const [review, live] = await Promise.all([
           createCropPreview(capturedImage, cropRatio),
-          capturedLiveFrame ? createCropPreview(capturedLiveFrame, cropRatio) : Promise.resolve(null),
+          createReviewResizedPreview(capturedImage, cropRatio, captureInfo, compareResolution),
         ]);
         if (cancelled) return;
         setReviewPreview(review);
@@ -364,7 +464,7 @@ export default function AddSamplePage() {
     return () => {
       cancelled = true;
     };
-  }, [capturedImage, capturedLiveFrame, cropRatio]);
+  }, [capturedImage, cropRatio, captureInfo, compareResolution]);
 
   const getDistance = (
     a: { x: number; y: number },
@@ -501,7 +601,6 @@ export default function AddSamplePage() {
     if (!frameRef.current || !imgRef.current) return;
 
     const sourceImg = await loadImage(capturedImage);
-    const liveSourceImg = capturedLiveFrame ? await loadImage(capturedLiveFrame) : null;
     const naturalWidth = sourceImg.naturalWidth;
     const naturalHeight = sourceImg.naturalHeight;
     if (!naturalWidth || !naturalHeight) return;
@@ -560,17 +659,15 @@ export default function AddSamplePage() {
 
     const compareUrl = cropCanvas.toDataURL("image/png");
 
-    const liveBaseImg = liveSourceImg ?? sourceImg;
-    const liveBaseNaturalWidth = liveBaseImg.naturalWidth;
-    const liveBaseNaturalHeight = liveBaseImg.naturalHeight;
-    const liveCropX = clamp(Math.round((srcX / compareWidth) * liveBaseNaturalWidth), 0, liveBaseNaturalWidth - 1);
-    const liveCropY = clamp(Math.round((srcY / compareHeight) * liveBaseNaturalHeight), 0, liveBaseNaturalHeight - 1);
-    const liveCropW = clamp(Math.round((srcW / compareWidth) * liveBaseNaturalWidth), 1, liveBaseNaturalWidth - liveCropX);
-    const liveCropH = clamp(Math.round((srcH / compareHeight) * liveBaseNaturalHeight), 1, liveBaseNaturalHeight - liveCropY);
+    const {
+      x: liveScaleX,
+      y: liveScaleY,
+      originalWidth: captureOriginalWidth,
+      originalHeight: captureOriginalHeight,
+    } = getLiveResizeScale(captureInfo, naturalWidth, naturalHeight, compareWidth, compareHeight);
 
-    const cameraBaseScale = Math.min(1, CAMERA_BASE_LONG_SIDE / Math.max(liveCropW, liveCropH));
-    const cameraSrcW = Math.max(1, Math.round(liveCropW * cameraBaseScale));
-    const cameraSrcH = Math.max(1, Math.round(liveCropH * cameraBaseScale));
+    const cameraSrcW = Math.max(1, Math.round(srcW * liveScaleX));
+    const cameraSrcH = Math.max(1, Math.round(srcH * liveScaleY));
 
     const cameraCropCanvas = document.createElement("canvas");
     cameraCropCanvas.width = cameraSrcW;
@@ -579,11 +676,11 @@ export default function AddSamplePage() {
     if (!cameraCropCtx) return;
 
     cameraCropCtx.drawImage(
-      liveBaseImg,
-      liveCropX,
-      liveCropY,
-      liveCropW,
-      liveCropH,
+      cropCanvas,
+      0,
+      0,
+      srcW,
+      srcH,
       0,
       0,
       cameraSrcW,
@@ -641,6 +738,11 @@ export default function AddSamplePage() {
       thumbUrl,
       compareUrl,
       cameraCompareUrl,
+      cameraCompareSource: "review-resized",
+      captureOriginalWidth,
+      captureOriginalHeight,
+      captureStoredWidth: naturalWidth,
+      captureStoredHeight: naturalHeight,
       aspectRatio: srcW / srcH,
       savedResolution: compareResolution,
       cameraBaseLongSide: CAMERA_BASE_LONG_SIDE,
@@ -790,8 +892,8 @@ export default function AddSamplePage() {
               <div className="text-sm font-medium text-zinc-100">見本確認</div>
               <div className="text-[11px] text-zinc-500">補助線は表示確認用です。保存画像には入りません。</div>
             </div>
-            <div className="text-[10px] text-zinc-500">
-              liveFrame: {capturedLiveFrame ? "あり" : "なし"}
+            <div className="text-[10px] text-zinc-500 tabular-nums">
+              live基準: {captureInfo?.originalWidth && captureInfo?.originalHeight ? `${captureInfo.originalWidth}×${captureInfo.originalHeight}` : "撮影画像基準"}
             </div>
           </div>
           <div className="flex gap-3">
@@ -803,9 +905,9 @@ export default function AddSamplePage() {
             />
             <CropPreviewCard
               title="live用"
-              subtitle="ライブビュー由来"
+              subtitle="review用をライブビュー基準へリサイズ"
               preview={livePreview}
-              emptyText={capturedLiveFrame ? "切り抜き未作成" : "liveFrameなし"}
+              emptyText="リサイズ未作成"
             />
           </div>
         </div>
