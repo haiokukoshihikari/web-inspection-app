@@ -35,6 +35,8 @@ type SampleItem = {
   captureOriginalHeight?: number;
   captureStoredWidth?: number;
   captureStoredHeight?: number;
+  captureVideoWidth?: number;
+  captureVideoHeight?: number;
 };
 
 const SAMPLE_COLORS = [
@@ -53,6 +55,8 @@ type CaptureDebugInfo = {
   originalHeight?: number;
   storedWidth?: number;
   storedHeight?: number;
+  videoWidth?: number;
+  videoHeight?: number;
   quality?: number;
   dataUrlLength?: number;
 };
@@ -76,20 +80,24 @@ function getLiveResizeScale(
   compareWidth: number,
   compareHeight: number
 ) {
-  const originalWidth =
-    typeof captureInfo?.originalWidth === "number" && Number.isFinite(captureInfo.originalWidth) && captureInfo.originalWidth > 0
+  const targetWidth =
+    typeof captureInfo?.videoWidth === "number" && Number.isFinite(captureInfo.videoWidth) && captureInfo.videoWidth > 0
+      ? captureInfo.videoWidth
+      : typeof captureInfo?.originalWidth === "number" && Number.isFinite(captureInfo.originalWidth) && captureInfo.originalWidth > 0
       ? captureInfo.originalWidth
       : imageWidth;
-  const originalHeight =
-    typeof captureInfo?.originalHeight === "number" && Number.isFinite(captureInfo.originalHeight) && captureInfo.originalHeight > 0
+  const targetHeight =
+    typeof captureInfo?.videoHeight === "number" && Number.isFinite(captureInfo.videoHeight) && captureInfo.videoHeight > 0
+      ? captureInfo.videoHeight
+      : typeof captureInfo?.originalHeight === "number" && Number.isFinite(captureInfo.originalHeight) && captureInfo.originalHeight > 0
       ? captureInfo.originalHeight
       : imageHeight;
 
   return {
-    x: originalWidth / Math.max(1, compareWidth),
-    y: originalHeight / Math.max(1, compareHeight),
-    originalWidth,
-    originalHeight,
+    x: targetWidth / Math.max(1, compareWidth),
+    y: targetHeight / Math.max(1, compareHeight),
+    originalWidth: targetWidth,
+    originalHeight: targetHeight,
   };
 }
 
@@ -743,6 +751,8 @@ export default function AddSamplePage() {
       captureOriginalHeight,
       captureStoredWidth: naturalWidth,
       captureStoredHeight: naturalHeight,
+      captureVideoWidth: captureInfo?.videoWidth,
+      captureVideoHeight: captureInfo?.videoHeight,
       aspectRatio: srcW / srcH,
       savedResolution: compareResolution,
       cameraBaseLongSide: CAMERA_BASE_LONG_SIDE,

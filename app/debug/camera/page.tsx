@@ -265,6 +265,8 @@ type CaptureDebugInfo = {
   originalHeight: number;
   storedWidth: number;
   storedHeight: number;
+  videoWidth?: number;
+  videoHeight?: number;
   quality: number;
   dataUrlLength: number;
 };
@@ -944,10 +946,29 @@ export default function DebugCameraPage() {
         const img = await dataUrlToImage(src);
         if (cancelled) return;
 
+        const video = videoRef.current;
+        const canUseLivePixelSize =
+          sourceType === "live" &&
+          !!video &&
+          video.videoWidth > 0 &&
+          video.videoHeight > 0 &&
+          img.naturalWidth > 0 &&
+          img.naturalHeight > 0;
+
+        const processScaleForVideo = canUseLivePixelSize
+          ? Math.min(1, LIVE_PROCESS_LONG_SIDE / Math.max(1, video!.videoWidth, video!.videoHeight))
+          : null;
+
         const baseLongSide = Math.max(img.naturalWidth, img.naturalHeight);
-        const baseScale = Math.min(1, LIVE_TEMPLATE_LONG_SIDE / Math.max(1, baseLongSide));
-        const baseWidth = Math.max(16, Math.round(img.naturalWidth * baseScale));
-        const baseHeight = Math.max(16, Math.round(img.naturalHeight * baseScale));
+        const normalizedBaseScale = Math.min(1, LIVE_TEMPLATE_LONG_SIDE / Math.max(1, baseLongSide));
+        const baseWidth = canUseLivePixelSize
+          ? Math.max(16, Math.round(img.naturalWidth * (processScaleForVideo ?? 1)))
+          : Math.max(16, Math.round(img.naturalWidth * normalizedBaseScale));
+        const baseHeight = canUseLivePixelSize
+          ? Math.max(16, Math.round(img.naturalHeight * (processScaleForVideo ?? 1)))
+          : Math.max(16, Math.round(img.naturalHeight * normalizedBaseScale));
+        const baseRawWidth = canUseLivePixelSize ? baseWidth : img.naturalWidth;
+        const baseRawHeight = canUseLivePixelSize ? baseHeight : img.naturalHeight;
 
         const variants = liveTemplateScaleFactors.map((factor) => {
           const width = Math.max(16, Math.round(baseWidth * factor));
@@ -966,12 +987,12 @@ export default function DebugCameraPage() {
             gray,
             width,
             height,
-            rawWidth: img.naturalWidth * factor,
-            rawHeight: img.naturalHeight * factor,
+            rawWidth: baseRawWidth * factor,
+            rawHeight: baseRawHeight * factor,
           };
         });
 
-        liveTemplateRef.current = { sample, variants, baseWidth, baseHeight, baseRawWidth: img.naturalWidth, baseRawHeight: img.naturalHeight, sourceType };
+        liveTemplateRef.current = { sample, variants, baseWidth, baseHeight, baseRawWidth, baseRawHeight, sourceType };
         setLiveGuideActive(true);
       } catch (error) {
         console.error('ライブ簡易検査の見本読み込みに失敗しました', error);
@@ -992,7 +1013,7 @@ export default function DebugCameraPage() {
       window.removeEventListener('storage', handleStorage);
       window.removeEventListener('focus', handleStorage);
     };
-  }, [liveTemplateScaleFactors]);
+  }, [liveTemplateScaleFactors, isReady]);
 
   const runLiveCheck = useCallback(async () => {
     if (liveRunningRef.current || isCapturing || !isReady) return;
@@ -1371,6 +1392,8 @@ export default function DebugCameraPage() {
             originalHeight: srcH,
             storedWidth: outW,
             storedHeight: outH,
+            videoWidth: sourceCanvas.width,
+            videoHeight: sourceCanvas.height,
             quality: attempt.quality,
             dataUrlLength: dataUrl.length,
           };
