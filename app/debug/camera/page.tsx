@@ -50,12 +50,13 @@ const LIVE_TEMPLATE_LONG_SIDE = 96;
 const LIVE_SEARCH_STEP = 4;
 const LIVE_SCALE_OPTIONS = [5, 10, 15, 20] as const;
 const DEFAULT_LIVE_SCALE_OPTIONS = [5] as const;
+const BLUE_TEMPLATE_SCALE_FACTORS = [0.95, 1, 1.05] as const;
+const DISTANCE_GUIDE_TEMPLATE_SCALE_FACTORS = [0.8, 0.9, 1.1, 1.2] as const;
 const DISTANCE_GUIDE_BLUE_TOLERANCE_PCT = 3;
 const DISTANCE_GUIDE_STEP1_PCT = 5;
 const DISTANCE_GUIDE_STEP2_PCT = 10;
 const DISTANCE_GUIDE_STEP3_PCT = 20;
 const DISTANCE_GUIDE_STREAK_REQUIRED = 2;
-const DISTANCE_GUIDE_SCALE_WEIGHT = 0.08;
 const DISTANCE_GUIDE_SCORE_WEIGHT = 0.02;
 
 type SampleItem = {
@@ -89,6 +90,7 @@ type LiveBox = {
   priorityScore: number;
   distanceGuidePriority: number;
   inDistanceGuideCenterRoi: boolean;
+  purpose: "blue" | "guide";
 };
 
 type Rect = {
@@ -504,6 +506,7 @@ export default function DebugCameraPage() {
       height: number;
       rawWidth: number;
       rawHeight: number;
+      purpose: "blue" | "guide";
     }>;
     baseWidth: number;
     baseHeight: number;
@@ -519,7 +522,19 @@ export default function DebugCameraPage() {
   const distanceGuideCurrentHintRef = useRef("");
   const distanceGuideDeltaHistoryRef = useRef<number[]>([]);
 
-  const liveTemplateScaleFactors = useMemo(() => buildScaleFactors(liveScaleOptions), [liveScaleOptions]);
+  const liveTemplateScaleFactors = useMemo(() => {
+    const factors = [
+      ...BLUE_TEMPLATE_SCALE_FACTORS.map((factor) => ({ factor, purpose: "blue" as const })),
+      ...DISTANCE_GUIDE_TEMPLATE_SCALE_FACTORS.map((factor) => ({ factor, purpose: "guide" as const })),
+    ];
+    const seen = new Set<string>();
+    return factors.filter((item) => {
+      const key = `${item.purpose}:${item.factor}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, []);
 
 
   const updateVideoDisplayRect = useCallback(() => {
@@ -970,7 +985,7 @@ export default function DebugCameraPage() {
         const baseRawWidth = canUseLivePixelSize ? baseWidth : img.naturalWidth;
         const baseRawHeight = canUseLivePixelSize ? baseHeight : img.naturalHeight;
 
-        const variants = liveTemplateScaleFactors.map((factor) => {
+        const variants = liveTemplateScaleFactors.map(({ factor, purpose }) => {
           const width = Math.max(16, Math.round(baseWidth * factor));
           const height = Math.max(16, Math.round(baseHeight * factor));
           const canvas = document.createElement('canvas');
@@ -989,6 +1004,7 @@ export default function DebugCameraPage() {
             height,
             rawWidth: baseRawWidth * factor,
             rawHeight: baseRawHeight * factor,
+            purpose,
           };
         });
 
@@ -1071,7 +1087,7 @@ export default function DebugCameraPage() {
       const distanceGuideCenterRoiY = roiY;
 
       setLiveProcessInfo(
-        `${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} (${tpl.sourceType}) / scale ±${liveScaleOptions.join("/")}% / roi ${Math.round((roiW / pw) * 100)}x${Math.round((roiH / ph) * 100)}% / d-roi linked`
+        `${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} (${tpl.sourceType}) / blue 95/100/105 / guide 80/90/110/120 / roi ${Math.round((roiW / pw) * 100)}x${Math.round((roiH / ph) * 100)}%`
       );
       let bestBox: LiveBox | null = null;
       let bestDistanceGuideBox: LiveBox | null = null;
@@ -1129,8 +1145,6 @@ export default function DebugCameraPage() {
             );
             const distanceGuidePriority =
               (inDistanceGuideCenterRoi ? 1 : -1)
-              - Math.abs(scaleDeltaPct) * DISTANCE_GUIDE_SCALE_WEIGHT
-              - centerDistanceNorm * 0.04
               + score * DISTANCE_GUIDE_SCORE_WEIGHT;
 
             const box: LiveBox = {
@@ -1149,25 +1163,33 @@ export default function DebugCameraPage() {
               priorityScore,
               distanceGuidePriority,
               inDistanceGuideCenterRoi,
+              purpose: variant.purpose,
             };
 
             if (
-              !bestBox ||
-              box.priorityScore > bestBox.priorityScore ||
+              variant.purpose === "blue" &&
               (
-                Math.abs(box.priorityScore - bestBox.priorityScore) < 0.0001 &&
-                box.score > bestBox.score
+                !bestBox ||
+                box.priorityScore > bestBox.priorityScore ||
+                (
+                  Math.abs(box.priorityScore - bestBox.priorityScore) < 0.0001 &&
+                  box.score > bestBox.score
+                )
               )
             ) {
               bestBox = box;
             }
 
             if (
-              !bestDistanceGuideBox ||
-              box.distanceGuidePriority > bestDistanceGuideBox.distanceGuidePriority ||
+              variant.purpose === "guide" &&
+              inDistanceGuideCenterRoi &&
               (
-                Math.abs(box.distanceGuidePriority - bestDistanceGuideBox.distanceGuidePriority) < 0.0001 &&
-                Math.abs(box.scaleDeltaPct) < Math.abs(bestDistanceGuideBox.scaleDeltaPct)
+                !bestDistanceGuideBox ||
+                box.distanceGuidePriority > bestDistanceGuideBox.distanceGuidePriority ||
+                (
+                  Math.abs(box.distanceGuidePriority - bestDistanceGuideBox.distanceGuidePriority) < 0.0001 &&
+                  box.score > bestDistanceGuideBox.score
+                )
               )
             ) {
               bestDistanceGuideBox = box;
