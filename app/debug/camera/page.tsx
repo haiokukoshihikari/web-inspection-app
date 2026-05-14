@@ -1216,7 +1216,12 @@ export default function DebugCameraPage() {
 
       const deltaRaw = bestDistance ? bestDistance.scaleDeltaPct + liveDistanceScaleOffsetPct : 0;
 
-      if (bestDistance && bestDistance.inDistanceGuideCenterRoi) {
+      const blueDeltaRaw = best ? best.scaleDeltaPct + liveDistanceScaleOffsetPct : 0;
+      const blueDelta = blueDeltaRaw - liveBlueBandCenterOffsetPct;
+      const blueAccepted =
+        !!best && Math.abs(blueDelta) <= liveBlueBandTolerancePct;
+
+      if (!blueAccepted && bestDistance && bestDistance.inDistanceGuideCenterRoi) {
         const nextHistory = [...distanceGuideDeltaHistoryRef.current, deltaRaw].slice(-liveDistanceMedianWindow);
         distanceGuideDeltaHistoryRef.current = nextHistory;
       } else {
@@ -1227,60 +1232,59 @@ export default function DebugCameraPage() {
         ? median(distanceGuideDeltaHistoryRef.current)
         : deltaRaw;
 
-      const blueDeltaRaw = best ? best.scaleDeltaPct + liveDistanceScaleOffsetPct : 0;
-      const blueDelta = blueDeltaRaw - liveBlueBandCenterOffsetPct;
-      const blueAccepted =
-        !!best && Math.abs(blueDelta) <= liveBlueBandTolerancePct;
-
-       const nextHint =
-        !bestDistance || !bestDistance.inDistanceGuideCenterRoi
+      const nextHint =
+        blueAccepted || !bestDistance || !bestDistance.inDistanceGuideCenterRoi
           ? ""
           : nextDistanceGuideHintWithHysteresis(distanceGuideCurrentHintRef.current, delta);
 
       setLiveDistanceDebug(
         `hint:${nextHint || "-"} blue:${blueAccepted ? "yes" : "no"} roiHit:${guideCenterText} src:${tpl.sourceType}\n` +
-        `Δ:${delta >= 0 ? "+" : ""}${delta.toFixed(0)}% offset:${liveDistanceScaleOffsetPct >= 0 ? "+" : ""}${liveDistanceScaleOffsetPct}%\n` +
+        `guideΔ:${delta >= 0 ? "+" : ""}${delta.toFixed(0)}% offset:${liveDistanceScaleOffsetPct >= 0 ? "+" : ""}${liveDistanceScaleOffsetPct}%\n` +
         `blueΔ:${blueDeltaRaw >= 0 ? "+" : ""}${blueDeltaRaw.toFixed(0)}% score:${scoreText}`
       );
 
-      const streak = nextDistanceGuideState(distanceGuideStreakRef.current, nextHint);
-      distanceGuideStreakRef.current = streak;
-      const nextConfirmedHint =
-        streak.count >= liveDistanceHintConfirmCount ? streak.hint : "";
-
       const now = performance.now();
-      const prevHint = distanceGuideCurrentHintRef.current;
-      let visibleHint = prevHint;
 
-      if (nextConfirmedHint) {
-        if (prevHint !== nextConfirmedHint) {
-          distanceGuideShownAtRef.current = now;
-        }
-        distanceGuideCurrentHintRef.current = nextConfirmedHint;
-        visibleHint = nextConfirmedHint;
-      } else if (prevHint) {
-        const keepVisibleUntil = distanceGuideShownAtRef.current + 2000;
-        if (now >= keepVisibleUntil) {
-          distanceGuideCurrentHintRef.current = "";
-          visibleHint = "";
-        } else {
-          visibleHint = prevHint;
-        }
-      } else {
+      if (blueAccepted && nextResults.length > 0) {
+        distanceGuideStreakRef.current = { hint: "", count: 0 };
         distanceGuideCurrentHintRef.current = "";
-        visibleHint = "";
-      }
-
-      setLiveDistanceGuide(visibleHint);
-
-      if (visibleHint) {
-        setLiveBoxes([]);
-        liveBoxesHoldUntilRef.current = 0;
-       } else if (nextResults.length > 0 && blueAccepted) {
+        distanceGuideShownAtRef.current = 0;
+        setLiveDistanceGuide("");
         setLiveBoxes(nextResults);
         liveBoxesHoldUntilRef.current = now + Math.max(220, liveGuideIntervalMs * 1.2);
-      } else if (now > liveBoxesHoldUntilRef.current) {
-        setLiveBoxes([]);
+      } else {
+        const streak = nextDistanceGuideState(distanceGuideStreakRef.current, nextHint);
+        distanceGuideStreakRef.current = streak;
+        const nextConfirmedHint =
+          streak.count >= liveDistanceHintConfirmCount ? streak.hint : "";
+
+        const prevHint = distanceGuideCurrentHintRef.current;
+        let visibleHint = prevHint;
+
+        if (nextConfirmedHint) {
+          if (prevHint !== nextConfirmedHint) {
+            distanceGuideShownAtRef.current = now;
+          }
+          distanceGuideCurrentHintRef.current = nextConfirmedHint;
+          visibleHint = nextConfirmedHint;
+        } else if (prevHint) {
+          const keepVisibleUntil = distanceGuideShownAtRef.current + 2000;
+          if (now >= keepVisibleUntil) {
+            distanceGuideCurrentHintRef.current = "";
+            visibleHint = "";
+          } else {
+            visibleHint = prevHint;
+          }
+        } else {
+          distanceGuideCurrentHintRef.current = "";
+          visibleHint = "";
+        }
+
+        setLiveDistanceGuide(visibleHint);
+
+        if (now > liveBoxesHoldUntilRef.current) {
+          setLiveBoxes([]);
+        }
       }
 
     } catch (error) {
