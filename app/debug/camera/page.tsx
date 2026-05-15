@@ -1214,44 +1214,54 @@ export default function DebugCameraPage() {
         ? bestDistance.inDistanceGuideCenterRoi ? "in" : "out"
         : "--";
 
+      const now = performance.now();
+
       const deltaRaw = bestDistance ? bestDistance.scaleDeltaPct + liveDistanceScaleOffsetPct : 0;
 
       const blueDeltaRaw = best ? best.scaleDeltaPct + liveDistanceScaleOffsetPct : 0;
       const blueDelta = blueDeltaRaw - liveBlueBandCenterOffsetPct;
       const blueAccepted =
         !!best && Math.abs(blueDelta) <= liveBlueBandTolerancePct;
+      const blueVisible = blueAccepted && nextResults.length > 0;
+      const blueHeld = !blueVisible && now <= liveBoxesHoldUntilRef.current;
+      const suppressDistanceGuide = blueVisible || blueHeld;
+      const hasGuideCandidate =
+        !suppressDistanceGuide && !!bestDistance && bestDistance.inDistanceGuideCenterRoi;
 
-      if (!blueAccepted && bestDistance && bestDistance.inDistanceGuideCenterRoi) {
+      if (hasGuideCandidate) {
         const nextHistory = [...distanceGuideDeltaHistoryRef.current, deltaRaw].slice(-liveDistanceMedianWindow);
         distanceGuideDeltaHistoryRef.current = nextHistory;
       } else {
         distanceGuideDeltaHistoryRef.current = [];
-      }
-
-      const delta = distanceGuideDeltaHistoryRef.current.length > 0
-        ? median(distanceGuideDeltaHistoryRef.current)
-        : deltaRaw;
-
-      const nextHint =
-        blueAccepted || !bestDistance || !bestDistance.inDistanceGuideCenterRoi
-          ? ""
-          : nextDistanceGuideHintWithHysteresis(distanceGuideCurrentHintRef.current, delta);
-
-      setLiveDistanceDebug(
-        `hint:${nextHint || "-"} blue:${blueAccepted ? "yes" : "no"} roiHit:${guideCenterText} src:${tpl.sourceType}\n` +
-        `guideΔ:${delta >= 0 ? "+" : ""}${delta.toFixed(0)}% offset:${liveDistanceScaleOffsetPct >= 0 ? "+" : ""}${liveDistanceScaleOffsetPct}%\n` +
-        `blueΔ:${blueDeltaRaw >= 0 ? "+" : ""}${blueDeltaRaw.toFixed(0)}% score:${scoreText}`
-      );
-
-      const now = performance.now();
-
-      if (blueAccepted && nextResults.length > 0) {
         distanceGuideStreakRef.current = { hint: "", count: 0 };
         distanceGuideCurrentHintRef.current = "";
         distanceGuideShownAtRef.current = 0;
+      }
+
+      const guideDelta = hasGuideCandidate && distanceGuideDeltaHistoryRef.current.length > 0
+        ? median(distanceGuideDeltaHistoryRef.current)
+        : null;
+
+      const nextHint = guideDelta === null
+        ? ""
+        : nextDistanceGuideHintWithHysteresis(distanceGuideCurrentHintRef.current, guideDelta);
+
+      const guideDeltaText = guideDelta === null
+        ? "--"
+        : `${guideDelta >= 0 ? "+" : ""}${guideDelta.toFixed(0)}%`;
+
+      setLiveDistanceDebug(
+        `hint:${nextHint || "-"} blue:${blueAccepted ? "yes" : "no"} roiHit:${guideCenterText} src:${tpl.sourceType}\n` +
+        `guideΔ:${guideDeltaText} offset:${liveDistanceScaleOffsetPct >= 0 ? "+" : ""}${liveDistanceScaleOffsetPct}%\n` +
+        `blueΔ:${blueDeltaRaw >= 0 ? "+" : ""}${blueDeltaRaw.toFixed(0)}% score:${scoreText}`
+      );
+
+      if (blueVisible) {
         setLiveDistanceGuide("");
         setLiveBoxes(nextResults);
         liveBoxesHoldUntilRef.current = now + Math.max(220, liveGuideIntervalMs * 1.2);
+      } else if (blueHeld) {
+        setLiveDistanceGuide("");
       } else {
         const streak = nextDistanceGuideState(distanceGuideStreakRef.current, nextHint);
         distanceGuideStreakRef.current = streak;
