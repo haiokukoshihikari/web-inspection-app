@@ -58,6 +58,8 @@ type SampleItem = {
   color: string;
   thumbUrl?: string;
   compareUrl?: string;
+  cameraCompareUrl?: string;
+  cameraCompareSource?: "review-resized" | "live-frame" | "review";
   aspectRatio?: number;
   savedResolution?: CompareResolutionMode;
   detectionSensitivity?: number;

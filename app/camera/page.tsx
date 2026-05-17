@@ -50,14 +50,13 @@ const LIVE_TEMPLATE_LONG_SIDE = 96;
 const LIVE_SEARCH_STEP = 4;
 const LIVE_SCALE_OPTIONS = [5, 10, 15, 20] as const;
 const DEFAULT_LIVE_SCALE_OPTIONS = [5] as const;
+const BLUE_TEMPLATE_SCALE_FACTORS = [0.95, 1, 1.05] as const;
+const DISTANCE_GUIDE_TEMPLATE_SCALE_FACTORS = [0.8, 0.9, 1.1, 1.2] as const;
 const DISTANCE_GUIDE_BLUE_TOLERANCE_PCT = 3;
 const DISTANCE_GUIDE_STEP1_PCT = 5;
 const DISTANCE_GUIDE_STEP2_PCT = 10;
 const DISTANCE_GUIDE_STEP3_PCT = 20;
 const DISTANCE_GUIDE_STREAK_REQUIRED = 2;
-const DISTANCE_GUIDE_CENTER_ROI_WIDTH_RATIO = 0.15;
-const DISTANCE_GUIDE_CENTER_ROI_HEIGHT_RATIO = 0.15;
-const DISTANCE_GUIDE_SCALE_WEIGHT = 0.08;
 const DISTANCE_GUIDE_SCORE_WEIGHT = 0.02;
 
 type SampleItem = {
@@ -67,6 +66,7 @@ type SampleItem = {
   thumbUrl?: string;
   compareUrl?: string;
   cameraCompareUrl?: string;
+  cameraCompareSource?: "review-resized" | "live-frame" | "review";
   aspectRatio?: number;
   savedResolution?: number;
   cameraBaseLongSide?: number;
@@ -90,6 +90,7 @@ type LiveBox = {
   priorityScore: number;
   distanceGuidePriority: number;
   inDistanceGuideCenterRoi: boolean;
+  purpose: "blue" | "guide";
 };
 
 type Rect = {
@@ -98,6 +99,71 @@ type Rect = {
   width: number;
   height: number;
 };
+
+type CameraDebugSnapshot = {
+  collectedAt: string;
+  trackLabel: string;
+  settings: Record<string, unknown>;
+  capabilities: Record<string, unknown>;
+  constraints: Record<string, unknown>;
+  photoCapabilities: Record<string, unknown> | null;
+  photoSettings: Record<string, unknown> | null;
+  videoFrame?: { width: number; height: number };
+  error?: string;
+};
+
+function formatCameraDebugValue(value: unknown): string {
+  if (typeof value === "number") {
+    return Number.isInteger(value) ? String(value) : value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+  }
+  if (typeof value === "string" && value.trim()) return value;
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  return "-";
+}
+
+function toPlainRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object") return {};
+  try {
+    return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+  } catch {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>));
+  }
+}
+
+function createCameraDebugSummary(snapshot: CameraDebugSnapshot | null): string {
+  if (!snapshot) {
+    return "focus:-\nmode:-\nzoom:-\nsize:-";
+  }
+
+  const settings = snapshot.settings || {};
+  const capabilities = snapshot.capabilities || {};
+  const photoSettings = snapshot.photoSettings || {};
+  const photoCapabilities = snapshot.photoCapabilities || {};
+  const focusDistance =
+    settings.focusDistance ??
+    photoSettings.focusDistance ??
+    capabilities.focusDistance ??
+    photoCapabilities.focusDistance;
+  const focusMode =
+    settings.focusMode ??
+    photoSettings.focusMode ??
+    capabilities.focusMode ??
+    photoCapabilities.focusMode;
+  const zoom = settings.zoom ?? photoSettings.zoom ?? capabilities.zoom ?? photoCapabilities.zoom;
+  const width = settings.width ?? photoSettings.imageWidth ?? photoCapabilities.imageWidth;
+  const height = settings.height ?? photoSettings.imageHeight ?? photoCapabilities.imageHeight;
+  const videoSize = snapshot.videoFrame?.width && snapshot.videoFrame?.height
+    ? `${snapshot.videoFrame.width}x${snapshot.videoFrame.height}`
+    : "-";
+
+  return [
+    `focus:${formatCameraDebugValue(focusDistance)}`,
+    `mode:${formatCameraDebugValue(focusMode)}`,
+    `zoom:${formatCameraDebugValue(zoom)}`,
+    `size:${formatCameraDebugValue(width)}x${formatCameraDebugValue(height)}`,
+    `video:${videoSize}`,
+  ].join("\n");
+}
 
 function calcContainRect(
   containerWidth: number,
@@ -201,6 +267,8 @@ type CaptureDebugInfo = {
   originalHeight: number;
   storedWidth: number;
   storedHeight: number;
+  videoWidth?: number;
+  videoHeight?: number;
   quality: number;
   dataUrlLength: number;
 };
@@ -403,6 +471,7 @@ export default function CameraPage() {
 
   const [saveStep, setSaveStep] = useState<SaveStep>("idle");
   const [liveBoxes, setLiveBoxes] = useState<LiveBox[]>([]);
+  const [liveSearchRoiRect, setLiveSearchRoiRect] = useState<Rect | null>(null);
   const [liveGuideActive, setLiveGuideActive] = useState(false);
   const [liveGuideThresholdOffset, setLiveGuideThresholdOffset] = useState(DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET);
   const [liveGuideIntervalMs, setLiveGuideIntervalMs] = useState(DEFAULT_LIVE_GUIDE_INTERVAL_MS);
@@ -422,7 +491,12 @@ export default function CameraPage() {
   const [liveDistanceDebug, setLiveDistanceDebug] = useState("");
   const [firstSamplePreviewUrl, setFirstSamplePreviewUrl] = useState("");
   const [cameraTemplateInfo, setCameraTemplateInfo] = useState<{ width: number; height: number } | null>(null);
+  const [liveTemplateSourceType, setLiveTemplateSourceType] = useState<"live" | "review" | "thumb" | "none">("none");
   const [videoDisplayRect, setVideoDisplayRect] = useState<Rect>({ left: 0, top: 0, width: 0, height: 0 });
+  const [cameraDebugSnapshot, setCameraDebugSnapshot] = useState<CameraDebugSnapshot | null>(null);
+  const [cameraDebugSummary, setCameraDebugSummary] = useState("focus:-\nmode:-\nzoom:-\nsize:-");
+  const [cameraDebugOpen, setCameraDebugOpen] = useState(false);
+  const [cameraDebugCopiedMsg, setCameraDebugCopiedMsg] = useState("");
   const liveTemplateRef = useRef<{
     sample: SampleItem;
     variants: Array<{
@@ -432,11 +506,13 @@ export default function CameraPage() {
       height: number;
       rawWidth: number;
       rawHeight: number;
+      purpose: "blue" | "guide";
     }>;
     baseWidth: number;
     baseHeight: number;
     baseRawWidth: number;
     baseRawHeight: number;
+    sourceType: "live" | "review" | "thumb";
   } | null>(null);
   const liveRunningRef = useRef(false);
   const liveTimerRef = useRef<number | null>(null);
@@ -446,7 +522,19 @@ export default function CameraPage() {
   const distanceGuideCurrentHintRef = useRef("");
   const distanceGuideDeltaHistoryRef = useRef<number[]>([]);
 
-  const liveTemplateScaleFactors = useMemo(() => buildScaleFactors(liveScaleOptions), [liveScaleOptions]);
+  const liveTemplateScaleFactors = useMemo(() => {
+    const factors = [
+      ...BLUE_TEMPLATE_SCALE_FACTORS.map((factor) => ({ factor, purpose: "blue" as const })),
+      ...DISTANCE_GUIDE_TEMPLATE_SCALE_FACTORS.map((factor) => ({ factor, purpose: "guide" as const })),
+    ];
+    const seen = new Set<string>();
+    return factors.filter((item) => {
+      const key = `${item.purpose}:${item.factor}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, []);
 
 
   const updateVideoDisplayRect = useCallback(() => {
@@ -467,6 +555,104 @@ export default function CameraPage() {
   const resetSaveState = useCallback(() => {
     setSaveStep("idle");
   }, []);
+
+  const collectCameraDebugInfo = useCallback(async () => {
+    const stream = streamRef.current;
+    const track = stream?.getVideoTracks?.()[0];
+
+    if (!track) {
+      const empty: CameraDebugSnapshot = {
+        collectedAt: new Date().toISOString(),
+        trackLabel: "no video track",
+        settings: {},
+        capabilities: {},
+        constraints: {},
+        photoCapabilities: null,
+        photoSettings: null,
+        videoFrame: videoRef.current ? { width: videoRef.current.videoWidth || 0, height: videoRef.current.videoHeight || 0 } : undefined,
+        error: "video track がありません",
+      };
+      setCameraDebugSnapshot(empty);
+      setCameraDebugSummary(createCameraDebugSummary(empty));
+      return empty;
+    }
+
+    let photoCapabilities: Record<string, unknown> | null = null;
+    let photoSettings: Record<string, unknown> | null = null;
+    let error = "";
+
+    try {
+      const ImageCaptureCtor = (window as unknown as { ImageCapture?: new (track: MediaStreamTrack) => {
+        getPhotoCapabilities?: () => Promise<unknown>;
+        getPhotoSettings?: () => Promise<unknown>;
+      } }).ImageCapture;
+
+      if (ImageCaptureCtor) {
+        const imageCapture = new ImageCaptureCtor(track);
+        if (typeof imageCapture.getPhotoCapabilities === "function") {
+          try {
+            photoCapabilities = toPlainRecord(await imageCapture.getPhotoCapabilities());
+          } catch (photoError) {
+            error += `getPhotoCapabilities: ${photoError instanceof Error ? photoError.message : String(photoError)}; `;
+          }
+        }
+        if (typeof imageCapture.getPhotoSettings === "function") {
+          try {
+            photoSettings = toPlainRecord(await imageCapture.getPhotoSettings());
+          } catch (photoError) {
+            error += `getPhotoSettings: ${photoError instanceof Error ? photoError.message : String(photoError)}; `;
+          }
+        }
+      } else {
+        error += "ImageCapture unsupported; ";
+      }
+    } catch (imageCaptureError) {
+      error += `ImageCapture: ${imageCaptureError instanceof Error ? imageCaptureError.message : String(imageCaptureError)}; `;
+    }
+
+    const snapshot: CameraDebugSnapshot = {
+      collectedAt: new Date().toISOString(),
+      trackLabel: track.label || "unknown",
+      settings: typeof track.getSettings === "function" ? toPlainRecord(track.getSettings()) : {},
+      capabilities: typeof track.getCapabilities === "function" ? toPlainRecord(track.getCapabilities()) : {},
+      constraints: typeof track.getConstraints === "function" ? toPlainRecord(track.getConstraints()) : {},
+      photoCapabilities,
+      photoSettings,
+      videoFrame: videoRef.current ? { width: videoRef.current.videoWidth || 0, height: videoRef.current.videoHeight || 0 } : undefined,
+      ...(error.trim() ? { error: error.trim() } : {}),
+    };
+
+    setCameraDebugSnapshot(snapshot);
+    setCameraDebugSummary(createCameraDebugSummary(snapshot));
+    return snapshot;
+  }, []);
+
+  const copyCameraDebugInfo = useCallback(async () => {
+    const snapshot = cameraDebugSnapshot ?? await collectCameraDebugInfo();
+    const text = JSON.stringify(snapshot, null, 2);
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.style.position = "fixed";
+        textarea.style.left = "-9999px";
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+      setCameraDebugCopiedMsg("コピーしました");
+      window.setTimeout(() => setCameraDebugCopiedMsg(""), 1600);
+    } catch (error) {
+      console.error("カメラ情報のコピーに失敗しました", error);
+      setCameraDebugCopiedMsg("コピー失敗");
+      window.setTimeout(() => setCameraDebugCopiedMsg(""), 2000);
+    }
+  }, [cameraDebugSnapshot, collectCameraDebugInfo]);
 
   const stopCamera = useCallback(() => {
     try {
@@ -560,6 +746,27 @@ export default function CameraPage() {
       stopCamera();
     };
   }, [startCamera, stopCamera]);
+
+  useEffect(() => {
+    if (!isReady) return;
+
+    let cancelled = false;
+
+    const refresh = async () => {
+      if (cancelled) return;
+      await collectCameraDebugInfo();
+    };
+
+    void refresh();
+    const timer = window.setInterval(() => {
+      void refresh();
+    }, 1500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [isReady, collectCameraDebugInfo]);
 
   useEffect(() => {
     try {
@@ -695,7 +902,9 @@ export default function CameraPage() {
         const raw = localStorage.getItem(SAMPLES_KEY);
         if (!raw) {
           liveTemplateRef.current = null;
+          setLiveTemplateSourceType("none");
           setLiveBoxes([]);
+          setLiveSearchRoiRect(null);
           setLiveGuideActive(false);
           return;
         }
@@ -703,7 +912,9 @@ export default function CameraPage() {
         const parsed = JSON.parse(raw);
         if (!Array.isArray(parsed) || parsed.length === 0) {
           liveTemplateRef.current = null;
+          setLiveTemplateSourceType("none");
           setLiveBoxes([]);
+          setLiveSearchRoiRect(null);
           setLiveGuideActive(false);
           return;
         }
@@ -715,21 +926,34 @@ export default function CameraPage() {
           }))
           .sort((a, b) => (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER));
 
-        const sample = sortedSamples.find(
-          (item) => !!(item.cameraCompareUrl || item.compareUrl || item.thumbUrl)
-        );
+        const sample =
+          sortedSamples.find((item) => !!item.cameraCompareUrl) ||
+          sortedSamples.find((item) => !!(item.compareUrl || item.thumbUrl));
 
         if (!sample) {
           liveTemplateRef.current = null;
+          setLiveTemplateSourceType("none");
           setLiveBoxes([]);
+          setLiveSearchRoiRect(null);
           setLiveGuideActive(false);
           return;
         }
 
-        const src = sample.cameraCompareUrl || sample.compareUrl || sample.thumbUrl;
+        const sourceType: "live" | "review" | "thumb" = sample.cameraCompareUrl
+          ? "live"
+          : sample.compareUrl
+          ? "review"
+          : "thumb";
+        const src = sourceType === "live"
+          ? sample.cameraCompareUrl
+          : sourceType === "review"
+          ? sample.compareUrl
+          : sample.thumbUrl;
         if (!src) {
           liveTemplateRef.current = null;
+          setLiveTemplateSourceType("none");
           setLiveBoxes([]);
+          setLiveSearchRoiRect(null);
           setLiveGuideActive(false);
           return;
         }
@@ -737,12 +961,31 @@ export default function CameraPage() {
         const img = await dataUrlToImage(src);
         if (cancelled) return;
 
-        const baseLongSide = Math.max(img.naturalWidth, img.naturalHeight);
-        const baseScale = Math.min(1, LIVE_TEMPLATE_LONG_SIDE / Math.max(1, baseLongSide));
-        const baseWidth = Math.max(16, Math.round(img.naturalWidth * baseScale));
-        const baseHeight = Math.max(16, Math.round(img.naturalHeight * baseScale));
+        const video = videoRef.current;
+        const canUseLivePixelSize =
+          sourceType === "live" &&
+          !!video &&
+          video.videoWidth > 0 &&
+          video.videoHeight > 0 &&
+          img.naturalWidth > 0 &&
+          img.naturalHeight > 0;
 
-        const variants = liveTemplateScaleFactors.map((factor) => {
+        const processScaleForVideo = canUseLivePixelSize
+          ? Math.min(1, LIVE_PROCESS_LONG_SIDE / Math.max(1, video!.videoWidth, video!.videoHeight))
+          : null;
+
+        const baseLongSide = Math.max(img.naturalWidth, img.naturalHeight);
+        const normalizedBaseScale = Math.min(1, LIVE_TEMPLATE_LONG_SIDE / Math.max(1, baseLongSide));
+        const baseWidth = canUseLivePixelSize
+          ? Math.max(16, Math.round(img.naturalWidth * (processScaleForVideo ?? 1)))
+          : Math.max(16, Math.round(img.naturalWidth * normalizedBaseScale));
+        const baseHeight = canUseLivePixelSize
+          ? Math.max(16, Math.round(img.naturalHeight * (processScaleForVideo ?? 1)))
+          : Math.max(16, Math.round(img.naturalHeight * normalizedBaseScale));
+        const baseRawWidth = canUseLivePixelSize ? baseWidth : img.naturalWidth;
+        const baseRawHeight = canUseLivePixelSize ? baseHeight : img.naturalHeight;
+
+        const variants = liveTemplateScaleFactors.map(({ factor, purpose }) => {
           const width = Math.max(16, Math.round(baseWidth * factor));
           const height = Math.max(16, Math.round(baseHeight * factor));
           const canvas = document.createElement('canvas');
@@ -759,16 +1002,19 @@ export default function CameraPage() {
             gray,
             width,
             height,
-            rawWidth: img.naturalWidth * factor,
-            rawHeight: img.naturalHeight * factor,
+            rawWidth: baseRawWidth * factor,
+            rawHeight: baseRawHeight * factor,
+            purpose,
           };
         });
 
-        liveTemplateRef.current = { sample, variants, baseWidth, baseHeight, baseRawWidth: img.naturalWidth, baseRawHeight: img.naturalHeight };
+        liveTemplateRef.current = { sample, variants, baseWidth, baseHeight, baseRawWidth, baseRawHeight, sourceType };
         setLiveGuideActive(true);
       } catch (error) {
         console.error('ライブ簡易検査の見本読み込みに失敗しました', error);
         liveTemplateRef.current = null;
+        setLiveTemplateSourceType("none");
+        setLiveSearchRoiRect(null);
         setLiveGuideActive(false);
       }
     };
@@ -783,7 +1029,7 @@ export default function CameraPage() {
       window.removeEventListener('storage', handleStorage);
       window.removeEventListener('focus', handleStorage);
     };
-  }, [liveTemplateScaleFactors]);
+  }, [liveTemplateScaleFactors, isReady]);
 
   const runLiveCheck = useCallback(async () => {
     if (liveRunningRef.current || isCapturing || !isReady) return;
@@ -791,6 +1037,7 @@ export default function CameraPage() {
     const tpl = liveTemplateRef.current;
     if (!video || !tpl) {
       setLiveBoxes([]);
+      setLiveSearchRoiRect(null);
       liveBoxesHoldUntilRef.current = 0;
       distanceGuideStreakRef.current = { hint: "", count: 0 };
       distanceGuideShownAtRef.current = 0;
@@ -821,26 +1068,26 @@ export default function CameraPage() {
 
       const maxTplWidth = Math.max(...tpl.variants.map((v) => v.width));
       const maxTplHeight = Math.max(...tpl.variants.map((v) => v.height));
-      const roiW = Math.max(maxTplWidth + 4, Math.round(pw * liveRoiWidthRatio));
-      const roiH = Math.max(maxTplHeight + 4, Math.round(ph * liveRoiHeightRatio));
+      const roiW = Math.min(pw, Math.max(maxTplWidth + 4, Math.round(pw * liveRoiWidthRatio)));
+      const roiH = Math.min(ph, Math.max(maxTplHeight + 4, Math.round(ph * liveRoiHeightRatio)));
       const roiX = Math.round((pw - roiW) / 2);
       const roiY = Math.round((ph - roiH) / 2);
+      setLiveSearchRoiRect({
+        left: roiX / pw,
+        top: roiY / ph,
+        width: roiW / pw,
+        height: roiH / ph,
+      });
 
       const gray = edgeNormalize(toGrayArray(ctx, pw, ph), pw, ph);
 
-      const distanceGuideCenterRoiW = Math.max(
-        maxTplWidth + 4,
-        Math.round(pw * DISTANCE_GUIDE_CENTER_ROI_WIDTH_RATIO)
-      );
-      const distanceGuideCenterRoiH = Math.max(
-        maxTplHeight + 4,
-        Math.round(ph * DISTANCE_GUIDE_CENTER_ROI_HEIGHT_RATIO)
-      );
-      const distanceGuideCenterRoiX = Math.round((pw - distanceGuideCenterRoiW) / 2);
-      const distanceGuideCenterRoiY = Math.round((ph - distanceGuideCenterRoiH) / 2);
+      const distanceGuideCenterRoiW = roiW;
+      const distanceGuideCenterRoiH = roiH;
+      const distanceGuideCenterRoiX = roiX;
+      const distanceGuideCenterRoiY = roiY;
 
       setLiveProcessInfo(
-        `${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} / scale ±${liveScaleOptions.join("/")}% / roi ${Math.round(liveRoiWidthRatio * 100)}x${Math.round(liveRoiHeightRatio * 100)}% / d-roi ${Math.round(DISTANCE_GUIDE_CENTER_ROI_WIDTH_RATIO * 100)}x${Math.round(DISTANCE_GUIDE_CENTER_ROI_HEIGHT_RATIO * 100)}%`
+        `${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} (${tpl.sourceType}) / blue 95/100/105 / guide 80/90/110/120 / roi ${Math.round((roiW / pw) * 100)}x${Math.round((roiH / ph) * 100)}%`
       );
       let bestBox: LiveBox | null = null;
       let bestDistanceGuideBox: LiveBox | null = null;
@@ -898,8 +1145,6 @@ export default function CameraPage() {
             );
             const distanceGuidePriority =
               (inDistanceGuideCenterRoi ? 1 : -1)
-              - Math.abs(scaleDeltaPct) * DISTANCE_GUIDE_SCALE_WEIGHT
-              - centerDistanceNorm * 0.04
               + score * DISTANCE_GUIDE_SCORE_WEIGHT;
 
             const box: LiveBox = {
@@ -918,25 +1163,33 @@ export default function CameraPage() {
               priorityScore,
               distanceGuidePriority,
               inDistanceGuideCenterRoi,
+              purpose: variant.purpose,
             };
 
             if (
-              !bestBox ||
-              box.priorityScore > bestBox.priorityScore ||
+              variant.purpose === "blue" &&
               (
-                Math.abs(box.priorityScore - bestBox.priorityScore) < 0.0001 &&
-                box.score > bestBox.score
+                !bestBox ||
+                box.priorityScore > bestBox.priorityScore ||
+                (
+                  Math.abs(box.priorityScore - bestBox.priorityScore) < 0.0001 &&
+                  box.score > bestBox.score
+                )
               )
             ) {
               bestBox = box;
             }
 
             if (
-              !bestDistanceGuideBox ||
-              box.distanceGuidePriority > bestDistanceGuideBox.distanceGuidePriority ||
+              variant.purpose === "guide" &&
+              inDistanceGuideCenterRoi &&
               (
-                Math.abs(box.distanceGuidePriority - bestDistanceGuideBox.distanceGuidePriority) < 0.0001 &&
-                Math.abs(box.scaleDeltaPct) < Math.abs(bestDistanceGuideBox.scaleDeltaPct)
+                !bestDistanceGuideBox ||
+                box.distanceGuidePriority > bestDistanceGuideBox.distanceGuidePriority ||
+                (
+                  Math.abs(box.distanceGuidePriority - bestDistanceGuideBox.distanceGuidePriority) < 0.0001 &&
+                  box.score > bestDistanceGuideBox.score
+                )
               )
             ) {
               bestDistanceGuideBox = box;
@@ -961,73 +1214,87 @@ export default function CameraPage() {
         ? bestDistance.inDistanceGuideCenterRoi ? "in" : "out"
         : "--";
 
+      const now = performance.now();
+
       const deltaRaw = bestDistance ? bestDistance.scaleDeltaPct + liveDistanceScaleOffsetPct : 0;
-
-      if (bestDistance && bestDistance.inDistanceGuideCenterRoi) {
-        const nextHistory = [...distanceGuideDeltaHistoryRef.current, deltaRaw].slice(-liveDistanceMedianWindow);
-        distanceGuideDeltaHistoryRef.current = nextHistory;
-      } else {
-        distanceGuideDeltaHistoryRef.current = [];
-      }
-
-      const delta = distanceGuideDeltaHistoryRef.current.length > 0
-        ? median(distanceGuideDeltaHistoryRef.current)
-        : deltaRaw;
 
       const blueDeltaRaw = best ? best.scaleDeltaPct + liveDistanceScaleOffsetPct : 0;
       const blueDelta = blueDeltaRaw - liveBlueBandCenterOffsetPct;
       const blueAccepted =
         !!best && Math.abs(blueDelta) <= liveBlueBandTolerancePct;
+      const blueVisible = blueAccepted && nextResults.length > 0;
+      const blueHeld = !blueVisible && now <= liveBoxesHoldUntilRef.current;
+      const suppressDistanceGuide = blueVisible || blueHeld;
+      const hasGuideCandidate =
+        !suppressDistanceGuide && !!bestDistance && bestDistance.inDistanceGuideCenterRoi;
 
-       const nextHint =
-        !bestDistance || !bestDistance.inDistanceGuideCenterRoi
-          ? ""
-          : nextDistanceGuideHintWithHysteresis(distanceGuideCurrentHintRef.current, delta);
-
-      setLiveDistanceDebug(
-        `hint:${nextHint || "-"} blue:${blueAccepted ? "yes" : "no"}\n` +
-        `Δ:${delta >= 0 ? "+" : ""}${delta.toFixed(0)}% offset:${liveDistanceScaleOffsetPct >= 0 ? "+" : ""}${liveDistanceScaleOffsetPct}%\n` +
-        `blueΔ:${blueDeltaRaw >= 0 ? "+" : ""}${blueDeltaRaw.toFixed(0)}%`
-      );
-
-      const streak = nextDistanceGuideState(distanceGuideStreakRef.current, nextHint);
-      distanceGuideStreakRef.current = streak;
-      const nextConfirmedHint =
-        streak.count >= liveDistanceHintConfirmCount ? streak.hint : "";
-
-      const now = performance.now();
-      const prevHint = distanceGuideCurrentHintRef.current;
-      let visibleHint = prevHint;
-
-      if (nextConfirmedHint) {
-        if (prevHint !== nextConfirmedHint) {
-          distanceGuideShownAtRef.current = now;
-        }
-        distanceGuideCurrentHintRef.current = nextConfirmedHint;
-        visibleHint = nextConfirmedHint;
-      } else if (prevHint) {
-        const keepVisibleUntil = distanceGuideShownAtRef.current + 2000;
-        if (now >= keepVisibleUntil) {
-          distanceGuideCurrentHintRef.current = "";
-          visibleHint = "";
-        } else {
-          visibleHint = prevHint;
-        }
+      if (hasGuideCandidate) {
+        const nextHistory = [...distanceGuideDeltaHistoryRef.current, deltaRaw].slice(-liveDistanceMedianWindow);
+        distanceGuideDeltaHistoryRef.current = nextHistory;
       } else {
+        distanceGuideDeltaHistoryRef.current = [];
+        distanceGuideStreakRef.current = { hint: "", count: 0 };
         distanceGuideCurrentHintRef.current = "";
-        visibleHint = "";
+        distanceGuideShownAtRef.current = 0;
       }
 
-      setLiveDistanceGuide(visibleHint);
+      const guideDelta = hasGuideCandidate && distanceGuideDeltaHistoryRef.current.length > 0
+        ? median(distanceGuideDeltaHistoryRef.current)
+        : null;
 
-      if (visibleHint) {
-        setLiveBoxes([]);
-        liveBoxesHoldUntilRef.current = 0;
-       } else if (nextResults.length > 0 && blueAccepted) {
+      const nextHint = guideDelta === null
+        ? ""
+        : nextDistanceGuideHintWithHysteresis(distanceGuideCurrentHintRef.current, guideDelta);
+
+      const guideDeltaText = guideDelta === null
+        ? "--"
+        : `${guideDelta >= 0 ? "+" : ""}${guideDelta.toFixed(0)}%`;
+
+      setLiveDistanceDebug(
+        `hint:${nextHint || "-"} blue:${blueAccepted ? "yes" : "no"} roiHit:${guideCenterText} src:${tpl.sourceType}\n` +
+        `guideΔ:${guideDeltaText} offset:${liveDistanceScaleOffsetPct >= 0 ? "+" : ""}${liveDistanceScaleOffsetPct}%\n` +
+        `blueΔ:${blueDeltaRaw >= 0 ? "+" : ""}${blueDeltaRaw.toFixed(0)}% score:${scoreText}`
+      );
+
+      if (blueVisible) {
+        setLiveDistanceGuide("");
         setLiveBoxes(nextResults);
         liveBoxesHoldUntilRef.current = now + Math.max(220, liveGuideIntervalMs * 1.2);
-      } else if (now > liveBoxesHoldUntilRef.current) {
-        setLiveBoxes([]);
+      } else if (blueHeld) {
+        setLiveDistanceGuide("");
+      } else {
+        const streak = nextDistanceGuideState(distanceGuideStreakRef.current, nextHint);
+        distanceGuideStreakRef.current = streak;
+        const nextConfirmedHint =
+          streak.count >= liveDistanceHintConfirmCount ? streak.hint : "";
+
+        const prevHint = distanceGuideCurrentHintRef.current;
+        let visibleHint = prevHint;
+
+        if (nextConfirmedHint) {
+          if (prevHint !== nextConfirmedHint) {
+            distanceGuideShownAtRef.current = now;
+          }
+          distanceGuideCurrentHintRef.current = nextConfirmedHint;
+          visibleHint = nextConfirmedHint;
+        } else if (prevHint) {
+          const keepVisibleUntil = distanceGuideShownAtRef.current + 2000;
+          if (now >= keepVisibleUntil) {
+            distanceGuideCurrentHintRef.current = "";
+            visibleHint = "";
+          } else {
+            visibleHint = prevHint;
+          }
+        } else {
+          distanceGuideCurrentHintRef.current = "";
+          visibleHint = "";
+        }
+
+        setLiveDistanceGuide(visibleHint);
+
+        if (now > liveBoxesHoldUntilRef.current) {
+          setLiveBoxes([]);
+        }
       }
 
     } catch (error) {
@@ -1161,6 +1428,8 @@ export default function CameraPage() {
             originalHeight: srcH,
             storedWidth: outW,
             storedHeight: outH,
+            videoWidth: sourceCanvas.width,
+            videoHeight: sourceCanvas.height,
             quality: attempt.quality,
             dataUrlLength: dataUrl.length,
           };
@@ -1200,6 +1469,7 @@ export default function CameraPage() {
     if (!videoRef.current || isCapturing || !isReady) return;
 
     resetSaveState();
+    try { sessionStorage.removeItem("capturedLiveFrameAtCapture"); } catch {}
 
     const video = videoRef.current;
     const vw = video.videoWidth;
@@ -1264,6 +1534,7 @@ export default function CameraPage() {
 
     try {
       setErrorMsg("");
+      try { sessionStorage.removeItem("capturedLiveFrameAtCapture"); } catch {}
       setIsCapturing(true);
       setSaveStep("capture_start");
 
@@ -1479,6 +1750,56 @@ export default function CameraPage() {
       setLiveGuideSaving(false);
     }
   };
+
+  const CameraDebugPanel = (
+    <div className="rounded-2xl border border-white/10 bg-zinc-950/95 px-4 py-3 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium">カメラ情報</div>
+          <div className="mt-1 text-xs text-zinc-400">距離補助に使えそうな値の確認用</div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setCameraDebugOpen((prev) => !prev)}
+          className="rounded-xl border border-white/15 bg-white/5 px-3 py-1.5 text-sm text-zinc-200"
+        >
+          {cameraDebugOpen ? "閉じる" : "詳細"}
+        </button>
+      </div>
+
+      <div className="rounded-xl border border-white/10 bg-black/30 p-3 text-xs text-zinc-200 leading-relaxed tabular-nums whitespace-pre-line">
+        {cameraDebugSummary}
+      </div>
+
+      {cameraDebugOpen ? (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void collectCameraDebugInfo()}
+              className="rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-sm text-zinc-200"
+            >
+              再取得
+            </button>
+            <button
+              type="button"
+              onClick={() => void copyCameraDebugInfo()}
+              className="rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-3 py-2 text-sm text-cyan-200"
+            >
+              コピー
+            </button>
+            {cameraDebugCopiedMsg ? (
+              <span className="text-xs text-cyan-300">{cameraDebugCopiedMsg}</span>
+            ) : null}
+          </div>
+
+          <pre className="max-h-64 overflow-auto rounded-xl border border-white/10 bg-black/40 p-3 text-[10px] leading-relaxed text-zinc-300 whitespace-pre-wrap break-words">
+            {cameraDebugSnapshot ? JSON.stringify(cameraDebugSnapshot, null, 2) : "未取得"}
+          </pre>
+        </div>
+      ) : null}
+    </div>
+  );
 
   const DebugGuideControls = (
     <div className="rounded-2xl border border-white/10 bg-zinc-950/95 px-4 py-3 space-y-3">
@@ -1745,10 +2066,21 @@ export default function CameraPage() {
                     </div>
                   </div>
 
-            <div className="text-xs text-zinc-400">
-              {cameraTemplateInfo
-                ? `${cameraTemplateInfo.width} × ${cameraTemplateInfo.height}`
-                : "サイズ取得中…"}
+            <div className="text-xs text-zinc-400 space-y-1">
+              <div>
+                {cameraTemplateInfo
+                  ? `${cameraTemplateInfo.width} × ${cameraTemplateInfo.height}`
+                  : "サイズ取得中…"}
+              </div>
+              <div>
+                使用元: {liveTemplateSourceType === "live"
+                  ? "reviewリサイズ/live用"
+                  : liveTemplateSourceType === "review"
+                  ? "撮影画像由来"
+                  : liveTemplateSourceType === "thumb"
+                  ? "サムネイル由来"
+                  : "未読込"}
+              </div>
             </div>
           </>
         ) : (
@@ -1858,68 +2190,110 @@ export default function CameraPage() {
       />
 
       <div className="absolute inset-0 pointer-events-none">
-        <div
-          className="absolute border border-white/70 rounded-md"
-          style={{
-            width: videoDisplayRect.width * 0.75,
-            height: videoDisplayRect.height * 0.75,
-            left: videoDisplayRect.left + videoDisplayRect.width * 0.125,
-            top: videoDisplayRect.top + videoDisplayRect.height * 0.125,
-          }}
-        />
-        <div
-          className="absolute bg-white/45"
-          style={{
-            width: "1px",
-            height: videoDisplayRect.height * 0.75,
-            left: videoDisplayRect.left + videoDisplayRect.width * 0.5,
-            top: videoDisplayRect.top + videoDisplayRect.height * 0.125,
-            transform: "translateX(-0.5px)",
-          }}
-        />
-        <div
-          className="absolute bg-white/45"
-          style={{
-            height: "1px",
-            width: videoDisplayRect.width * 0.75,
-            left: videoDisplayRect.left + videoDisplayRect.width * 0.125,
-            top: videoDisplayRect.top + videoDisplayRect.height * 0.5,
-            transform: "translateY(-0.5px)",
-          }}
-        />
+        {videoDisplayRect.width > 0 && videoDisplayRect.height > 0 ? (() => {
+          const guideWidth = videoDisplayRect.width * 0.75;
+          const guideHeight = videoDisplayRect.height * 0.75;
+          const guideLeft = videoDisplayRect.left + (videoDisplayRect.width - guideWidth) / 2;
+          const guideTop = videoDisplayRect.top + (videoDisplayRect.height - guideHeight) / 2;
+          const videoCenterX = videoDisplayRect.left + videoDisplayRect.width / 2;
+          const videoCenterY = videoDisplayRect.top + videoDisplayRect.height / 2;
 
-        <div
-          className={`absolute rounded-xl border ${liveGuideActive ? "border-cyan-400/40" : "border-white/20"}`}
-          style={{
-            width: videoDisplayRect.width * liveRoiWidthRatio,
-            height: videoDisplayRect.height * liveRoiHeightRatio,
-            left: videoDisplayRect.left + videoDisplayRect.width * ((1 - liveRoiWidthRatio) / 2),
-            top: videoDisplayRect.top + videoDisplayRect.height * ((1 - liveRoiHeightRatio) / 2),
-          }}
-        />
+          const roiRect = liveSearchRoiRect ?? {
+            left: (1 - Math.max(0.05, Math.min(1, liveRoiWidthRatio))) / 2,
+            top: (1 - Math.max(0.05, Math.min(1, liveRoiHeightRatio))) / 2,
+            width: Math.max(0.05, Math.min(1, liveRoiWidthRatio)),
+            height: Math.max(0.05, Math.min(1, liveRoiHeightRatio)),
+          };
+          const roiLeft = videoDisplayRect.left + videoDisplayRect.width * roiRect.left;
+          const roiTop = videoDisplayRect.top + videoDisplayRect.height * roiRect.top;
+          const roiWidth = videoDisplayRect.width * roiRect.width;
+          const roiHeight = videoDisplayRect.height * roiRect.height;
 
-        <div
-          className="absolute rounded-lg border border-amber-400/30"
-          style={{
-            width: videoDisplayRect.width * DISTANCE_GUIDE_CENTER_ROI_WIDTH_RATIO,
-            height: videoDisplayRect.height * DISTANCE_GUIDE_CENTER_ROI_HEIGHT_RATIO,
-            left: videoDisplayRect.left + videoDisplayRect.width * ((1 - DISTANCE_GUIDE_CENTER_ROI_WIDTH_RATIO) / 2),
-            top: videoDisplayRect.top + videoDisplayRect.height * ((1 - DISTANCE_GUIDE_CENTER_ROI_HEIGHT_RATIO) / 2),
-          }}
-        />
+          return (
+            <>
+              {/* 撮影位置合わせ用のライブビュー補助線。検知範囲ではなく、画面全体の75%目安。 */}
+              <div
+                className="absolute border border-white/35 rounded-md"
+                style={{
+                  width: guideWidth,
+                  height: guideHeight,
+                  left: guideLeft,
+                  top: guideTop,
+                }}
+              />
+              <div
+                className="absolute bg-white/25"
+                style={{
+                  width: "1px",
+                  height: videoDisplayRect.height,
+                  left: videoCenterX,
+                  top: videoDisplayRect.top,
+                  transform: "translateX(-0.5px)",
+                }}
+              />
+              <div
+                className="absolute bg-white/25"
+                style={{
+                  height: "1px",
+                  width: videoDisplayRect.width,
+                  left: videoDisplayRect.left,
+                  top: videoCenterY,
+                  transform: "translateY(-0.5px)",
+                }}
+              />
 
-        {liveBoxes.map((box, index) => (
-          <div
-            key={`live-box-${index}-${box.x}-${box.y}`}
-            className="absolute rounded-md border-[3px] border-sky-400 transition-opacity duration-200"
-            style={{
-              left: videoDisplayRect.left + videoDisplayRect.width * box.x,
-              top: videoDisplayRect.top + videoDisplayRect.height * box.y,
-              width: videoDisplayRect.width * box.w,
-              height: videoDisplayRect.height * box.h,
-            }}
-          />
-        ))}
+              {/* 距離検知ROI。実際の探索範囲に連動。 */}
+              <div
+                className="absolute hidden border-2 border-white/75 rounded-md"
+                style={{
+                  width: roiWidth,
+                  height: roiHeight,
+                  left: roiLeft,
+                  top: roiTop,
+                }}
+              />
+              <div
+                className="absolute hidden bg-white/45"
+                style={{
+                  width: "1px",
+                  height: roiHeight,
+                  left: roiLeft + roiWidth / 2,
+                  top: roiTop,
+                  transform: "translateX(-0.5px)",
+                }}
+              />
+              <div
+                className="absolute hidden bg-white/45"
+                style={{
+                  height: "1px",
+                  width: roiWidth,
+                  left: roiLeft,
+                  top: roiTop + roiHeight / 2,
+                  transform: "translateY(-0.5px)",
+                }}
+              />
+            </>
+          );
+        })() : null}
+
+
+        {liveBoxes.map((box, index) => {
+          const displayLeft = box.x + Math.max(0, (box.w - box.matchW) / 2);
+          const displayTop = box.y + Math.max(0, (box.h - box.matchH) / 2);
+
+          return (
+            <div
+              key={`live-box-${index}-${box.x}-${box.y}`}
+              className="absolute rounded-md border-[3px] border-sky-400 transition-opacity duration-200"
+              style={{
+                left: videoDisplayRect.left + videoDisplayRect.width * displayLeft,
+                top: videoDisplayRect.top + videoDisplayRect.height * displayTop,
+                width: videoDisplayRect.width * box.matchW,
+                height: videoDisplayRect.height * box.matchH,
+              }}
+            />
+          );
+        })}
       </div>
 
       {!isReady && !errorMsg ? (
@@ -1959,8 +2333,19 @@ export default function CameraPage() {
         {liveDistanceGuide || "距離誘導"}
       </div>
 
+      <div
+        className={`hidden absolute right-2 top-2 px-2 py-1 rounded-lg border border-white/10 bg-black/75 text-zinc-200 text-[10px] leading-tight tabular-nums whitespace-pre-line text-left max-w-[38vw] transition-opacity duration-300 ${
+          liveDistanceDebug ? "opacity-100" : "opacity-0 pointer-events-none"
+        }`}
+      >
+        {liveDistanceDebug || "score:--"}
+      </div>
 
-      {liveGuideOverlayMsg ? (
+      <div className="hidden absolute left-2 top-2 px-2 py-1 rounded-lg border border-cyan-400/20 bg-black/75 text-cyan-100 text-[10px] leading-tight tabular-nums whitespace-pre-line text-left max-w-[34vw]">
+        {cameraDebugSummary}
+      </div>
+
+      {false && liveGuideOverlayMsg ? (
         <div className={`absolute right-4 top-6 px-4 py-2 rounded-xl border text-sm ${
           liveGuideOverlayMsg.includes("失敗") || liveGuideOverlayMsg.includes("タイムアウト")
             ? "border-rose-400/30 bg-black/75 text-rose-200"
