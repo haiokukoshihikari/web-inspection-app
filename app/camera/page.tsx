@@ -2213,7 +2213,7 @@ export default function CameraPage() {
     chooseCameraSample(cameraSamples, selectedCameraSampleId);
   const selectedCameraSamplePreview = selectedCameraSample?.thumbUrl || selectedCameraSample?.compareUrl || selectedCameraSample?.cameraCompareUrl || "";
 
-  const SampleSelector = (
+  const renderSampleSelector = (containerClassName: string, panelClassName: string, buttonClassName = "w-14 h-14") => (
     <>
       {isSamplePickerOpen ? (
         <button
@@ -2224,11 +2224,11 @@ export default function CameraPage() {
         />
       ) : null}
 
-      <div className="absolute left-3 bottom-3 z-40 pointer-events-auto">
+      <div className={containerClassName}>
         <button
           type="button"
           onClick={() => setIsSamplePickerOpen((prev) => !prev)}
-          className="w-16 h-16 rounded-2xl border border-white/25 bg-black/70 overflow-hidden shadow-lg flex items-center justify-center"
+          className={`${buttonClassName} rounded-2xl border border-white/25 bg-black/70 overflow-hidden shadow-lg flex items-center justify-center active:scale-[0.98]`}
           aria-label="使用する見本を選択"
           title="使用する見本を選択"
         >
@@ -2240,7 +2240,7 @@ export default function CameraPage() {
         </button>
 
         {isSamplePickerOpen ? (
-          <div className="absolute left-0 bottom-20 w-[min(88vw,360px)] rounded-2xl border border-white/15 bg-black/90 p-3 shadow-2xl">
+          <div className={panelClassName}>
             <div className="mb-2 text-xs text-zinc-300">距離誘導・青枠に使用する見本</div>
             {cameraSamples.length > 0 ? (
               <div className="grid grid-cols-4 gap-2 max-h-[38vh] overflow-y-auto pr-1">
@@ -2317,8 +2317,6 @@ export default function CameraPage() {
         onLoadedMetadata={updateVideoDisplayRect}
         onCanPlay={updateVideoDisplayRect}
       />
-
-      {SampleSelector}
 
       <div className="absolute inset-0 pointer-events-none">
         {videoDisplayRect.width > 0 && videoDisplayRect.height > 0 ? (() => {
@@ -2512,6 +2510,7 @@ export default function CameraPage() {
             <div className="absolute left-1/2 top-4 -translate-x-1/2">
               {PhotoButton}
             </div>
+            {renderSampleSelector("absolute left-1/2 bottom-4 -translate-x-1/2 z-40 pointer-events-auto", "absolute left-0 bottom-16 w-[min(88vw,360px)] rounded-2xl border border-white/15 bg-black/90 p-3 shadow-2xl")}
           </div>
 
           <div className="flex-1 min-w-0 min-h-0 overflow-hidden">
@@ -2536,7 +2535,7 @@ export default function CameraPage() {
 
           <div className="shrink-0 bg-black px-5 pt-3 pb-8">
             <div className="flex items-center justify-between">
-              <div className="w-14 h-14" />
+              {renderSampleSelector("relative z-40 pointer-events-auto", "absolute left-0 bottom-16 w-[min(88vw,360px)] rounded-2xl border border-white/15 bg-black/90 p-3 shadow-2xl")}
               {ShutterButton}
               {SettingsButton}
             </div>

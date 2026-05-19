@@ -1855,6 +1855,25 @@ const drawPolylineCanvas = (
 
   const canAdd = useMemo(() => samples.length < MAX_SAMPLES, [samples.length]);
 
+  const IconSaveImage = (
+    <svg
+      viewBox="0 0 24 24"
+      className="w-6 h-6 text-white"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <circle cx="8.5" cy="10.5" r="1.5" />
+      <path d="M21 15l-5-5L5 21" />
+      <path d="M12 3v9" />
+      <path d="M8.5 8.5 12 12l3.5-3.5" />
+    </svg>
+  );
+
   return (
     <main className="min-h-screen bg-black text-white flex flex-col">
       <Script
@@ -2159,13 +2178,13 @@ const drawPolylineCanvas = (
             <button
               onClick={() => void handleManualSaveImages()}
               disabled={manualSaving}
-              className={`px-4 h-11 rounded-2xl border border-white/15 bg-white/5 text-sm text-white shadow-lg active:scale-[0.98] ${
+              className={`w-14 h-14 rounded-2xl border border-white/15 bg-white/5 flex items-center justify-center shadow-lg active:scale-[0.98] ${
                 manualSaving ? "opacity-50" : ""
               }`}
               aria-label="画像保存"
               title="画像保存"
             >
-              画像保存
+              {IconSaveImage}
             </button>
             {manualSaveMessage ? (
               <div className="text-[11px] text-cyan-300 whitespace-nowrap">{manualSaveMessage}</div>
