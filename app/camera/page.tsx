@@ -598,43 +598,6 @@ export default function CameraPage() {
     }
   }, []);
 
-  const selectCameraSample = useCallback((sampleId: string) => {
-    localStorage.setItem(SELECTED_CAMERA_SAMPLE_ID_KEY, sampleId);
-    setSelectedCameraSampleId(sampleId);
-    setLiveBoxes([]);
-    setLiveSearchRoiRect(null);
-    setLiveGuideActive(false);
-  }, []);
-
-  const deleteCameraSample = useCallback((sampleId: string) => {
-    const target = cameraSamples.find((sample) => sample.id === sampleId);
-    const label = target?.order ? `見本${target.order}` : "この見本";
-    if (!window.confirm(`${label}を削除しますか？`)) return;
-
-    const nextSamples = cameraSamples.filter((sample) => sample.id !== sampleId);
-    localStorage.setItem(SAMPLES_KEY, JSON.stringify(nextSamples));
-
-    const nextSelected =
-      selectedCameraSampleId === sampleId
-        ? chooseCameraSample(nextSamples, "")
-        : chooseCameraSample(nextSamples, selectedCameraSampleId);
-
-    if (nextSelected?.id) {
-      localStorage.setItem(SELECTED_CAMERA_SAMPLE_ID_KEY, nextSelected.id);
-      setSelectedCameraSampleId(nextSelected.id);
-    } else {
-      localStorage.removeItem(SELECTED_CAMERA_SAMPLE_ID_KEY);
-      setSelectedCameraSampleId("");
-      setIsSamplePickerOpen(false);
-    }
-
-    setCameraSamples(nextSamples);
-    setLiveBoxes([]);
-    setLiveSearchRoiRect(null);
-    setLiveGuideActive(false);
-  }, [cameraSamples, selectedCameraSampleId]);
-
-
   const updateVideoDisplayRect = useCallback(() => {
     const frame = previewFrameRef.current;
     const video = videoRef.current;
@@ -822,6 +785,77 @@ export default function CameraPage() {
       startingRef.current = false;
     }
   }, [stopCamera]);
+
+  const selectCameraSample = useCallback((sampleId: string) => {
+    localStorage.setItem(SELECTED_CAMERA_SAMPLE_ID_KEY, sampleId);
+    setSelectedCameraSampleId(sampleId);
+    setLiveBoxes([]);
+    setLiveSearchRoiRect(null);
+    setLiveGuideActive(false);
+
+    // iOS Safari can pause the video element after touch/confirm-style UI changes.
+    // Keep the camera stream alive after switching samples.
+    window.setTimeout(() => {
+      const video = videoRef.current;
+      const stream = streamRef.current;
+      const hasLiveTrack = stream?.getVideoTracks().some((track) => track.readyState === "live");
+      if (!hasLiveTrack) {
+        void startCamera();
+        return;
+      }
+      if (video && video.paused) {
+        void video.play().catch(() => {
+          void startCamera();
+        });
+      }
+    }, 120);
+  }, [startCamera]);
+
+  const deleteCameraSample = useCallback((sampleId: string) => {
+    const target = cameraSamples.find((sample) => sample.id === sampleId);
+    const label = target?.order ? `見本${target.order}` : "この見本";
+    if (!window.confirm(`${label}を削除しますか？`)) return;
+
+    const nextSamples = cameraSamples.filter((sample) => sample.id !== sampleId);
+    localStorage.setItem(SAMPLES_KEY, JSON.stringify(nextSamples));
+
+    const nextSelected =
+      selectedCameraSampleId === sampleId
+        ? chooseCameraSample(nextSamples, "")
+        : chooseCameraSample(nextSamples, selectedCameraSampleId);
+
+    if (nextSelected?.id) {
+      localStorage.setItem(SELECTED_CAMERA_SAMPLE_ID_KEY, nextSelected.id);
+      setSelectedCameraSampleId(nextSelected.id);
+    } else {
+      localStorage.removeItem(SELECTED_CAMERA_SAMPLE_ID_KEY);
+      setSelectedCameraSampleId("");
+      setIsSamplePickerOpen(false);
+    }
+
+    setCameraSamples(nextSamples);
+    setLiveBoxes([]);
+    setLiveSearchRoiRect(null);
+    setLiveGuideActive(false);
+
+    // Deleting a sample opens a browser confirm dialog; on some phones this can
+    // pause the video preview even though the camera stream itself is still alive.
+    window.setTimeout(() => {
+      const video = videoRef.current;
+      const stream = streamRef.current;
+      const hasLiveTrack = stream?.getVideoTracks().some((track) => track.readyState === "live");
+      if (!hasLiveTrack) {
+        void startCamera();
+        return;
+      }
+      if (video && video.paused) {
+        void video.play().catch(() => {
+          void startCamera();
+        });
+      }
+    }, 200);
+  }, [cameraSamples, selectedCameraSampleId, startCamera]);
+
 
   useEffect(() => {
     mountedRef.current = true;
