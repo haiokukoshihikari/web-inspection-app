@@ -805,6 +805,8 @@ export default function ReviewPage() {
   const [autoSaveOn, setAutoSaveOn] = useState(false);
   const [savingOnLeave, setSavingOnLeave] = useState(false);
   const [saveLeavingMessage, setSaveLeavingMessage] = useState("");
+  const [manualSaving, setManualSaving] = useState(false);
+  const [manualSaveMessage, setManualSaveMessage] = useState("");
 
   const editingSampleId = samples.length === 1 ? samples[0]?.id ?? null : activeSampleId;
   const editingSample = editingSampleId ? samples.find((s) => s.id === editingSampleId) ?? null : null;
@@ -1720,6 +1722,80 @@ const drawPolylineCanvas = (
     }
   };
 
+  const handleManualSaveImages = async () => {
+    if (manualSaving) return;
+
+    try {
+      setManualSaving(true);
+      setManualSaveMessage("保存準備中");
+
+      const now = new Date();
+      const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(
+        now.getDate()
+      ).padStart(2, "0")}_${String(now.getHours()).padStart(2, "0")}${String(
+        now.getMinutes()
+      ).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
+
+      const files: File[] = [];
+
+      if (capturedImage) {
+        files.push(await dataUrlToFile(capturedImage, `inspection_raw_${stamp}.jpg`));
+      }
+
+      const resultDataUrl = await buildResultImageDataUrl();
+      if (resultDataUrl) {
+        files.push(await dataUrlToFile(resultDataUrl, `inspection_result_${stamp}.jpg`));
+      }
+
+      if (files.length === 0) {
+        setManualSaveMessage("保存できる画像がありません");
+        setManualSaving(false);
+        window.setTimeout(() => setManualSaveMessage(""), 2500);
+        return;
+      }
+
+      const nav = navigator as Navigator & {
+        canShare?: (data?: ShareData) => boolean;
+      };
+
+      if (
+        typeof nav.share === "function" &&
+        typeof nav.canShare === "function" &&
+        nav.canShare({ files })
+      ) {
+        setManualSaveMessage("共有シートを開いています");
+        await nav.share({
+          files,
+          title: "inspection images",
+        });
+      } else {
+        setManualSaveMessage("保存中");
+        if (capturedImage) {
+          await downloadDataUrl(capturedImage, `inspection_raw_${stamp}.jpg`);
+        }
+        if (resultDataUrl) {
+          await downloadDataUrl(resultDataUrl, `inspection_result_${stamp}.jpg`);
+        }
+      }
+
+      setManualSaveMessage("保存しました");
+      window.setTimeout(() => setManualSaveMessage(""), 2500);
+    } catch (err: any) {
+      console.error(err);
+
+      if (err?.name === "AbortError") {
+        setManualSaveMessage("");
+        setManualSaving(false);
+        return;
+      }
+
+      alert("画像保存に失敗しました。");
+      setManualSaveMessage("");
+    } finally {
+      setManualSaving(false);
+    }
+  };
+
 
   const pad3 = (n: number) => String(n).padStart(3, "0");
 
@@ -2076,6 +2152,25 @@ const drawPolylineCanvas = (
             <span className="block w-4 h-0.5 bg-white rounded" />
             <span className="block w-4 h-0.5 bg-white rounded" />
           </button>
+
+          <div className="flex-1" />
+
+          <div className="flex flex-col items-center gap-1">
+            <button
+              onClick={() => void handleManualSaveImages()}
+              disabled={manualSaving}
+              className={`px-4 h-11 rounded-2xl border border-white/15 bg-white/5 text-sm text-white shadow-lg active:scale-[0.98] ${
+                manualSaving ? "opacity-50" : ""
+              }`}
+              aria-label="画像保存"
+              title="画像保存"
+            >
+              画像保存
+            </button>
+            {manualSaveMessage ? (
+              <div className="text-[11px] text-cyan-300 whitespace-nowrap">{manualSaveMessage}</div>
+            ) : null}
+          </div>
 
           <div className="flex-1" />
 

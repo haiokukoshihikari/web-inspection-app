@@ -42,6 +42,7 @@ type InspectionProfile = {
 const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
 
 const SAMPLES_KEY = "inspection:samples";
+const SELECTED_CAMERA_SAMPLE_ID_KEY = "inspection:selectedCameraSampleId";
 const DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET = 0.12;
 const DEFAULT_LIVE_GUIDE_INTERVAL_MS = 1500;
 const LIVE_MAX_BOXES = 1;
@@ -99,6 +100,39 @@ type Rect = {
   width: number;
   height: number;
 };
+
+function normalizeSamples(rawSamples: unknown): SampleItem[] {
+  if (!Array.isArray(rawSamples)) return [];
+
+  return (rawSamples as SampleItem[])
+    .map((sample, index) => ({
+      ...sample,
+      order: typeof sample.order === "number" ? sample.order : index + 1,
+    }))
+    .sort((a, b) => (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER));
+}
+
+function getCameraSampleSource(sample: SampleItem | null | undefined): {
+  src: string;
+  sourceType: "live" | "review" | "thumb" | "none";
+} {
+  if (!sample) return { src: "", sourceType: "none" };
+  if (sample.cameraCompareUrl) return { src: sample.cameraCompareUrl, sourceType: "live" };
+  if (sample.compareUrl) return { src: sample.compareUrl, sourceType: "review" };
+  if (sample.thumbUrl) return { src: sample.thumbUrl, sourceType: "thumb" };
+  return { src: "", sourceType: "none" };
+}
+
+function chooseCameraSample(samples: SampleItem[], preferredId: string): SampleItem | null {
+  if (samples.length === 0) return null;
+
+  const preferred = preferredId
+    ? samples.find((sample) => sample.id === preferredId && !!getCameraSampleSource(sample).src)
+    : null;
+  if (preferred) return preferred;
+
+  return samples.find((sample) => !!getCameraSampleSource(sample).src) ?? null;
+}
 
 type CameraDebugSnapshot = {
   collectedAt: string;
@@ -492,6 +526,9 @@ export default function CameraPage() {
   const [firstSamplePreviewUrl, setFirstSamplePreviewUrl] = useState("");
   const [cameraTemplateInfo, setCameraTemplateInfo] = useState<{ width: number; height: number } | null>(null);
   const [liveTemplateSourceType, setLiveTemplateSourceType] = useState<"live" | "review" | "thumb" | "none">("none");
+  const [cameraSamples, setCameraSamples] = useState<SampleItem[]>([]);
+  const [selectedCameraSampleId, setSelectedCameraSampleId] = useState("");
+  const [isSamplePickerOpen, setIsSamplePickerOpen] = useState(false);
   const [videoDisplayRect, setVideoDisplayRect] = useState<Rect>({ left: 0, top: 0, width: 0, height: 0 });
   const [cameraDebugSnapshot, setCameraDebugSnapshot] = useState<CameraDebugSnapshot | null>(null);
   const [cameraDebugSummary, setCameraDebugSummary] = useState("focus:-\nmode:-\nzoom:-\nsize:-");
@@ -535,6 +572,67 @@ export default function CameraPage() {
       return true;
     });
   }, []);
+
+  const readCameraSamples = useCallback(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(SAMPLES_KEY) || "[]");
+      const samples = normalizeSamples(parsed);
+      const storedSelectedId = localStorage.getItem(SELECTED_CAMERA_SAMPLE_ID_KEY) || "";
+      const selectedSample = chooseCameraSample(samples, storedSelectedId);
+
+      setCameraSamples(samples);
+      setSelectedCameraSampleId(selectedSample?.id ?? "");
+
+      if (selectedSample?.id) {
+        localStorage.setItem(SELECTED_CAMERA_SAMPLE_ID_KEY, selectedSample.id);
+      } else {
+        localStorage.removeItem(SELECTED_CAMERA_SAMPLE_ID_KEY);
+      }
+
+      return { samples, selectedSample };
+    } catch {
+      setCameraSamples([]);
+      setSelectedCameraSampleId("");
+      localStorage.removeItem(SELECTED_CAMERA_SAMPLE_ID_KEY);
+      return { samples: [] as SampleItem[], selectedSample: null as SampleItem | null };
+    }
+  }, []);
+
+  const selectCameraSample = useCallback((sampleId: string) => {
+    localStorage.setItem(SELECTED_CAMERA_SAMPLE_ID_KEY, sampleId);
+    setSelectedCameraSampleId(sampleId);
+    setLiveBoxes([]);
+    setLiveSearchRoiRect(null);
+    setLiveGuideActive(false);
+  }, []);
+
+  const deleteCameraSample = useCallback((sampleId: string) => {
+    const target = cameraSamples.find((sample) => sample.id === sampleId);
+    const label = target?.order ? `見本${target.order}` : "この見本";
+    if (!window.confirm(`${label}を削除しますか？`)) return;
+
+    const nextSamples = cameraSamples.filter((sample) => sample.id !== sampleId);
+    localStorage.setItem(SAMPLES_KEY, JSON.stringify(nextSamples));
+
+    const nextSelected =
+      selectedCameraSampleId === sampleId
+        ? chooseCameraSample(nextSamples, "")
+        : chooseCameraSample(nextSamples, selectedCameraSampleId);
+
+    if (nextSelected?.id) {
+      localStorage.setItem(SELECTED_CAMERA_SAMPLE_ID_KEY, nextSelected.id);
+      setSelectedCameraSampleId(nextSelected.id);
+    } else {
+      localStorage.removeItem(SELECTED_CAMERA_SAMPLE_ID_KEY);
+      setSelectedCameraSampleId("");
+      setIsSamplePickerOpen(false);
+    }
+
+    setCameraSamples(nextSamples);
+    setLiveBoxes([]);
+    setLiveSearchRoiRect(null);
+    setLiveGuideActive(false);
+  }, [cameraSamples, selectedCameraSampleId]);
 
 
   const updateVideoDisplayRect = useCallback(() => {
@@ -838,26 +936,9 @@ export default function CameraPage() {
 
     const loadCameraTemplatePreview = async () => {
       try {
-        const raw = localStorage.getItem(SAMPLES_KEY);
-        if (!raw) {
-          setFirstSamplePreviewUrl("");
-          setCameraTemplateInfo(null);
-          return;
-        }
+        const { selectedSample } = readCameraSamples();
+        const { src } = getCameraSampleSource(selectedSample);
 
-        const parsed = JSON.parse(raw);
-        if (!Array.isArray(parsed) || parsed.length === 0) {
-          setFirstSamplePreviewUrl("");
-          setCameraTemplateInfo(null);
-          return;
-        }
-
-        const sample = parsed[0] as SampleItem & {
-          cameraCompareUrl?: string;
-          compareUrl?: string;
-          thumbUrl?: string;
-        };
-        const src = sample.cameraCompareUrl || sample.compareUrl || sample.thumbUrl || "";
         if (!src) {
           setFirstSamplePreviewUrl("");
           setCameraTemplateInfo(null);
@@ -892,44 +973,14 @@ export default function CameraPage() {
       cancelled = true;
       window.removeEventListener("focus", handleFocus);
     };
-  }, [configVersion]);
+  }, [configVersion, readCameraSamples, selectedCameraSampleId]);
 
   useEffect(() => {
     let cancelled = false;
 
     const loadLiveTemplate = async () => {
       try {
-        const raw = localStorage.getItem(SAMPLES_KEY);
-        if (!raw) {
-          liveTemplateRef.current = null;
-          setLiveTemplateSourceType("none");
-          setLiveBoxes([]);
-          setLiveSearchRoiRect(null);
-          setLiveGuideActive(false);
-          return;
-        }
-
-        const parsed = JSON.parse(raw);
-        if (!Array.isArray(parsed) || parsed.length === 0) {
-          liveTemplateRef.current = null;
-          setLiveTemplateSourceType("none");
-          setLiveBoxes([]);
-          setLiveSearchRoiRect(null);
-          setLiveGuideActive(false);
-          return;
-        }
-
-        const sortedSamples = (parsed as SampleItem[])
-          .map((sample, index) => ({
-            ...sample,
-            order: typeof sample.order === "number" ? sample.order : index + 1,
-          }))
-          .sort((a, b) => (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER));
-
-        const sample =
-          sortedSamples.find((item) => !!item.cameraCompareUrl) ||
-          sortedSamples.find((item) => !!(item.compareUrl || item.thumbUrl));
-
+        const { selectedSample: sample } = readCameraSamples();
         if (!sample) {
           liveTemplateRef.current = null;
           setLiveTemplateSourceType("none");
@@ -939,17 +990,8 @@ export default function CameraPage() {
           return;
         }
 
-        const sourceType: "live" | "review" | "thumb" = sample.cameraCompareUrl
-          ? "live"
-          : sample.compareUrl
-          ? "review"
-          : "thumb";
-        const src = sourceType === "live"
-          ? sample.cameraCompareUrl
-          : sourceType === "review"
-          ? sample.compareUrl
-          : sample.thumbUrl;
-        if (!src) {
+        const { src, sourceType } = getCameraSampleSource(sample);
+        if (!src || sourceType === "none") {
           liveTemplateRef.current = null;
           setLiveTemplateSourceType("none");
           setLiveBoxes([]);
@@ -1009,6 +1051,7 @@ export default function CameraPage() {
         });
 
         liveTemplateRef.current = { sample, variants, baseWidth, baseHeight, baseRawWidth, baseRawHeight, sourceType };
+        setLiveTemplateSourceType(sourceType);
         setLiveGuideActive(true);
       } catch (error) {
         console.error('ライブ簡易検査の見本読み込みに失敗しました', error);
@@ -1029,7 +1072,7 @@ export default function CameraPage() {
       window.removeEventListener('storage', handleStorage);
       window.removeEventListener('focus', handleStorage);
     };
-  }, [liveTemplateScaleFactors, isReady]);
+  }, [liveTemplateScaleFactors, isReady, readCameraSamples, selectedCameraSampleId]);
 
   const runLiveCheck = useCallback(async () => {
     if (liveRunningRef.current || isCapturing || !isReady) return;
@@ -2165,9 +2208,95 @@ export default function CameraPage() {
     </button>
   );
 
+  const selectedCameraSample =
+    cameraSamples.find((sample) => sample.id === selectedCameraSampleId) ||
+    chooseCameraSample(cameraSamples, selectedCameraSampleId);
+  const selectedCameraSamplePreview = selectedCameraSample?.thumbUrl || selectedCameraSample?.compareUrl || selectedCameraSample?.cameraCompareUrl || "";
+
+  const SampleSelector = (
+    <>
+      {isSamplePickerOpen ? (
+        <button
+          type="button"
+          className="fixed inset-0 z-30 cursor-default"
+          aria-label="見本一覧を閉じる"
+          onClick={() => setIsSamplePickerOpen(false)}
+        />
+      ) : null}
+
+      <div className="absolute left-3 bottom-3 z-40 pointer-events-auto">
+        <button
+          type="button"
+          onClick={() => setIsSamplePickerOpen((prev) => !prev)}
+          className="w-16 h-16 rounded-2xl border border-white/25 bg-black/70 overflow-hidden shadow-lg flex items-center justify-center"
+          aria-label="使用する見本を選択"
+          title="使用する見本を選択"
+        >
+          {selectedCameraSamplePreview ? (
+            <img src={selectedCameraSamplePreview} alt="使用中の見本" className="w-full h-full object-cover" />
+          ) : (
+            <span className="text-[10px] text-zinc-300 px-1 leading-tight">見本なし</span>
+          )}
+        </button>
+
+        {isSamplePickerOpen ? (
+          <div className="absolute left-0 bottom-20 w-[min(88vw,360px)] rounded-2xl border border-white/15 bg-black/90 p-3 shadow-2xl">
+            <div className="mb-2 text-xs text-zinc-300">距離誘導・青枠に使用する見本</div>
+            {cameraSamples.length > 0 ? (
+              <div className="grid grid-cols-4 gap-2 max-h-[38vh] overflow-y-auto pr-1">
+                {cameraSamples.map((sample, index) => {
+                  const preview = sample.thumbUrl || sample.compareUrl || sample.cameraCompareUrl || "";
+                  const active = sample.id === selectedCameraSampleId;
+
+                  return (
+                    <div key={sample.id} className="relative">
+                      <button
+                        type="button"
+                        onClick={() => selectCameraSample(sample.id)}
+                        className={`relative aspect-square w-full overflow-hidden rounded-xl border ${
+                          active ? "border-sky-400 ring-2 ring-sky-400/50" : "border-white/15"
+                        } bg-zinc-900`}
+                        title={`見本${sample.order ?? index + 1}`}
+                      >
+                        {preview ? (
+                          <img src={preview} alt={`見本${sample.order ?? index + 1}`} className="w-full h-full object-cover" />
+                        ) : (
+                          <span className="text-[10px] text-zinc-400">画像なし</span>
+                        )}
+                        <span className="absolute left-1 bottom-1 rounded bg-black/70 px-1 text-[10px] text-white">
+                          {sample.order ?? index + 1}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          deleteCameraSample(sample.id);
+                        }}
+                        className="absolute -right-1 -top-1 w-6 h-6 rounded-full bg-rose-600 text-white text-sm leading-none shadow"
+                        aria-label={`見本${sample.order ?? index + 1}を削除`}
+                        title={`見本${sample.order ?? index + 1}を削除`}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="rounded-xl border border-white/10 bg-white/5 p-3 text-xs text-zinc-400">
+                登録済み見本がありません
+              </div>
+            )}
+          </div>
+        ) : null}
+      </div>
+    </>
+  );
+
   const TopBar = (
     <div className="h-20 shrink-0 flex items-center justify-between px-4 border-b border-zinc-800 bg-zinc-950">
-      <div className="text-base font-medium">カメラ</div>
+      {PhotoButton}
       <button
         onClick={() => router.push("/")}
         className="text-sm text-zinc-300"
@@ -2188,6 +2317,8 @@ export default function CameraPage() {
         onLoadedMetadata={updateVideoDisplayRect}
         onCanPlay={updateVideoDisplayRect}
       />
+
+      {SampleSelector}
 
       <div className="absolute inset-0 pointer-events-none">
         {videoDisplayRect.width > 0 && videoDisplayRect.height > 0 ? (() => {
@@ -2378,7 +2509,7 @@ export default function CameraPage() {
       {isLandscape ? (
         <div className="flex-1 min-h-0 flex bg-black overflow-hidden">
           <div className="w-20 shrink-0 relative">
-            <div className="absolute left-1/2 bottom-4 -translate-x-1/2">
+            <div className="absolute left-1/2 top-4 -translate-x-1/2">
               {PhotoButton}
             </div>
           </div>
@@ -2405,7 +2536,7 @@ export default function CameraPage() {
 
           <div className="shrink-0 bg-black px-5 pt-3 pb-8">
             <div className="flex items-center justify-between">
-              {PhotoButton}
+              <div className="w-14 h-14" />
               {ShutterButton}
               {SettingsButton}
             </div>
