@@ -389,56 +389,73 @@ export default function AddSamplePage() {
     };
   }, [baseRect, safeBoxWidthRatio, safeBoxHeightRatio]);
 
-  // 固定枠が今どの画像座標を見ているかを毎回計算
-  const cropRectImage = useMemo(() => {
-    if (!compareBasis.width || !compareBasis.height || !baseRect.width || !baseRect.height) {
-      return { x: 0, y: 0, width: 0, height: 0 };
+  // 見本確認プレビューも、保存処理と同じく実際の表示位置から逆算する
+  const [cropRatio, setCropRatio] = useState({ x: 0, y: 0, width: 0, height: 0 });
+
+  useEffect(() => {
+    if (
+      !compareBasis.width ||
+      !compareBasis.height ||
+      !displayBox.width ||
+      !displayBox.height ||
+      !frameRef.current ||
+      !imgRef.current
+    ) {
+      setCropRatio({ x: 0, y: 0, width: 0, height: 0 });
+      return;
     }
 
-    const scaledWidth = baseRect.width * imageScale;
-    const scaledHeight = baseRect.height * imageScale;
+    const frameRect = frameRef.current.getBoundingClientRect();
+    const imgRect = imgRef.current.getBoundingClientRect();
 
-    const imageLeft =
-      baseRect.left + imagePanX - (scaledWidth - baseRect.width) / 2;
-    const imageTop =
-      baseRect.top + imagePanY - (scaledHeight - baseRect.height) / 2;
+    if (!imgRect.width || !imgRect.height) {
+      setCropRatio({ x: 0, y: 0, width: 0, height: 0 });
+      return;
+    }
 
-    const cropLeftOnScreen = displayBox.left - imageLeft;
-    const cropTopOnScreen = displayBox.top - imageTop;
+    const boxLeftViewport = frameRect.left + displayBox.left;
+    const boxTopViewport = frameRect.top + displayBox.top;
 
-    let x = Math.round((cropLeftOnScreen / scaledWidth) * compareBasis.width);
-    let y = Math.round((cropTopOnScreen / scaledHeight) * compareBasis.height);
-    let width = Math.round((displayBox.width / scaledWidth) * compareBasis.width);
-    let height = Math.round((displayBox.height / scaledHeight) * compareBasis.height);
+    const cropLeftOnImage = boxLeftViewport - imgRect.left;
+    const cropTopOnImage = boxTopViewport - imgRect.top;
+
+    let x = Math.round((cropLeftOnImage / imgRect.width) * compareBasis.width);
+    let y = Math.round((cropTopOnImage / imgRect.height) * compareBasis.height);
+    let width = Math.round((displayBox.width / imgRect.width) * compareBasis.width);
+    let height = Math.round((displayBox.height / imgRect.height) * compareBasis.height);
 
     x = clamp(x, 0, Math.max(0, compareBasis.width - 1));
     y = clamp(y, 0, Math.max(0, compareBasis.height - 1));
     width = clamp(width, 1, compareBasis.width - x);
     height = clamp(height, 1, compareBasis.height - y);
 
-    return { x, y, width, height };
+    const next = {
+      x: x / compareBasis.width,
+      y: y / compareBasis.height,
+      width: width / compareBasis.width,
+      height: height / compareBasis.height,
+    };
+
+    setCropRatio((prev) => {
+      const same =
+        Math.abs(prev.x - next.x) < 0.000001 &&
+        Math.abs(prev.y - next.y) < 0.000001 &&
+        Math.abs(prev.width - next.width) < 0.000001 &&
+        Math.abs(prev.height - next.height) < 0.000001;
+      return same ? prev : next;
+    });
   }, [
     compareBasis.width,
     compareBasis.height,
-    baseRect,
-    displayBox,
+    displayBox.left,
+    displayBox.top,
+    displayBox.width,
+    displayBox.height,
     imageScale,
     imagePanX,
     imagePanY,
+    capturedImage,
   ]);
-
-  const cropRatio = useMemo(() => {
-    if (!compareBasis.width || !compareBasis.height || !cropRectImage.width || !cropRectImage.height) {
-      return { x: 0, y: 0, width: 0, height: 0 };
-    }
-
-    return {
-      x: cropRectImage.x / compareBasis.width,
-      y: cropRectImage.y / compareBasis.height,
-      width: cropRectImage.width / compareBasis.width,
-      height: cropRectImage.height / compareBasis.height,
-    };
-  }, [cropRectImage, compareBasis.width, compareBasis.height]);
 
   useEffect(() => {
     let cancelled = false;
