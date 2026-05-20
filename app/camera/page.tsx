@@ -43,6 +43,8 @@ const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
 
 const SAMPLES_KEY = "inspection:samples";
 const SELECTED_CAMERA_SAMPLE_ID_KEY = "inspection:selectedCameraSampleId";
+const CAMERA_SAMPLE_THUMBNAIL_SIZE = 96;
+const CAMERA_SAMPLE_THUMBNAIL_QUALITY = 0.76;
 const DEFAULT_LIVE_GUIDE_THRESHOLD_OFFSET = 0.12;
 const DEFAULT_LIVE_GUIDE_INTERVAL_MS = 1500;
 const LIVE_MAX_BOXES = 1;
@@ -341,6 +343,39 @@ function dataUrlToImage(dataUrl: string): Promise<HTMLImageElement> {
   });
 }
 
+async function createCameraSampleThumbnail(dataUrl: string): Promise<string> {
+  if (!dataUrl) return "";
+
+  const img = await dataUrlToImage(dataUrl);
+  const canvas = document.createElement("canvas");
+  canvas.width = CAMERA_SAMPLE_THUMBNAIL_SIZE;
+  canvas.height = CAMERA_SAMPLE_THUMBNAIL_SIZE;
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return dataUrl;
+
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const sourceSize = Math.min(img.naturalWidth, img.naturalHeight);
+  const sourceX = Math.max(0, Math.round((img.naturalWidth - sourceSize) / 2));
+  const sourceY = Math.max(0, Math.round((img.naturalHeight - sourceSize) / 2));
+
+  ctx.drawImage(
+    img,
+    sourceX,
+    sourceY,
+    sourceSize,
+    sourceSize,
+    0,
+    0,
+    canvas.width,
+    canvas.height
+  );
+
+  return canvas.toDataURL("image/jpeg", CAMERA_SAMPLE_THUMBNAIL_QUALITY);
+}
+
 function toGrayArray(ctx: CanvasRenderingContext2D, width: number, height: number) {
   const imageData = ctx.getImageData(0, 0, width, height).data;
   const out = new Float32Array(width * height);
@@ -527,6 +562,7 @@ export default function CameraPage() {
   const [cameraTemplateInfo, setCameraTemplateInfo] = useState<{ width: number; height: number } | null>(null);
   const [liveTemplateSourceType, setLiveTemplateSourceType] = useState<"live" | "review" | "thumb" | "none">("none");
   const [cameraSamples, setCameraSamples] = useState<SampleItem[]>([]);
+  const [cameraSampleThumbMap, setCameraSampleThumbMap] = useState<Record<string, string>>({});
   const [selectedCameraSampleId, setSelectedCameraSampleId] = useState("");
   const [isSamplePickerOpen, setIsSamplePickerOpen] = useState(false);
   const [videoDisplayRect, setVideoDisplayRect] = useState<Rect>({ left: 0, top: 0, width: 0, height: 0 });
@@ -597,6 +633,36 @@ export default function CameraPage() {
       return { samples: [] as SampleItem[], selectedSample: null as SampleItem | null };
     }
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const buildSampleThumbnails = async () => {
+      const entries = await Promise.all(
+        cameraSamples.map(async (sample) => {
+          const source = sample.thumbUrl || sample.compareUrl || sample.cameraCompareUrl || "";
+          if (!source) return [sample.id, ""] as const;
+
+          try {
+            const thumb = await createCameraSampleThumbnail(source);
+            return [sample.id, thumb] as const;
+          } catch {
+            return [sample.id, source] as const;
+          }
+        })
+      );
+
+      if (!cancelled) {
+        setCameraSampleThumbMap(Object.fromEntries(entries));
+      }
+    };
+
+    void buildSampleThumbnails();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [cameraSamples]);
 
   const updateVideoDisplayRect = useCallback(() => {
     const frame = previewFrameRef.current;
@@ -2245,7 +2311,12 @@ export default function CameraPage() {
   const selectedCameraSample =
     cameraSamples.find((sample) => sample.id === selectedCameraSampleId) ||
     chooseCameraSample(cameraSamples, selectedCameraSampleId);
-  const selectedCameraSamplePreview = selectedCameraSample?.thumbUrl || selectedCameraSample?.compareUrl || selectedCameraSample?.cameraCompareUrl || "";
+  const selectedCameraSamplePreview =
+    (selectedCameraSample?.id ? cameraSampleThumbMap[selectedCameraSample.id] : "") ||
+    selectedCameraSample?.thumbUrl ||
+    selectedCameraSample?.compareUrl ||
+    selectedCameraSample?.cameraCompareUrl ||
+    "";
 
   const renderSampleSelector = (containerClassName: string, panelClassName: string, buttonClassName = "w-14 h-14") => (
     <>
@@ -2279,7 +2350,7 @@ export default function CameraPage() {
             {cameraSamples.length > 0 ? (
               <div className="grid grid-cols-4 gap-2 max-h-[38vh] overflow-y-auto pr-1">
                 {cameraSamples.map((sample, index) => {
-                  const preview = sample.thumbUrl || sample.compareUrl || sample.cameraCompareUrl || "";
+                  const preview = cameraSampleThumbMap[sample.id] || sample.thumbUrl || sample.compareUrl || sample.cameraCompareUrl || "";
                   const active = sample.id === selectedCameraSampleId;
 
                   return (
