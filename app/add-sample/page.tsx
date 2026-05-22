@@ -9,7 +9,7 @@ const PENDING_SELECTED_SAMPLE_ID_KEY = "inspection:pendingSelectedSampleId";
 const CAMERA_BASE_LONG_SIDE = 960;
 
 const MAX_SAMPLES = 6;
-const PAGE_VERSION = "add-sample-review-resized-live-01";
+const PAGE_VERSION = "add-sample-review-resized-live-02";
 
 const MIN_BOX_W = 0.08;
 const MAX_BOX_W = 0.8;
@@ -292,6 +292,7 @@ export default function AddSamplePage() {
   const [imagePanX, setImagePanX] = useState(0);
   const [imagePanY, setImagePanY] = useState(0);
   const [isLandscape, setIsLandscape] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
   useEffect(() => {
     const updateOrientation = () => {
@@ -622,6 +623,7 @@ export default function AddSamplePage() {
   };
 
   const handleSave = async () => {
+    setSaveError("");
     if (!capturedImage || !compareBasis.width || !compareBasis.height) return;
     if (!frameRef.current || !imgRef.current) return;
 
@@ -685,34 +687,9 @@ export default function AddSamplePage() {
     const compareUrl = cropCanvas.toDataURL("image/png");
 
     const {
-      x: liveScaleX,
-      y: liveScaleY,
       originalWidth: captureOriginalWidth,
       originalHeight: captureOriginalHeight,
     } = getLiveResizeScale(captureInfo, naturalWidth, naturalHeight, compareWidth, compareHeight);
-
-    const cameraSrcW = Math.max(1, Math.round(srcW * liveScaleX));
-    const cameraSrcH = Math.max(1, Math.round(srcH * liveScaleY));
-
-    const cameraCropCanvas = document.createElement("canvas");
-    cameraCropCanvas.width = cameraSrcW;
-    cameraCropCanvas.height = cameraSrcH;
-    const cameraCropCtx = cameraCropCanvas.getContext("2d");
-    if (!cameraCropCtx) return;
-
-    cameraCropCtx.drawImage(
-      cropCanvas,
-      0,
-      0,
-      srcW,
-      srcH,
-      0,
-      0,
-      cameraSrcW,
-      cameraSrcH
-    );
-
-    const cameraCompareUrl = cameraCropCanvas.toDataURL("image/png");
 
     const thumbCanvas = document.createElement("canvas");
     const thumbBase = 140;
@@ -738,6 +715,12 @@ export default function AddSamplePage() {
       }
     } catch {}
 
+    // 旧仕様の cameraCompareUrl は容量が大きくなりやすいため、保存し直すタイミングで削除する。
+    existing = existing.map((item) => {
+      const { cameraCompareUrl: _cameraCompareUrl, ...rest } = item as SampleItem;
+      return rest as SampleItem;
+    });
+
     if (existing.length >= MAX_SAMPLES) {
       alert("見本は最大6件までです。");
       return;
@@ -762,7 +745,6 @@ export default function AddSamplePage() {
       color: nextColor,
       thumbUrl,
       compareUrl,
-      cameraCompareUrl,
       cameraCompareSource: "review-resized",
       captureOriginalWidth,
       captureOriginalHeight,
@@ -775,7 +757,14 @@ export default function AddSamplePage() {
       cameraBaseLongSide: CAMERA_BASE_LONG_SIDE,
     };
 
-    localStorage.setItem(SAMPLES_KEY, JSON.stringify([...existing, nextItem]));
+    try {
+      localStorage.setItem(SAMPLES_KEY, JSON.stringify([...existing, nextItem]));
+    } catch (error) {
+      console.error("見本の保存に失敗しました", error);
+      setSaveError("見本の保存に失敗しました。端末の保存容量が不足している可能性があります。不要な見本を削除してからもう一度お試しください。");
+      return;
+    }
+
     sessionStorage.setItem(PENDING_SELECTED_SAMPLE_ID_KEY, nextItem.id);
     router.push("/review");
   };
@@ -926,6 +915,12 @@ export default function AddSamplePage() {
             />
           </div>
         </div>
+
+        {saveError ? (
+          <div className="mb-3 rounded-2xl border border-red-500/40 bg-red-950/50 px-4 py-3 text-sm leading-6 text-red-100">
+            {saveError}
+          </div>
+        ) : null}
 
         <div className="flex items-center justify-center gap-3">
           <button

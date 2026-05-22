@@ -70,6 +70,12 @@ type SampleItem = {
   compareUrl?: string;
   cameraCompareUrl?: string;
   cameraCompareSource?: "review-resized" | "live-frame" | "review";
+  captureOriginalWidth?: number;
+  captureOriginalHeight?: number;
+  captureStoredWidth?: number;
+  captureStoredHeight?: number;
+  captureVideoWidth?: number;
+  captureVideoHeight?: number;
   aspectRatio?: number;
   savedResolution?: number;
   cameraBaseLongSide?: number;
@@ -119,11 +125,32 @@ function getCameraSampleSource(sample: SampleItem | null | undefined): {
   sourceType: "live" | "review" | "thumb" | "none";
 } {
   if (!sample) return { src: "", sourceType: "none" };
-  if (sample.cameraCompareUrl) return { src: sample.cameraCompareUrl, sourceType: "live" };
-  if (sample.compareUrl) return { src: sample.compareUrl, sourceType: "review" };
+  // cameraCompareUrl は容量が大きくなりやすいため、ライブ検知では保存済み compareUrl から一時生成する。
+  if (sample.compareUrl) return { src: sample.compareUrl, sourceType: "live" };
   if (sample.thumbUrl) return { src: sample.thumbUrl, sourceType: "thumb" };
   return { src: "", sourceType: "none" };
 }
+
+function getCompareBasisSize(sample: SampleItem, imageWidth: number, imageHeight: number) {
+  const storedWidth =
+    typeof sample.captureStoredWidth === "number" && Number.isFinite(sample.captureStoredWidth) && sample.captureStoredWidth > 0
+      ? sample.captureStoredWidth
+      : imageWidth;
+  const storedHeight =
+    typeof sample.captureStoredHeight === "number" && Number.isFinite(sample.captureStoredHeight) && sample.captureStoredHeight > 0
+      ? sample.captureStoredHeight
+      : imageHeight;
+  const savedResolution =
+    typeof sample.savedResolution === "number" && Number.isFinite(sample.savedResolution) && sample.savedResolution > 0
+      ? sample.savedResolution
+      : Math.max(storedWidth, storedHeight);
+  const compareScale = Math.min(1, savedResolution / Math.max(1, storedWidth));
+  return {
+    width: Math.max(1, Math.round(storedWidth * compareScale)),
+    height: Math.max(1, Math.round(storedHeight * compareScale)),
+  };
+}
+
 
 function chooseCameraSample(samples: SampleItem[], preferredId: string): SampleItem | null {
   if (samples.length === 0) return null;
@@ -640,7 +667,7 @@ export default function CameraPage() {
     const buildSampleThumbnails = async () => {
       const entries = await Promise.all(
         cameraSamples.map(async (sample) => {
-          const source = sample.thumbUrl || sample.compareUrl || sample.cameraCompareUrl || "";
+          const source = sample.thumbUrl || sample.compareUrl || "";
           if (!source) return [sample.id, ""] as const;
 
           try {
@@ -882,7 +909,12 @@ export default function CameraPage() {
     const label = target?.order ? `見本${target.order}` : "この見本";
     if (!window.confirm(`${label}を削除しますか？`)) return;
 
-    const nextSamples = cameraSamples.filter((sample) => sample.id !== sampleId);
+    const nextSamples = cameraSamples
+      .filter((sample) => sample.id !== sampleId)
+      .map((sample) => {
+        const { cameraCompareUrl: _cameraCompareUrl, ...rest } = sample;
+        return rest;
+      });
     localStorage.setItem(SAMPLES_KEY, JSON.stringify(nextSamples));
 
     const nextSelected =
@@ -1118,14 +1150,27 @@ export default function CameraPage() {
 
         const baseLongSide = Math.max(img.naturalWidth, img.naturalHeight);
         const normalizedBaseScale = Math.min(1, LIVE_TEMPLATE_LONG_SIDE / Math.max(1, baseLongSide));
+        const compareBasis = getCompareBasisSize(sample, img.naturalWidth, img.naturalHeight);
+        const liveWidthScale = canUseLivePixelSize
+          ? video!.videoWidth / Math.max(1, compareBasis.width)
+          : 1;
+        const liveHeightScale = canUseLivePixelSize
+          ? video!.videoHeight / Math.max(1, compareBasis.height)
+          : 1;
+        const liveRawWidth = canUseLivePixelSize
+          ? Math.max(1, img.naturalWidth * liveWidthScale)
+          : img.naturalWidth;
+        const liveRawHeight = canUseLivePixelSize
+          ? Math.max(1, img.naturalHeight * liveHeightScale)
+          : img.naturalHeight;
         const baseWidth = canUseLivePixelSize
-          ? Math.max(16, Math.round(img.naturalWidth * (processScaleForVideo ?? 1)))
+          ? Math.max(16, Math.round(liveRawWidth * (processScaleForVideo ?? 1)))
           : Math.max(16, Math.round(img.naturalWidth * normalizedBaseScale));
         const baseHeight = canUseLivePixelSize
-          ? Math.max(16, Math.round(img.naturalHeight * (processScaleForVideo ?? 1)))
+          ? Math.max(16, Math.round(liveRawHeight * (processScaleForVideo ?? 1)))
           : Math.max(16, Math.round(img.naturalHeight * normalizedBaseScale));
-        const baseRawWidth = canUseLivePixelSize ? baseWidth : img.naturalWidth;
-        const baseRawHeight = canUseLivePixelSize ? baseHeight : img.naturalHeight;
+        const baseRawWidth = canUseLivePixelSize ? liveRawWidth : img.naturalWidth;
+        const baseRawHeight = canUseLivePixelSize ? liveRawHeight : img.naturalHeight;
 
         const variants = liveTemplateScaleFactors.map(({ factor, purpose }) => {
           const width = Math.max(16, Math.round(baseWidth * factor));
@@ -2315,7 +2360,6 @@ export default function CameraPage() {
     (selectedCameraSample?.id ? cameraSampleThumbMap[selectedCameraSample.id] : "") ||
     selectedCameraSample?.thumbUrl ||
     selectedCameraSample?.compareUrl ||
-    selectedCameraSample?.cameraCompareUrl ||
     "";
 
   const renderSampleSelector = (containerClassName: string, panelClassName: string, buttonClassName = "w-14 h-14") => (
@@ -2350,7 +2394,7 @@ export default function CameraPage() {
             {cameraSamples.length > 0 ? (
               <div className="grid grid-cols-4 gap-2 max-h-[38vh] overflow-y-auto pr-1">
                 {cameraSamples.map((sample, index) => {
-                  const preview = cameraSampleThumbMap[sample.id] || sample.thumbUrl || sample.compareUrl || sample.cameraCompareUrl || "";
+                  const preview = cameraSampleThumbMap[sample.id] || sample.thumbUrl || sample.compareUrl || "";
                   const active = sample.id === selectedCameraSampleId;
 
                   return (
