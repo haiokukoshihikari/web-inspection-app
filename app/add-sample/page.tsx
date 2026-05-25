@@ -6,10 +6,11 @@ import { useRouter } from "next/navigation";
 const SAMPLES_KEY = "inspection:samples";
 const RESOLUTION_KEY = "inspection:compareResolution";
 const PENDING_SELECTED_SAMPLE_ID_KEY = "inspection:pendingSelectedSampleId";
+const PENDING_SHARED_PROFILE_KEY = "inspection:pendingSharedProfile";
 const CAMERA_BASE_LONG_SIDE = 960;
 
 const MAX_SAMPLES = 6;
-const PAGE_VERSION = "add-sample-review-resized-live-02";
+const PAGE_VERSION = "add-sample-review-resized-live-03";
 
 const MIN_BOX_W = 0.08;
 const MAX_BOX_W = 0.8;
@@ -18,6 +19,25 @@ const MAX_BOX_H = 0.6;
 const MAX_IMAGE_SCALE = 2.5;
 
 type CompareResolutionMode = 1200 | 1600 | 2000 | 2400;
+
+function normalizeCompareResolution(value: unknown): CompareResolutionMode | null {
+  const n = Number(value);
+  if ([1200, 1600, 2000, 2400].includes(n)) {
+    return n as CompareResolutionMode;
+  }
+  return null;
+}
+
+function readPendingCompareResolution(): CompareResolutionMode | null {
+  try {
+    const raw = sessionStorage.getItem(PENDING_SHARED_PROFILE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { compareResolution?: unknown } | null;
+    return normalizeCompareResolution(parsed?.compareResolution);
+  } catch {
+    return null;
+  }
+}
 
 type SampleItem = {
   id: string;
@@ -318,12 +338,13 @@ export default function AddSamplePage() {
 
       setCaptureInfo(readCaptureDebugInfo());
 
-      const savedRes = localStorage.getItem(RESOLUTION_KEY);
-      if (savedRes) {
-        const n = Number(savedRes) as CompareResolutionMode;
-        if ([1200, 1600, 2000, 2400].includes(n)) {
-          setCompareResolution(n);
-        }
+      const pendingRes = readPendingCompareResolution();
+      const savedRes = normalizeCompareResolution(localStorage.getItem(RESOLUTION_KEY));
+      const nextRes = pendingRes ?? savedRes;
+      if (nextRes) {
+        setCompareResolution(nextRes);
+        // review側が共有設定から使う解像度と、add-sampleで保存する savedResolution を揃える。
+        localStorage.setItem(RESOLUTION_KEY, String(nextRes));
       }
     } catch {}
   }, []);
