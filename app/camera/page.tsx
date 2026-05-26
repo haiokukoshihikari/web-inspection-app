@@ -277,7 +277,12 @@ function isInspectionProfile(value: unknown): value is InspectionProfile {
 
 
 function sanitizeLiveScaleOptions(value: unknown): number[] {
+  // 未設定・古い共有設定の場合だけデフォルト値を使う
+  if (value === undefined || value === null) return [...DEFAULT_LIVE_SCALE_OPTIONS];
+
+  // 明示的な空配列 [] は「距離誘導OFF」として許可する
   if (!Array.isArray(value)) return [...DEFAULT_LIVE_SCALE_OPTIONS];
+
   const allowed = new Set<number>(LIVE_SCALE_OPTIONS as readonly number[]);
   const next = Array.from(
     new Set(
@@ -286,7 +291,8 @@ function sanitizeLiveScaleOptions(value: unknown): number[] {
         .filter((item) => Number.isFinite(item) && allowed.has(item as number))
     )
   ).sort((a, b) => a - b) as number[];
-  return next.length > 0 ? next : [...DEFAULT_LIVE_SCALE_OPTIONS];
+
+  return next;
 }
 
 function sanitizeLiveRoiWidthRatio(value: unknown): number {
@@ -494,8 +500,8 @@ function buildScaleFactors(scaleOptions: number[]) {
 
 function toggleScaleOption(current: number[], value: number) {
   if (current.includes(value)) {
-    const next = current.filter((item) => item !== value);
-    return next.length > 0 ? next : [value];
+    // 全OFFを許可する。空配列は距離誘導OFFを意味する。
+    return current.filter((item) => item !== value);
   }
   return [...current, value].sort((a, b) => a - b);
 }
@@ -625,7 +631,11 @@ export default function CameraPage() {
   const liveTemplateScaleFactors = useMemo(() => {
     const factors = [
       ...BLUE_TEMPLATE_SCALE_FACTORS.map((factor) => ({ factor, purpose: "blue" as const })),
-      ...DISTANCE_GUIDE_TEMPLATE_SCALE_FACTORS.map((factor) => ({ factor, purpose: "guide" as const })),
+      ...(
+        liveScaleOptions.length > 0
+          ? DISTANCE_GUIDE_TEMPLATE_SCALE_FACTORS.map((factor) => ({ factor, purpose: "guide" as const }))
+          : []
+      ),
     ];
     const seen = new Set<string>();
     return factors.filter((item) => {
@@ -634,7 +644,7 @@ export default function CameraPage() {
       seen.add(key);
       return true;
     });
-  }, []);
+  }, [liveScaleOptions.length]);
 
   const readCameraSamples = useCallback(() => {
     try {
@@ -1275,7 +1285,7 @@ export default function CameraPage() {
       const distanceGuideCenterRoiY = roiY;
 
       setLiveProcessInfo(
-        `${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} (${tpl.sourceType}) / blue 95/100/105 / guide 80/90/110/120 / roi ${Math.round((roiW / pw) * 100)}x${Math.round((roiH / ph) * 100)}%`
+        `${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} (${tpl.sourceType}) / blue 95/100/105 / guide ${liveScaleOptions.length > 0 ? "80/90/110/120" : "OFF"} / roi ${Math.round((roiW / pw) * 100)}x${Math.round((roiH / ph) * 100)}%`
       );
       let bestBox: LiveBox | null = null;
       let bestDistanceGuideBox: LiveBox | null = null;
@@ -2231,7 +2241,7 @@ export default function CameraPage() {
                   <div className="space-y-2">
                     <div className="flex items-center justify-between text-sm">
                       <div>scale許容</div>
-                      <div className="tabular-nums">±{liveScaleOptions.join(" / ")}%</div>
+                      <div className="tabular-nums">{liveScaleOptions.length > 0 ? `±${liveScaleOptions.join(" / ")}%` : "OFF"}</div>
                     </div>
                     <div className="flex flex-wrap gap-2">
                       {LIVE_SCALE_OPTIONS.map((option) => {
