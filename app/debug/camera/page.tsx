@@ -223,7 +223,7 @@ function sanitizeLiveScaleOptions(value: unknown): number[] {
         .filter((item) => Number.isFinite(item) && allowed.has(item as number))
     )
   ).sort((a, b) => a - b) as number[];
-  return next.length > 0 ? next : [...DEFAULT_LIVE_SCALE_OPTIONS];
+  return next;
 }
 
 function sanitizeLiveRoiWidthRatio(value: unknown): number {
@@ -398,8 +398,7 @@ function buildScaleFactors(scaleOptions: number[]) {
 
 function toggleScaleOption(current: number[], value: number) {
   if (current.includes(value)) {
-    const next = current.filter((item) => item !== value);
-    return next.length > 0 ? next : [value];
+    return current.filter((item) => item !== value);
   }
   return [...current, value].sort((a, b) => a - b);
 }
@@ -523,10 +522,14 @@ export default function DebugCameraPage() {
   const distanceGuideDeltaHistoryRef = useRef<number[]>([]);
 
   const liveTemplateScaleFactors = useMemo(() => {
+    const guideScaleFactors = buildScaleFactors(liveScaleOptions)
+      .filter((factor) => Math.abs(factor - 1) > 0.0001);
+
     const factors = [
       ...BLUE_TEMPLATE_SCALE_FACTORS.map((factor) => ({ factor, purpose: "blue" as const })),
-      ...DISTANCE_GUIDE_TEMPLATE_SCALE_FACTORS.map((factor) => ({ factor, purpose: "guide" as const })),
+      ...guideScaleFactors.map((factor) => ({ factor, purpose: "guide" as const })),
     ];
+
     const seen = new Set<string>();
     return factors.filter((item) => {
       const key = `${item.purpose}:${item.factor}`;
@@ -534,7 +537,7 @@ export default function DebugCameraPage() {
       seen.add(key);
       return true;
     });
-  }, []);
+  }, [liveScaleOptions]);
 
 
   const updateVideoDisplayRect = useCallback(() => {
@@ -1087,7 +1090,7 @@ export default function DebugCameraPage() {
       const distanceGuideCenterRoiY = roiY;
 
       setLiveProcessInfo(
-        `${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} (${tpl.sourceType}) / blue 95/100/105 / guide 80/90/110/120 / roi ${Math.round((roiW / pw) * 100)}x${Math.round((roiH / ph) * 100)}%`
+        `${pw}x${ph} / tpl ${tpl.baseWidth}x${tpl.baseHeight} (${tpl.sourceType}) / blue 95/100/105 / guide ${liveScaleOptions.length > 0 ? liveScaleOptions.map((pct) => `±${pct}`).join("/") : "OFF"} / roi ${Math.round((roiW / pw) * 100)}x${Math.round((roiH / ph) * 100)}%`
       );
       let bestBox: LiveBox | null = null;
       let bestDistanceGuideBox: LiveBox | null = null;
@@ -2043,7 +2046,7 @@ export default function DebugCameraPage() {
                   <div className="space-y-2">
                     <div className="flex items-center justify-between text-sm">
                       <div>scale許容</div>
-                      <div className="tabular-nums">±{liveScaleOptions.join(" / ")}%</div>
+                      <div className="tabular-nums">{liveScaleOptions.length > 0 ? `±${liveScaleOptions.join(" / ")}%` : "OFF"}</div>
                     </div>
                     <div className="flex flex-wrap gap-2">
                       {LIVE_SCALE_OPTIONS.map((option) => {
