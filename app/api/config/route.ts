@@ -54,18 +54,32 @@ function isFiniteNumber(value: unknown): value is number {
 }
 
 function sanitizeLiveScaleOptions(value: unknown): number[] {
-  if (!Array.isArray(value)) return [...DEFAULT_LIVE_SCALE_OPTIONS];
+  // 未設定・古い設定の場合だけデフォルト値を使う
+  if (value === undefined || value === null) {
+    return [...DEFAULT_LIVE_SCALE_OPTIONS];
+  }
+
+  // 明示的な空配列 [] は「距離誘導OFF」として許可する
+  if (!Array.isArray(value)) {
+    return [...DEFAULT_LIVE_SCALE_OPTIONS];
+  }
+
   const allowed = new Set<number>(LIVE_SCALE_OPTIONS as readonly number[]);
+
   const next = Array.from(
     new Set(
       value
         .map((item) =>
-          typeof item === "number" && Number.isFinite(item) ? Math.round(item) : NaN
+          typeof item === "number" && Number.isFinite(item)
+            ? Math.round(item)
+            : NaN
         )
         .filter((item) => Number.isFinite(item) && allowed.has(item as number))
     )
   ).sort((a, b) => a - b) as number[];
-  return next.length > 0 ? next : [...DEFAULT_LIVE_SCALE_OPTIONS];
+
+  // ここで空配列を許可する
+  return next;
 }
 
 function sanitizeLiveRoiWidthRatio(value: unknown): number {
